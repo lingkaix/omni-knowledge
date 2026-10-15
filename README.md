@@ -18,7 +18,8 @@ Use **Refresh index** after an agent edits files.
 Select a result to preview it; **Open original** opens the source in its installed application.
 See [the desktop guide](docs/gui.md) for controls and preview limits.
 The main workspace keeps one search row at the top, a collapsible directory tree for browsing, and ranked file results during search.
-Use **Search options** for tags or another search method, and clear the query and filters inside the search field.
+Enable the compact search-method chips and enter comma-separated keywords in one field, including exact tags.
+Search ignores case by default, matches any keyword through any enabled method, and clears inside the search field.
 **File details** shows readable file properties, copyable paths, and labelled tags and notes saved with the library.
 The build script applies and verifies a local ad-hoc signature; it does not create a notarized distribution package.
 The app includes the core search and document parsers, but video processing, embeddings, and ASR still require external tools or models.
@@ -43,7 +44,7 @@ cargo build --release --bin omni
 ```
 
 Use `--json` for structured agent output; errors return a nonzero exit code.
-Tags match exact values and repeated filters require every tag.
+CLI tag filters match complete values without case sensitivity by default, and repeated filters require every tag.
 `search --mode files` includes unsupported binary formats through names and descriptions.
 `search --recursive` combines independently indexed nested libraries and returns their root identities.
 Run `omni --help` and a subcommand's `--help` for the complete interface.

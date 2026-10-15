@@ -60,5 +60,4 @@ The disposable `/private/tmp` fixture copy was removed after restoring the photo
 Semantic candidates still use the existing model and exact cosine scores without a calibrated relevance cutoff.
 The GUI groups the returned bounded evidence set; reaching 10,000 records can omit other corpus files and is explicitly reported.
 Text evidence follows the published snapshot, while preview reads the live file; external changes can make an indexed line stale.
-A pre-existing BM25 filename-only fallback can report line 1 for a metadata-only binary; the numbered preview refuses an unavailable line.
-The search module owns correcting that fallback when the next search-evidence change is undertaken.
+The pre-existing BM25 filename-only fallback that could invent line 1 was corrected in [unified search](2026-10-15-unified-search.md).

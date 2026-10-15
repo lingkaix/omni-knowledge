@@ -14,6 +14,10 @@ Keep cache synchronization outside disk parsing, retrieval, and model requests.
 Use conservative trigram candidate filtering for eligible literal grep patterns, followed by parallel regex verification.
 Keep exact tags separate from relevance scoring.
 Provide independent lexical and semantic modes and reciprocal-rank fusion for hybrid results.
+For the unified desktop query, make tags a peer retrieval method and share comma-separated alternatives across all enabled methods.
+Use case-insensitive whole-tag comparisons against original tag variants so older indexes remain usable.
+Fuse each method and keyword's distinct file ranks; retain navigable evidence without giving repeated fragments extra ranking votes.
+Keep explicit CLI required-tag filters and regex queries available through their existing interface.
 Start with exact cosine scoring over local vectors so results are inspectable without an approximate-index tuning stage.
 Connect to the existing local WeMM service instead of copying its patched native runtime.
 Validate the model identifier, dimension, embedding space, and package fingerprint before sending content or comparing vectors.

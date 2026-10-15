@@ -47,6 +47,8 @@ fn repeated_searches_follow_publication_and_exact_tags() {
         }
         assert_eq!(kb.search(&options).unwrap().len(), 1);
         options.tags = vec!["Research".into()];
+        assert_eq!(kb.search(&options).unwrap().len(), 1);
+        options.case_sensitive = true;
         assert!(kb.search(&options).unwrap().is_empty());
     }
     fs::write(kb.root.join("raw/note.txt"), "publishedreplacementword\n").unwrap();

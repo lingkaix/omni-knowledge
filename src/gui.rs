@@ -28,7 +28,6 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     list::ListItem,
     menu::{PopupMenu, PopupMenuItem},
-    popover::Popover,
     tree::{TreeItem, TreeState, tree},
 };
 use wry::{
@@ -40,7 +39,9 @@ use wry::{
 use crate::file_actions::{self, DirectoryEntry};
 use crate::runtime::{self, BrewPackage, InstallLaunch, RuntimeStatus};
 use crate::status::{FolderState, FolderStatus, ServiceState, StatusProbe, StatusReport};
-use crate::{IndexOptions, IndexReport, KnowledgeBase, SearchHit, SearchMode, SearchOptions};
+use crate::{
+    IndexOptions, IndexReport, KnowledgeBase, SearchHit, SearchMethod, UnifiedSearchOptions,
+};
 
 /// Shared visible border and pointer-target height for native inputs and toolbar buttons.
 const CONTROL_HEIGHT: f32 = 28.;
@@ -51,13 +52,33 @@ const PREVIEW_LIMIT: usize = 32 * 1024 * 1024;
 /// Period between independent, metadata-only environment and index observations.
 const STATUS_INTERVAL: Duration = Duration::from_secs(12);
 
-/// Available retrieval choices in the visible and keyboard menu order.
-const SEARCH_MODES: [(SearchMode, &str); 5] = [
-    (SearchMode::Bm25, "Full text"),
-    (SearchMode::Grep, "Text pattern"),
-    (SearchMode::Semantic, "Meaning"),
-    (SearchMode::Hybrid, "Text + meaning"),
-    (SearchMode::Files, "File names & notes"),
+/// Independently enabled retrieval methods in their visible chip order.
+const SEARCH_METHODS: [(SearchMethod, &str, &str); 5] = [
+    (
+        SearchMethod::Bm25,
+        "Full text",
+        "Rank words in file contents, titles, and notes",
+    ),
+    (
+        SearchMethod::Grep,
+        "Text",
+        "Find literal text without case sensitivity; punctuation is literal",
+    ),
+    (
+        SearchMethod::Semantic,
+        "Meaning",
+        "Find related text and images through the local model",
+    ),
+    (
+        SearchMethod::Files,
+        "File names & notes",
+        "Find file names and saved notes",
+    ),
+    (
+        SearchMethod::Tags,
+        "Tags",
+        "Match exact tags without case sensitivity",
+    ),
 ];
 
 /// Trusted preview initialization; document source cannot supply executable scripts.
@@ -143,7 +164,7 @@ struct PreviewState {
 /// Files displayed per page; evidence is grouped before applying this presentation bound.
 const RESULT_PAGE_SIZE: usize = 50;
 
-/// One source with its best returned evidence first and every additional occurrence retained.
+/// One source in first-returned order with its unmodified retrieval records retained.
 struct RankedFile {
     path: String,
     indices: Vec<usize>,
@@ -166,11 +187,92 @@ fn ranked_files(hits: &[SearchHit]) -> Vec<RankedFile> {
     files
 }
 
-/// Describe returned file candidates separately from evidence fragments and unknown corpus totals.
-fn search_result_summary(hits: &[SearchHit], mode: SearchMode, shown: usize) -> String {
-    let files = ranked_files(hits).len();
+/// Identify photo-like candidates from their names, including RAW formats absent from MIME tables.
+/// SVG files with indexed source lines keep text navigation instead of image-only presentation.
+fn image_candidate(hits: &[SearchHit], file: &RankedFile) -> bool {
+    let path = Path::new(&file.path);
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let svg_lines = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        && file
+            .indices
+            .iter()
+            .any(|&index| hits[index].line.is_some_and(|line| line > 0));
+    !svg_lines
+        && (unsupported_image(path, mime.essence_str())
+            || crate::media::media_kind(path) == Some("image"))
+}
+
+/// Choose distinct navigable locations, preserving the first returned occurrence of each location.
+/// Images remain one file; recordings use ranges; text uses positive line numbers.
+fn displayed_evidence_indices(hits: &[SearchHit], file: &RankedFile) -> Vec<usize> {
+    if image_candidate(hits, file) {
+        return vec![file.indices[0]];
+    }
+    let path = Path::new(&file.path);
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let recording = matches!(crate::media::media_kind(path), Some("audio" | "video"))
+        || matches!(
+            mime.type_(),
+            mime_guess::mime::AUDIO | mime_guess::mime::VIDEO
+        );
+    let mut seen = BTreeSet::new();
+    let indices: Vec<_> = file
+        .indices
+        .iter()
+        .copied()
+        .filter(|&index| {
+            let hit = &hits[index];
+            if recording {
+                hit.start_seconds
+                    .filter(|time| time.is_finite() && *time >= 0.)
+                    .is_some_and(|start| {
+                        seen.insert((
+                            (if start == 0. { 0. } else { start }).to_bits(),
+                            hit.end_seconds
+                                .filter(|end| end.is_finite() && *end >= start)
+                                .map(f64::to_bits),
+                        ))
+                    })
+            } else {
+                hit.line
+                    .filter(|line| *line > 0)
+                    .is_some_and(|line| seen.insert((line as u64, None)))
+            }
+        })
+        .collect();
+    if indices.is_empty() {
+        vec![file.indices[0]]
+    } else {
+        indices
+    }
+}
+
+/// Describe files independently of raw retrieval records and distinguish model candidates from matches.
+fn search_result_summary(hits: &[SearchHit], candidates: bool, shown: usize) -> String {
+    let files = ranked_files(hits);
+    let mut lines = 0;
+    let mut moments = 0;
+    for file in &files {
+        if image_candidate(hits, file) {
+            continue;
+        }
+        for index in displayed_evidence_indices(hits, file) {
+            let hit = &hits[index];
+            if hit
+                .start_seconds
+                .is_some_and(|time| time.is_finite() && time >= 0.)
+            {
+                moments += 1;
+            } else if hit.line.is_some_and(|line| line > 0) {
+                lines += 1;
+            }
+        }
+    }
+    let files = files.len();
     let shown = shown.min(files);
-    let noun = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+    let noun = if candidates {
         "candidate files"
     } else {
         "files"
@@ -180,17 +282,40 @@ fn search_result_summary(hits: &[SearchHit], mode: SearchMode, shown: usize) -> 
     } else {
         ""
     };
+    let mut locations = String::new();
+    if lines > 0 {
+        locations.push_str(&format!(
+            " · {lines} text {}",
+            if lines == 1 { "location" } else { "locations" }
+        ));
+    }
+    if moments > 0 {
+        locations.push_str(&format!(
+            " · {moments} recording {}",
+            if moments == 1 { "moment" } else { "moments" }
+        ));
+    }
     format!(
-        "{shown} of {files} {noun} · {} evidence fragments{bound}",
+        "{shown} of {files} {noun}{locations} · {} retained retrieval records{bound}",
         hits.len()
     )
 }
 
 /// Describe an evidence location without treating similarity as a confidence percentage.
 fn evidence_label(hit: &SearchHit) -> String {
-    hit.line
-        .map(|line| format!("Line {line}"))
-        .or_else(|| hit.start_seconds.map(|time| format!("At {time:.1}s")))
+    hit.start_seconds
+        .filter(|time| time.is_finite() && *time >= 0.)
+        .map(
+            |time| match hit.end_seconds.filter(|end| end.is_finite() && *end > time) {
+                Some(end) => format!("At {time:.1}–{end:.1}s"),
+                None => format!("At {time:.1}s"),
+            },
+        )
+        .or_else(|| {
+            hit.line
+                .filter(|line| *line > 0)
+                .map(|line| format!("Line {line}"))
+        })
         .unwrap_or_else(|| "File evidence".into())
 }
 
@@ -392,7 +517,7 @@ fn browse_items(
         .collect()
 }
 
-/// Build ranked file rows, with additional occurrences collapsed beneath their source.
+/// Build ranked files with distinct text lines or recording moments below their source.
 fn match_items(
     hits: &[SearchHit],
     expanded: &BTreeSet<String>,
@@ -404,7 +529,8 @@ fn match_items(
         .enumerate()
         .take(limit)
         .map(|(rank, file)| {
-            let mut occurrences = file.indices.iter().map(|&index| {
+            let indices = displayed_evidence_indices(hits, &file);
+            let mut occurrences = indices.iter().map(|&index| {
                 let hit = &hits[index];
                 let id = format!("match:{index}:{}", hit.path);
                 targets.insert(
@@ -431,16 +557,27 @@ fn match_items(
                     ),
                 )
             });
-            let best_index = file.indices[0];
+            let best_index = indices[0];
             let best = &hits[best_index];
             let mut parent = occurrences.next().expect("ranked files contain evidence");
-            let location = if best.line.is_some() || best.start_seconds.is_some() {
+            let location = if !image_candidate(hits, &file)
+                && (best.line.is_some() || best.start_seconds.is_some())
+            {
                 format!(" · {}", evidence_label(best))
             } else {
                 String::new()
             };
-            let other = if file.indices.len() > 1 {
-                format!(" · {} more", file.indices.len() - 1)
+            let other = if indices.len() > 1 {
+                format!(
+                    " · +{} {}",
+                    indices.len() - 1,
+                    match (best.start_seconds.is_some(), indices.len() == 2) {
+                        (true, true) => "moment",
+                        (true, false) => "moments",
+                        (false, true) => "line",
+                        (false, false) => "lines",
+                    }
+                )
             } else {
                 String::new()
             };
@@ -567,35 +704,53 @@ struct PreviewRequest {
     issuer: String,
 }
 
-/// User-selected query restrictions captured separately from editable search controls.
-/// Normalized tags compare meaning rather than comma spacing or order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Editable query and enabled methods captured independently from the results on screen.
+#[derive(Clone, Debug)]
 struct SearchFilter {
     query: String,
-    mode: SearchMode,
-    tags: Vec<String>,
+    methods: Vec<SearchMethod>,
 }
 
+impl PartialEq for SearchFilter {
+    /// Compare normalized terms and enabled method sets instead of casing or comma spacing.
+    fn eq(&self, other: &Self) -> bool {
+        self.options().keywords() == other.options().keywords() && self.methods == other.methods
+    }
+}
+impl Eq for SearchFilter {}
+
 impl SearchFilter {
-    /// Capture query text and selected mode while normalizing exact-tag set equality.
-    fn new(query: String, mode: SearchMode, mut tags: Vec<String>) -> Self {
-        tags.sort();
-        tags.dedup();
-        Self { query, mode, tags }
+    /// Capture readable query text and normalize the independent method set.
+    fn new(query: String, mut methods: Vec<SearchMethod>) -> Self {
+        methods.sort();
+        methods.dedup();
+        Self { query, methods }
     }
 
-    /// Distinguish an actual tree restriction from the next query's mode setting.
-    fn restricts_files(&self) -> bool {
-        !self.query.trim().is_empty() || !self.tags.is_empty()
-    }
-
-    /// Empty text uses exact-tag file browsing even when a semantic mode remains selected.
-    fn effective_mode(&self) -> SearchMode {
-        if self.query.trim().is_empty() {
-            SearchMode::Files
-        } else {
-            self.mode
+    /// Build the shared retrieval request without another GUI-specific query parser.
+    fn options(&self) -> UnifiedSearchOptions {
+        UnifiedSearchOptions {
+            query: self.query.clone(),
+            methods: self.methods.clone(),
+            limit: 10_000,
         }
+    }
+
+    /// Comma-only input has the same browsing meaning as an empty input.
+    fn restricts_files(&self) -> bool {
+        !self.options().keywords().is_empty()
+    }
+
+    /// A selected model method requires candidate wording only for an actual text query.
+    fn has_candidates(&self) -> bool {
+        self.restricts_files() && self.methods.contains(&SearchMethod::Semantic)
+    }
+
+    /// Reject an empty method set before dispatch, while retaining the last successful results.
+    fn validation_error(&self) -> Option<&'static str> {
+        (self.restricts_files() && self.methods.is_empty()).then_some(
+            "Enable at least one search method below the search field, then select Search",
+        )
     }
 }
 
@@ -603,7 +758,7 @@ impl SearchFilter {
 struct SearchRequest {
     root: PathBuf,
     filter: SearchFilter,
-    options: SearchOptions,
+    options: UnifiedSearchOptions,
     revision: u64,
 }
 
@@ -615,11 +770,12 @@ enum SearchLane {
 }
 
 impl SearchLane {
-    /// Route the effective mode, including tag-only queries already converted to Files.
-    fn for_mode(mode: SearchMode) -> Self {
-        match mode {
-            SearchMode::Semantic | SearchMode::Hybrid => Self::Model,
-            SearchMode::Files | SearchMode::Grep | SearchMode::Bm25 => Self::Local,
+    /// Keep any nonempty query with Meaning enabled on the model worker.
+    fn for_filter(filter: &SearchFilter) -> Self {
+        if filter.has_candidates() {
+            Self::Model
+        } else {
+            Self::Local
         }
     }
 }
@@ -644,7 +800,7 @@ impl SearchLanes {
     /// Replace all undispatched work and return the lane for the newest user intent.
     fn enqueue(&mut self, request: SearchRequest) -> SearchLane {
         self.clear();
-        let lane = SearchLane::for_mode(request.options.mode);
+        let lane = SearchLane::for_filter(&request.filter);
         self.current_revision = Some(request.revision);
         self.lane(lane).enqueue(request);
         lane
@@ -696,81 +852,50 @@ fn refresh_authored_metadata(
     new_source || (!dirty && read_revision == current_revision)
 }
 
-/// Show the in-field reset affordance for typed, tag-only, and already-published searches.
-fn search_filter_is_clearable(query: &str, tags: &[String], published_filter: bool) -> bool {
-    !query.is_empty() || !tags.is_empty() || published_filter
+/// Keep in-field clearing available for typed text and already-published queries.
+fn search_filter_is_clearable(query: &str, published_filter: bool) -> bool {
+    !query.is_empty() || published_filter
 }
 
-/// Keep optional restrictions discoverable when their disclosure is closed.
-fn search_options_label(mode: SearchMode, tag_count: usize) -> String {
-    let mut label = "Search options".to_owned();
-    if mode != SearchMode::Bm25
-        && let Some((_, name)) = SEARCH_MODES
-            .iter()
-            .find(|(candidate, _)| *candidate == mode)
-    {
-        label.push_str(" · ");
-        label.push_str(name);
-    }
-    if tag_count > 0 {
-        label.push_str(&format!(
-            " · {tag_count} {}",
-            if tag_count == 1 { "tag" } else { "tags" }
-        ));
-    }
-    label
-}
-
-/// Summarize the displayed results, not unapplied edits, and explain their exact restrictions on hover.
-/// With no results filter, a nondefault mode configures the next query without implying filtered files.
-fn search_options_presentation(
+/// Keep the previous result identity readable while edited chips or terms await Search.
+fn search_methods_presentation(
     draft: &SearchFilter,
     applied: Option<&SearchFilter>,
 ) -> (String, String) {
-    let showing = applied.unwrap_or(draft);
-    let mode = if applied.is_some() && showing.query.trim().is_empty() {
-        SearchMode::Bm25
-    } else {
-        showing.mode
-    };
-    let mut label = search_options_label(mode, showing.tags.len());
     let pending = applied.map_or_else(|| draft.restricts_files(), |applied| applied != draft);
-    if pending {
-        label.push_str(" · changes not applied");
+    let label = if draft.methods.is_empty() {
+        "Enable a search method"
+    } else if pending {
+        "Changes not applied"
+    } else {
+        ""
     }
-    let mut hint = if let Some(applied) = applied {
-        let selected_mode = SEARCH_MODES
-            .iter()
-            .find(|(mode, _)| *mode == applied.mode)
-            .map(|(_, label)| *label)
-            .unwrap_or("Full text");
-        format!(
-            "Showing results for: {}\nSearch mode: {}\nRequired tags: {}",
-            if applied.query.trim().is_empty() {
-                "all indexed files"
-            } else {
-                &applied.query
-            },
-            if applied.query.trim().is_empty() {
-                "Tags only"
-            } else {
-                selected_mode
-            },
-            if applied.tags.is_empty() {
-                "None".into()
-            } else {
-                applied.tags.join(", ")
-            }
-        )
-    } else {
-        "Showing all files in the library.".into()
+    .to_owned();
+    let mut hint = match applied {
+        Some(applied) => format!(
+            "Showing results for: {}\nEnabled methods: {}",
+            applied.query,
+            method_names(&applied.methods)
+        ),
+        None => "Showing all files in the library.".into(),
     };
+    hint.push_str("\nSeparate alternatives with commas (or ，). Enabled methods and keywords are combined with OR. Text and tags ignore case.");
     if pending {
-        hint.push_str("\nChanges are not applied. Select Search or Apply to update the results.");
-    } else {
-        hint.push_str("\nChoose a search mode or exact tags in Search options.");
+        hint.push_str(
+            "\nSelect Search or press Enter to apply the current terms and enabled methods.",
+        );
     }
     (label, hint)
+}
+
+/// Resolve enabled method names in the same order as their visible chips.
+fn method_names(methods: &[SearchMethod]) -> String {
+    SEARCH_METHODS
+        .iter()
+        .filter(|(method, _, _)| methods.contains(method))
+        .map(|(_, label, _)| *label)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Keep the compact footer label on one physical line while callers retain the full hover diagnostic.
@@ -1020,17 +1145,13 @@ struct LibraryWindow {
     window: AnyWindowHandle,
     root_input: Entity<InputState>,
     query_input: Entity<InputState>,
-    tags_input: Entity<InputState>,
     edit_tags_input: Entity<InputState>,
     description_input: Entity<InputState>,
     root: Option<PathBuf>,
     library_name: String,
     hits: Rc<Vec<SearchHit>>,
     selected: Option<String>,
-    mode: SearchMode,
-    search_options_open: bool,
-    mode_menu_open: bool,
-    mode_popup: Option<Entity<PopupMenu>>,
+    methods: Vec<SearchMethod>,
     embeddings: bool,
     busy: bool,
     status: String,
@@ -1096,10 +1217,10 @@ impl LibraryWindow {
                 .placeholder("Knowledge root folder")
                 .default_value(initial.to_string_lossy().into_owned())
         });
-        let query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search your knowledge…"));
-        let tags_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("For example: research, travel"));
+        let query_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search your knowledge · separate keywords with commas…")
+        });
         let edit_tags_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Separate tags with commas"));
         let description_input = cx.new(|cx| {
@@ -1112,7 +1233,6 @@ impl LibraryWindow {
         for field in [
             &root_input,
             &query_input,
-            &tags_input,
             &edit_tags_input,
             &description_input,
         ] {
@@ -1136,18 +1256,16 @@ impl LibraryWindow {
             },
         )
         .detach();
-        for field in [&query_input, &tags_input] {
-            cx.subscribe_in(
-                field,
-                window,
-                |this, _, event: &InputEvent, _, cx| match event {
-                    InputEvent::PressEnter { .. } => this.search(cx),
-                    InputEvent::Change => cx.notify(),
-                    _ => {}
-                },
-            )
-            .detach();
-        }
+        cx.subscribe_in(
+            &query_input,
+            window,
+            |this, _, event: &InputEvent, _, cx| match event {
+                InputEvent::PressEnter { .. } => this.search(cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        )
+        .detach();
         for field in [&edit_tags_input, &description_input] {
             cx.subscribe_in(field, window, |this, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1256,17 +1374,13 @@ impl LibraryWindow {
             window: window.window_handle(),
             root_input,
             query_input,
-            tags_input,
             edit_tags_input,
             description_input,
             root: None,
             library_name: String::new(),
             hits: Rc::new(vec![]),
             selected: None,
-            mode: SearchMode::Bm25,
-            search_options_open: false,
-            mode_menu_open: false,
-            mode_popup: None,
+            methods: vec![SearchMethod::Bm25],
             embeddings: false,
             busy: false,
             status: "Open a folder to begin".into(),
@@ -1378,8 +1492,6 @@ impl LibraryWindow {
         }
         self.busy = true;
         self.file_menu = None;
-        self.mode_menu_open = false;
-        self.mode_popup = None;
         self.status = message.into();
         cx.notify();
         let window_handle = self.window;
@@ -1568,8 +1680,7 @@ impl LibraryWindow {
     fn search_draft(&self, cx: &App) -> SearchFilter {
         SearchFilter::new(
             self.query_input.read(cx).value().to_string(),
-            self.mode,
-            parse_tags(self.tags_input.read(cx).value().as_ref()),
+            self.methods.clone(),
         )
     }
 
@@ -1582,6 +1693,12 @@ impl LibraryWindow {
         };
         let filter = self.search_draft(cx);
         self.search_revision += 1;
+        if let Some(error) = filter.validation_error() {
+            self.search_lane.clear();
+            self.status = error.into();
+            cx.notify();
+            return;
+        }
         if !filter.restricts_files() {
             self.search_active = false;
             self.applied_search = None;
@@ -1591,19 +1708,11 @@ impl LibraryWindow {
             self.refresh_directories(cx);
             return;
         }
-        let mode = filter.effective_mode();
         let lane = self.search_lane.enqueue(SearchRequest {
             root,
             revision: self.search_revision,
             filter: filter.clone(),
-            options: SearchOptions {
-                query: filter.query,
-                mode,
-                tags: filter.tags,
-                limit: 10000,
-                case_sensitive: false,
-                query_image: None,
-            },
+            options: filter.options(),
         });
         self.launch_search(lane, cx);
     }
@@ -1619,7 +1728,7 @@ impl LibraryWindow {
         let revision = request.revision;
         let filter = request.filter.clone();
         let task = cx.background_executor().spawn(async move {
-            file_actions::open_exact_root(&request.root)?.search(&request.options)
+            file_actions::open_exact_root(&request.root)?.search_unified(&request.options)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1635,7 +1744,7 @@ impl LibraryWindow {
                             this.expanded_result_files.clear();
                             this.status = search_result_summary(
                                 &hits,
-                                filter.effective_mode(),
+                                filter.has_candidates(),
                                 this.result_file_limit,
                             );
                             this.hits = Rc::new(hits);
@@ -1994,8 +2103,6 @@ impl LibraryWindow {
 
     /// Open the trusted guide without losing the selected document or search results.
     fn toggle_guide(&mut self, cx: &mut Context<Self>) {
-        self.mode_menu_open = false;
-        self.mode_popup = None;
         self.file_menu = None;
         self.hover_hint.clear();
         self.guide_anchor = None;
@@ -2054,8 +2161,6 @@ impl LibraryWindow {
 
     /// Open a specific inert guide section while preserving the search and selected source.
     fn show_guide(&mut self, anchor: &'static str, cx: &mut Context<Self>) {
-        self.mode_menu_open = false;
-        self.mode_popup = None;
         self.file_menu = None;
         self.hover_hint.clear();
         self.guide_anchor = Some(anchor);
@@ -2487,8 +2592,6 @@ impl LibraryWindow {
 
     /// Return from the guide through the logo without resetting the library or editor state.
     fn return_to_library(&mut self, cx: &mut Context<Self>) {
-        self.mode_menu_open = false;
-        self.mode_popup = None;
         self.file_menu = None;
         self.hover_hint.clear();
         self.guide_anchor = None;
@@ -2530,85 +2633,7 @@ impl LibraryWindow {
             }))
     }
 
-    /// Select a menu choice and return typing focus to the existing query input.
-    fn choose_mode(&mut self, mode: SearchMode, window: &mut Window, cx: &mut Context<Self>) {
-        self.mode = mode;
-        self.mode_menu_open = false;
-        self.mode_popup = None;
-        window.focus(&self.query_input.read(cx).focus_handle(cx));
-        cx.notify();
-    }
-
-    /// Build the official Kit popup with a captured query focus and selected mode.
-    fn open_mode_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let owner = cx.weak_entity();
-        let focus = self.query_input.read(cx).focus_handle(cx);
-        let selected = self.mode;
-        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
-            menu = menu.min_w(px(180.)).max_w(px(180.)).action_context(focus);
-            for (mode, label) in SEARCH_MODES {
-                let owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .checked(selected == mode)
-                        .on_click(move |_, window, cx| {
-                            let _ = owner.update(cx, |this, cx| this.choose_mode(mode, window, cx));
-                        }),
-                );
-            }
-            menu
-        });
-        cx.subscribe(&menu, |this, _, _: &gpui::DismissEvent, cx| {
-            this.mode_menu_open = false;
-            this.mode_popup = None;
-            cx.notify();
-        })
-        .detach();
-        self.mode_popup = Some(menu);
-    }
-
-    /// Use a controlled Kit popover so help and library navigation dismiss the dropdown.
-    fn mode_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu = self.mode_popup.clone();
-        let label = SEARCH_MODES
-            .iter()
-            .find(|(mode, _)| *mode == self.mode)
-            .map(|(_, label)| *label)
-            .unwrap_or("Full text");
-        Popover::new("mode-popover")
-            .open(self.mode_menu_open)
-            .appearance(false)
-            .trigger(
-                button("mode-selector", label, false)
-                    .w(px(164.))
-                    .dropdown_caret(true)
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        this.hover_hint.update(
-                            "mode-selector",
-                            *hovered,
-                            "Choose what to search: file contents, text patterns, meaning, or names and notes",
-                        );
-                        cx.notify();
-                    })),
-            )
-            .on_open_change(cx.listener(|this, open: &bool, window, cx| {
-                this.mode_menu_open = *open;
-                if *open {
-                    this.open_mode_popup(window, cx);
-                } else {
-                    this.mode_popup = None;
-                }
-                cx.notify();
-            }))
-            .content(move |_, window, cx| {
-                if let Some(menu) = &menu {
-                    menu.focus_handle(cx).focus(window);
-                }
-                div().children(menu.clone())
-            })
-    }
-
-    /// Keep one primary search field; expose optional restrictions only when requested.
+    /// Keep native text editing and in-field clearing in the primary search row.
     fn header(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut header = div()
             .flex()
@@ -2651,40 +2676,14 @@ impl LibraryWindow {
             header = header.child(div().flex_1().text_color(rgb(0x526b59)).child("说明与环境"));
         } else {
             let draft = self.search_draft(cx);
-            let (options_label, options_hint) =
-                search_options_presentation(&draft, self.applied_search.as_ref());
             let clearable = search_filter_is_clearable(
                 &draft.query,
-                &draft.tags,
                 self.search_active || self.search_lane.is_searching(),
             );
-            let options_active = self.search_options_open
-                || self.applied_search.is_some()
-                || !draft.tags.is_empty()
-                || self.mode != SearchMode::Bm25;
             let suffix = div()
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(
-                    button("search-options", "Search options", options_active)
-                        .label(options_label)
-                        .h(px(22.))
-                        .dropdown_caret(true)
-                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            this.hover_hint
-                                .update("search-options", *hovered, &options_hint);
-                            cx.notify();
-                        }))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.search_options_open = !this.search_options_open;
-                            this.mode_menu_open = false;
-                            this.mode_popup = None;
-                            this.hover_hint.clear();
-                            cx.notify();
-                            cx.stop_propagation();
-                        })),
-                )
                 .when(clearable, |suffix| {
                     suffix.child(
                         Button::new("clear-search")
@@ -2696,7 +2695,7 @@ impl LibraryWindow {
                                 this.hover_hint.update(
                                     "clear-search",
                                     *hovered,
-                                    "Clear search and tag filters · Show all files",
+                                    "Clear search · Show all files",
                                 );
                                 cx.notify();
                             }))
@@ -2757,51 +2756,51 @@ impl LibraryWindow {
         }
     }
 
-    /// Group retrieval scope and exact-tag restrictions under the primary search field.
-    fn search_options(&self, cx: &mut Context<Self>) -> gpui::Div {
+    /// Keep independently enabled methods visible without a second query field or disclosure.
+    fn search_methods(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let draft = self.search_draft(cx);
+        let (pending, hint) = search_methods_presentation(&draft, self.applied_search.as_ref());
         div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .px_3()
-            .py_2()
+            .h(px(32.))
             .flex_shrink_0()
             .bg(rgb(0xe9f0e5))
-            .child(div().text_size(px(12.)).child("Search in"))
-            .child(self.mode_selector(cx))
-            .child(
-                div()
-                    .ml_2()
-                    .text_size(px(12.))
-                    .child("Tags (all must match)"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(self.native_input(&self.tags_input, cx)),
-            )
-            .child(
-                button("apply-search-options", "Apply", true).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.search_options_open = false;
-                        this.search(cx);
-                    },
-                )),
-            )
-            .child(
-                button("reset-search-options", "Reset options", false).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.tags_input
-                            .update(cx, |input, cx| input.set_value("", window, cx));
-                        this.mode = SearchMode::Bm25;
-                        this.mode_menu_open = false;
-                        this.mode_popup = None;
-                        this.search(cx);
+            .child(div().mr_1().text_size(px(11.)).text_color(rgb(0x526b59)).child("Search with"))
+            .children(SEARCH_METHODS.iter().enumerate().map(|(index, &(method, label, explanation))| {
+                let enabled = self.methods.contains(&method);
+                Button::new(("search-method", index)).label(label).small().compact().outline()
+                    .w(px([86., 62., 86., 152., 62.][index]))
+                    .h(px(23.))
+                    .rounded_full()
+                    .text_size(px(11.))
+                    .when(enabled, |button| button.primary().icon(IconName::Check))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.hover_hint.update(&format!("search-method-{index}"), *hovered, &format!("{} · {}. Comma-separated keywords and enabled methods are alternatives. Select Search to apply.", if enabled { "Enabled" } else { "Disabled" }, explanation));
                         cx.notify();
-                    },
-                )),
-            )
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.methods.contains(&method) {
+                            this.methods.retain(|selected| *selected != method);
+                        } else {
+                            this.methods.push(method);
+                        }
+                        this.focus_native_input(cx);
+                        this.query_input.read(cx).focus_handle(cx).focus(window);
+                        cx.notify();
+                    }))
+            }))
+            .child(div().id("search-method-state").ml_2().flex_1().min_w_0().text_ellipsis()
+                .text_size(px(10.)).text_color(rgb(0x8d682b))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    this.hover_hint.update("search-method-state", *hovered, &hint);
+                    cx.notify();
+                }))
+                .flex().items_center().justify_end().gap_1()
+                .child(pending)
+                .child(Icon::new(IconName::Info).size(px(12.))))
     }
 
     /// Keep folder lifecycle and the next explicit refresh's model option out of daily retrieval.
@@ -3163,11 +3162,9 @@ impl LibraryWindow {
         self.next_directory(cx);
     }
 
-    /// Explicitly remove both query and tag filters and restore the live filesystem view.
+    /// Clear terms and restore live browsing while retaining the next search's enabled methods.
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.tags_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.search_active = false;
         self.applied_search = None;
@@ -3898,7 +3895,7 @@ impl Render for LibraryWindow {
                             .text_color(rgb(0x748a79))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 let detail = if this.search_active {
-                                    search_result_summary(&this.hits, this.applied_search.as_ref().map(|s| s.effective_mode()).unwrap_or(this.mode), this.result_file_limit)
+                                    search_result_summary(&this.hits, this.applied_search.as_ref().is_some_and(SearchFilter::has_candidates), this.result_file_limit)
                                 } else {
                                     format!("{files} live files loaded from opened folders · Expand folders to load their contents")
                                 };
@@ -3909,10 +3906,7 @@ impl Render for LibraryWindow {
                                 format!(
                                     "{} / {files}{}",
                                     self.result_file_limit.min(files),
-                                    if self.applied_search.as_ref().is_some_and(|search| matches!(
-                                        search.effective_mode(),
-                                        SearchMode::Semantic | SearchMode::Hybrid
-                                    )) {
+                                    if self.applied_search.as_ref().is_some_and(SearchFilter::has_candidates) {
                                         " candidates"
                                     } else {
                                         " files"
@@ -3967,7 +3961,7 @@ impl Render for LibraryWindow {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.result_file_limit =
                                     this.result_file_limit.saturating_add(RESULT_PAGE_SIZE);
-                                this.status = search_result_summary(&this.hits, this.applied_search.as_ref().map(|s| s.effective_mode()).unwrap_or(this.mode), this.result_file_limit);
+                                this.status = search_result_summary(&this.hits, this.applied_search.as_ref().is_some_and(SearchFilter::has_candidates), this.result_file_limit);
                                 this.rebuild_tree(cx);
                             })),
                     )
@@ -4003,8 +3997,8 @@ impl Render for LibraryWindow {
             .when(self.library_panel_open, |layout| {
                 layout.child(self.library_panel(cx))
             })
-            .when(self.search_options_open, |layout| {
-                layout.child(self.search_options(cx))
+            .when(!self.guide_open, |layout| {
+                layout.child(self.search_methods(cx))
             })
             .child(
                 div()
@@ -4664,64 +4658,56 @@ mod tests {
         assert!(hint.detail().is_none());
     }
 
-    /// Keep a way back to the whole tree for text, tag-only, and cleared-but-published queries.
+    /// Keep a way back to the full tree for typed, cleared-but-published, and in-flight searches.
     #[test]
     fn search_reset_remains_visible_for_every_filter_kind() {
-        assert!(!search_filter_is_clearable("", &[], false));
-        assert!(search_filter_is_clearable("word", &[], false));
-        assert!(search_filter_is_clearable("", &["research".into()], false));
-        assert!(search_filter_is_clearable("", &[], true));
-        assert_eq!(search_options_label(SearchMode::Bm25, 0), "Search options");
-        assert!(search_options_label(SearchMode::Bm25, 1).contains("1 tag"));
-        assert!(search_options_label(SearchMode::Semantic, 2).contains("Meaning · 2 tags"));
+        assert!(!search_filter_is_clearable("", false));
+        assert!(search_filter_is_clearable("word", false));
+        assert!(search_filter_is_clearable("", true));
     }
 
-    /// Keep the applied tag set and mode visible while edited restrictions await an explicit search.
+    /// Show the applied conditions independently of draft keywords and enabled method chips.
     #[test]
     fn applied_search_summary_does_not_claim_draft_changes() {
-        let applied = SearchFilter::new("".into(), SearchMode::Bm25, vec!["research".into()]);
-        let empty = SearchFilter::new("".into(), SearchMode::Bm25, vec![]);
-        let (label, hint) = search_options_presentation(&empty, Some(&applied));
-        assert!(label.contains("1 tag"));
-        assert!(label.contains("changes not applied"));
-        assert!(hint.contains("Required tags: research"));
-        let other = SearchFilter::new("".into(), SearchMode::Bm25, vec!["travel".into()]);
-        let (label, hint) = search_options_presentation(&other, Some(&applied));
-        assert!(label.contains("1 tag · changes not applied"));
-        assert!(hint.contains("Required tags: research"));
-        assert!(!hint.contains("Required tags: travel"));
-        let text = SearchFilter::new("needle".into(), SearchMode::Bm25, vec![]);
-        let meaning = SearchFilter::new("needle".into(), SearchMode::Semantic, vec![]);
-        let (label, hint) = search_options_presentation(&meaning, Some(&text));
-        assert!(label.contains("changes not applied"));
-        assert!(!label.contains("Meaning"));
-        assert!(hint.contains("Search mode: Full text"));
-        let new_query = SearchFilter::new("different".into(), SearchMode::Bm25, vec![]);
+        let applied = SearchFilter::new("Research, Photo".into(), vec![SearchMethod::Tags]);
+        let draft = SearchFilter::new("Travel".into(), vec![SearchMethod::Semantic]);
+        let (label, hint) = search_methods_presentation(&draft, Some(&applied));
+        assert_eq!(label, "Changes not applied");
+        assert!(hint.contains("Showing results for: Research, Photo"));
+        assert!(hint.contains("Enabled methods: Tags"));
+        assert!(!hint.contains("Enabled methods: Meaning"));
+        let equivalent = SearchFilter::new(
+            " research，PHOTO, research ".into(),
+            vec![SearchMethod::Tags, SearchMethod::Tags],
+        );
+        assert_eq!(applied, equivalent);
+        assert_eq!(
+            search_methods_presentation(&equivalent, Some(&applied)).0,
+            ""
+        );
+        let no_methods = SearchFilter::new("photo".into(), vec![]);
         assert!(
-            search_options_presentation(&new_query, Some(&text))
-                .1
-                .contains("Showing results for: needle")
+            no_methods
+                .validation_error()
+                .unwrap()
+                .contains("Enable at least one")
         );
         assert_eq!(
-            search_options_presentation(&empty, None).0,
-            "Search options"
+            search_methods_presentation(&no_methods, Some(&applied)).0,
+            "Enable a search method"
         );
+        let comma_only = SearchFilter::new(" , ， ".into(), vec![SearchMethod::Semantic]);
+        assert!(!comma_only.restricts_files());
+        assert!(!comma_only.has_candidates());
         assert!(
-            !search_options_presentation(&applied, Some(&applied))
-                .0
-                .contains("changes not applied")
+            SearchFilter::new(" , ， ".into(), vec![])
+                .validation_error()
+                .is_none()
         );
-        assert!(
-            search_options_presentation(&other, None)
-                .0
-                .contains("changes not applied")
+        assert_eq!(
+            method_names(&[SearchMethod::Tags, SearchMethod::Bm25]),
+            "Full text, Tags"
         );
-        let reordered = SearchFilter::new(
-            "".into(),
-            SearchMode::Bm25,
-            vec!["research".into(), "research".into()],
-        );
-        assert_eq!(applied, reordered);
     }
 
     /// Multiline search failures retain a visible prefix and a complete, unchanged hover diagnostic.
@@ -5018,15 +5004,12 @@ mod tests {
     }
 
     /// Build an immutable query intent for worker scheduling tests without accessing a library.
-    fn queued_search(mode: SearchMode, revision: u64) -> SearchRequest {
+    fn queued_search(method: SearchMethod, revision: u64) -> SearchRequest {
+        let filter = SearchFilter::new("query".into(), vec![method]);
         SearchRequest {
             root: PathBuf::from("/library"),
-            filter: SearchFilter::new("query".into(), mode, Vec::new()),
-            options: SearchOptions {
-                query: "query".into(),
-                mode,
-                ..SearchOptions::default()
-            },
+            options: filter.options(),
+            filter,
             revision,
         }
     }
@@ -5035,10 +5018,10 @@ mod tests {
     #[test]
     fn local_search_does_not_wait_for_an_obsolete_model_request() {
         let mut lanes = SearchLanes::default();
-        let model = lanes.enqueue(queued_search(SearchMode::Semantic, 1));
+        let model = lanes.enqueue(queued_search(SearchMethod::Semantic, 1));
         assert_eq!(model, SearchLane::Model);
         assert_eq!(lanes.dispatch(model).unwrap().revision, 1);
-        let local = lanes.enqueue(queued_search(SearchMode::Bm25, 2));
+        let local = lanes.enqueue(queued_search(SearchMethod::Bm25, 2));
         assert_eq!(local, SearchLane::Local);
         assert_eq!(lanes.dispatch(local).unwrap().revision, 2);
         assert!(lanes.is_searching());
@@ -5060,15 +5043,15 @@ mod tests {
     #[test]
     fn search_lanes_coalesce_replacements_and_preserve_active_bounds() {
         let mut lanes = SearchLanes::default();
-        let model = lanes.enqueue(queued_search(SearchMode::Semantic, 1));
+        let model = lanes.enqueue(queued_search(SearchMethod::Semantic, 1));
         assert_eq!(lanes.dispatch(model).unwrap().revision, 1);
-        lanes.enqueue(queued_search(SearchMode::Hybrid, 2));
-        lanes.enqueue(queued_search(SearchMode::Hybrid, 3));
+        lanes.enqueue(queued_search(SearchMethod::Semantic, 2));
+        lanes.enqueue(queued_search(SearchMethod::Semantic, 3));
         assert!(lanes.dispatch(model).is_none());
-        let local = lanes.enqueue(queued_search(SearchMode::Grep, 4));
+        let local = lanes.enqueue(queued_search(SearchMethod::Grep, 4));
         assert_eq!(lanes.dispatch(local).unwrap().revision, 4);
         assert!(lanes.model.pending.is_none());
-        lanes.enqueue(queued_search(SearchMode::Files, 5));
+        lanes.enqueue(queued_search(SearchMethod::Files, 5));
         assert!(lanes.dispatch(local).is_none());
         lanes.complete(model, 1);
         assert!(lanes.is_searching());
@@ -5076,7 +5059,7 @@ mod tests {
         lanes.complete(local, 4);
         assert!(lanes.is_searching());
         assert_eq!(lanes.dispatch(local).unwrap().revision, 5);
-        lanes.enqueue(queued_search(SearchMode::Bm25, 6));
+        lanes.enqueue(queued_search(SearchMethod::Bm25, 6));
         lanes.clear();
         assert!(!lanes.is_searching());
         assert!(lanes.local.running);
@@ -5086,15 +5069,29 @@ mod tests {
         assert!(!lanes.local.running);
     }
 
-    /// Route effective Files, grep and BM25 locally, reserving the model lane for provider queries.
+    /// Reserve the model lane for nonempty queries with Meaning enabled among any peer methods.
     #[test]
-    fn effective_search_mode_selects_the_worker_lane() {
-        for mode in [SearchMode::Files, SearchMode::Grep, SearchMode::Bm25] {
-            assert_eq!(SearchLane::for_mode(mode), SearchLane::Local);
+    fn effective_search_methods_select_the_worker_lane() {
+        for method in [
+            SearchMethod::Files,
+            SearchMethod::Grep,
+            SearchMethod::Bm25,
+            SearchMethod::Tags,
+        ] {
+            assert_eq!(
+                SearchLane::for_filter(&SearchFilter::new("word".into(), vec![method])),
+                SearchLane::Local
+            );
         }
-        for mode in [SearchMode::Semantic, SearchMode::Hybrid] {
-            assert_eq!(SearchLane::for_mode(mode), SearchLane::Model);
-        }
+        let combined = SearchFilter::new(
+            "word".into(),
+            vec![SearchMethod::Semantic, SearchMethod::Tags],
+        );
+        assert_eq!(SearchLane::for_filter(&combined), SearchLane::Model);
+        assert_eq!(
+            SearchLane::for_filter(&SearchFilter::new(" ,， ".into(), combined.methods)),
+            SearchLane::Local
+        );
     }
 
     /// Avoid repainting a virtualized tree for identical periodic filesystem child snapshots.
@@ -5285,19 +5282,90 @@ mod tests {
             .collect();
         assert_eq!(indices, [Some(0), Some(1), Some(3)]);
         assert!(!items[0].is_expanded());
-        assert_eq!(items[0].children.len(), 1);
-        assert_eq!(targets[items[0].children[0].id.as_ref()].hit_index, Some(2));
+        assert!(items[0].children.is_empty());
         let page = match_items(&hits, &BTreeSet::new(), 2, &mut BTreeMap::new());
         assert_eq!(page.len(), 2);
-        assert_eq!(page[0].children.len(), 1);
+        assert!(page[0].children.is_empty());
         assert!(page[1].label.contains("pictures/a-photo.jpg"));
         let next = match_items(&hits, &BTreeSet::new(), 3, &mut BTreeMap::new());
         assert!(next[2].label.starts_with("#3 raw/LICENSE.txt"));
         assert!(match_items(&[], &BTreeSet::new(), 50, &mut BTreeMap::new()).is_empty());
         assert_eq!(
-            search_result_summary(&[], SearchMode::Semantic, 50),
-            "0 of 0 candidate files · 0 evidence fragments"
+            search_result_summary(&[], true, 50),
+            "0 of 0 candidate files · 0 retained retrieval records"
         );
+    }
+
+    /// Present image and RAW candidates once without metadata or vector pseudo-occurrences.
+    #[test]
+    fn images_do_not_expand_repeated_vector_evidence() {
+        let hits = vec![
+            tree_hit("photo.JPG", None, None),
+            tree_hit("photo.JPG", None, None),
+            tree_hit("camera.RAF", Some(1), None),
+            tree_hit("camera.RAF", Some(2), None),
+        ];
+        let mut targets = BTreeMap::new();
+        let items = match_items(&hits, &BTreeSet::new(), 50, &mut targets);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.children.is_empty()));
+        assert!(
+            items
+                .iter()
+                .all(|item| !item.label.contains("more") && !item.label.contains("Line"))
+        );
+        assert_eq!(targets.len(), 2);
+        assert_eq!(ranked_files(&hits)[0].indices.len(), 2);
+    }
+
+    /// Prefer navigable evidence while deduplicating identical lines and recording ranges.
+    #[test]
+    fn result_occurrences_show_only_distinct_useful_locations() {
+        let hits = vec![
+            tree_hit("notes.md", None, None),
+            tree_hit("notes.md", Some(9), None),
+            tree_hit("notes.md", Some(9), None),
+            tree_hit("notes.md", Some(14), None),
+            tree_hit("movie.mp4", None, None),
+            tree_hit("movie.mp4", None, Some(3.)),
+            tree_hit("movie.mp4", None, Some(3.)),
+            tree_hit("movie.mp4", None, Some(8.)),
+            tree_hit("binary.dat", None, None),
+            tree_hit("binary.dat", None, None),
+        ];
+        let mut targets = BTreeMap::new();
+        let items = match_items(&hits, &BTreeSet::new(), 50, &mut targets);
+        assert_eq!(items.len(), 3);
+        assert_eq!(targets[items[0].id.as_ref()].hit_index, Some(1));
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(targets[items[0].children[0].id.as_ref()].hit_index, Some(3));
+        assert_eq!(targets[items[1].id.as_ref()].hit_index, Some(5));
+        assert_eq!(items[1].children.len(), 1);
+        assert_eq!(targets[items[1].children[0].id.as_ref()].hit_index, Some(7));
+        assert!(items[2].children.is_empty());
+    }
+
+    /// Keep genuine SVG source lines while hiding invalid photo coordinates and duplicate ranges.
+    #[test]
+    fn source_locations_follow_file_type_and_complete_time_range() {
+        let mut hits = vec![
+            tree_hit("drawing.SVG", Some(4), None),
+            tree_hit("drawing.SVG", Some(4), None),
+            tree_hit("drawing.SVG", Some(7), None),
+            tree_hit("sound.wav", None, Some(0.)),
+            tree_hit("sound.wav", None, Some(-0.)),
+            tree_hit("sound.wav", None, Some(0.)),
+            tree_hit("sound.wav", None, Some(f64::NAN)),
+        ];
+        hits[5].end_seconds = Some(8.);
+        let mut targets = BTreeMap::new();
+        let items = match_items(&hits, &BTreeSet::new(), 50, &mut targets);
+        assert_eq!(items[0].children.len(), 1);
+        assert!(items[0].label.contains("Line 4"));
+        assert_eq!(targets[items[0].children[0].id.as_ref()].hit_index, Some(2));
+        assert_eq!(items[1].children.len(), 1);
+        assert_eq!(targets[items[1].children[0].id.as_ref()].hit_index, Some(5));
+        assert!(items[1].label.contains("At 0.0–5.0s"));
     }
 
     /// Forward exact indexed lines through the GUI adapter when one source is selected again.
@@ -5424,10 +5492,10 @@ mod tests {
         assert_eq!(files[0].indices.len(), 80);
         assert_eq!(files[1].indices, [80]);
         assert_eq!(
-            search_result_summary(&hits, SearchMode::Semantic, 1),
-            "1 of 2 candidate files · 81 evidence fragments"
+            search_result_summary(&hits, true, 1),
+            "1 of 2 candidate files · 1 text location · 81 retained retrieval records"
         );
-        assert!(!search_result_summary(&hits, SearchMode::Semantic, 50).contains("matches"));
+        assert!(!search_result_summary(&hits, true, 50).contains("matches"));
         let mut targets = BTreeMap::new();
         let items = match_items(
             &hits,
@@ -5435,8 +5503,7 @@ mod tests {
             usize::MAX,
             &mut targets,
         );
-        assert!(items[0].is_expanded());
-        assert_eq!(items[0].children.len(), 79);
+        assert!(items[0].children.is_empty());
         assert_eq!(targets[items[1].id.as_ref()].hit_index, Some(80));
     }
 

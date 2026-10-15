@@ -59,7 +59,7 @@ pub struct AssetMetadata {
     pub version: u32,
     /// Canonical root-relative UTF-8 source path.
     pub path: String,
-    /// Exact, case-sensitive labels.
+    /// Exact labels whose original spelling is preserved.
     #[serde(default)]
     pub tags: Vec<String>,
     /// User or agent description, including binary contents that cannot be parsed.
@@ -191,6 +191,56 @@ pub enum SearchMode {
     Files,
 }
 
+/// Independently selectable retrieval methods for a shared comma-separated keyword query.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMethod {
+    /// Indexed English and Chinese word relevance.
+    Bm25,
+    /// Literal case-insensitive text matching with source line evidence.
+    Grep,
+    /// Local multimodal similarity over compatible indexed vectors.
+    Semantic,
+    /// Case-insensitive filename, title, and description substrings.
+    Files,
+    /// Exact case-insensitive tag values as an independent retrieval source.
+    Tags,
+}
+
+/// Shared keywords searched as alternatives through every enabled retrieval method.
+#[derive(Clone, Debug)]
+pub struct UnifiedSearchOptions {
+    /// Keywords separated by ASCII or Chinese commas; blank and repeated keywords are ignored.
+    pub query: String,
+    /// Enabled peer methods; nonempty keywords require at least one method.
+    pub methods: Vec<SearchMethod>,
+    /// Maximum returned evidence records, capped at 10,000.
+    pub limit: usize,
+}
+
+impl Default for UnifiedSearchOptions {
+    /// Creates an indexed word request with a 30-record limit.
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            methods: vec![SearchMethod::Bm25],
+            limit: 30,
+        }
+    }
+}
+
+impl UnifiedSearchOptions {
+    /// Returns trimmed lowercase keyword alternatives, deduplicated in their first-input order.
+    pub fn keywords(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.query
+            .split([',', '，'])
+            .map(|keyword| keyword.trim().to_lowercase())
+            .filter(|keyword| !keyword.is_empty() && seen.insert(keyword.clone()))
+            .collect()
+    }
+}
+
 /// Search request; tags are AND filters and limits apply after filtering.
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
@@ -198,11 +248,11 @@ pub struct SearchOptions {
     pub query: String,
     /// Retrieval strategy.
     pub mode: SearchMode,
-    /// Required exact tags.
+    /// Required exact tags; matching ignores case unless `case_sensitive` is set.
     pub tags: Vec<String>,
     /// Maximum returned hits, capped at 10,000.
     pub limit: usize,
-    /// Case sensitivity for grep and filename matching.
+    /// Case sensitivity for grep, filenames, and exact tag filters.
     pub case_sensitive: bool,
     /// Optional image query for semantic or hybrid retrieval.
     pub query_image: Option<PathBuf>,
@@ -670,6 +720,28 @@ impl KnowledgeBase {
             config: loaded.config.clone(),
         };
         search::search(&current, &loaded.snapshot, &loaded.directory, options)
+    }
+
+    /// Searches peer methods and keyword alternatives under one validated snapshot reader lease.
+    ///
+    /// Empty keywords browse indexed files; invalid methods, result bounds, and unavailable selected
+    /// semantic retrieval return errors instead of silently returning partial local results.
+    pub fn search_unified(&self, options: &UnifiedSearchOptions) -> Result<Vec<SearchHit>> {
+        if options.methods.is_empty() && !options.keywords().is_empty() {
+            bail!("select at least one search method");
+        }
+        if options.limit > 10_000 {
+            bail!("result limit exceeds 10000");
+        }
+        if options.limit == 0 {
+            return Ok(vec![]);
+        }
+        let loaded = storage::load_search(self)?;
+        let current = KnowledgeBase {
+            root: self.root.clone(),
+            config: loaded.config.clone(),
+        };
+        search::search_unified(&current, &loaded.snapshot, &loaded.directory, options)
     }
 
     /// Lists indexed regular files; call index to reconcile recent filesystem edits.

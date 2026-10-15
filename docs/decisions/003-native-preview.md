@@ -22,8 +22,9 @@ Keep user guidance and explicit Homebrew installation controls in a separate nat
 Keep document preview content unable to invoke installation or mutate files.
 Homebrew install buttons hand off fixed package commands to a visible Terminal window.
 Terminal owns the installation interface and lifetime; the app reports handoff and later tool discovery.
-Keep one primary search row, with inline clearing and disclosed search options for mode and exact tags.
-Show active search restrictions when the options are closed so a hidden tag cannot silently constrain browsing.
+Keep one primary search row with inline clearing and a compact row of independently enabled method chips.
+The engineer's 2026-10-15 follow-up replaces the single-mode dropdown and separate tag input with shared comma-separated keywords.
+Keep enabled methods visible, and explain alternative matching in the query hint.
 Attach the applied query and options to successful search results; keep unapplied edits explicit and retain the last successful view after an error.
 Keep folder management and next-refresh semantic indexing in an on-demand Library panel, with adding files beside the tree.
 The semantic-index option belongs to explicit index preparation; it is not a service switch or a persisted library preference.
@@ -56,7 +57,8 @@ Identify each menu session so delayed dismissal from a replaced menu cannot clos
 This bridge uses AppKit view identity and adds no document script or source-content privilege.
 Use a virtualized tree with live directory contents so empty folders and unindexed files remain manageable.
 Keep search clearable and restore the complete live browsing tree after clearing it.
-While search is active, display distinct files in first-occurrence retrieval order, with additional evidence collapsed beneath the file.
+While search is active, display distinct files in first-occurrence retrieval order, with distinct line or recording-time locations collapsed beneath the file.
+Images need one file target; metadata and visual vectors describe the same preview rather than different navigation locations.
 Do not regroup ranked results by directory: that traversal can put a weak license fragment ahead of highly relevant photos.
 Initially show 50 distinct files and disclose more in the retained order; this is a presentation bound, not a similarity threshold.
 Describe semantic results as candidates and distinguish returned files from repeated vector fragments.

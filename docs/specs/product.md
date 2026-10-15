@@ -45,8 +45,12 @@ The engineer requested a compact workspace in the 2026-10-15 desktop follow-up.
 Remove the two brand text lines from the header and use the green mark to return to the main workspace.
 Keep one primary search row at the top and preserve room for files and previews.
 Put a clear-search action inside the search input; it clears both the query and tag restrictions and restores the live directory tree.
-Group search mode and exact tags in a search-options disclosure instead of a permanent second search toolbar.
-Keep active restrictions discoverable when those options are closed, including a tag-only search.
+Show compact, independently enabled search-method chips below the single query field.
+Use the same comma-separated keywords for full text, literal text, meaning, file names and notes, and exact tags.
+Treat ASCII and Chinese commas as separators, discard empty entries, and match any keyword through any enabled method.
+Text and tag retrieval ignore case by default; a tag still requires a complete value rather than a prefix.
+Keep the enabled methods visible and remove the separate search-tag input and single-mode dropdown.
+Reject a nonempty search with no enabled method and explain how to select one.
 Distinguish draft search options from the successful search that produced the displayed files; failed searches must not relabel those results.
 Use descriptive retrieval labels and compact action icons with hover hints where the action remains clear.
 Align each input's visible height with adjacent compact buttons.
@@ -56,7 +60,10 @@ Place the next-refresh semantic-index option in that panel and explain that it n
 Keep adding files beside the tree and index refresh beside index status; do not duplicate index refresh in the search toolbar.
 Show unfiltered files in a collapsible directory tree, with selectable leaves and visible source identity.
 For an active search, preserve the retrieval order in ranked file rows instead of regrouping files by directory.
-Group a file's additional evidence beneath its best returned evidence, and distinguish semantic candidates from exact matches.
+Show images as one result per file without expandable metadata or visual-vector fragments.
+Expand text results only for distinct line locations and recordings only for distinct time ranges.
+Do not present unlocated duplicate metadata as additional navigable evidence.
+Keep retained evidence counts separate from these useful display locations, and distinguish semantic candidates from exact matches.
 Clicking line evidence must reveal and highlight its numbered text location; retain formatted document reading separately.
 Preserve search settings, results, and the selected document when opening and closing the guide.
 Keep metadata editing available without reserving a large permanent toolbar row.

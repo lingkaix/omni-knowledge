@@ -68,13 +68,13 @@ enum Operation {
         /// Lexical, grep, semantic, hybrid, or filename retrieval.
         #[arg(long, value_enum, default_value = "bm25")]
         mode: SearchMode,
-        /// Required exact tag; repeat for AND filtering.
+        /// Required complete tag, ignoring case by default; repeat for AND filtering.
         #[arg(long = "tag")]
         tags: Vec<String>,
         /// Maximum returned results.
         #[arg(long, short = 'n', default_value_t = 30)]
         limit: usize,
-        /// Case-sensitive grep or filename matching.
+        /// Case-sensitive grep, filename matching, and exact tag filters.
         #[arg(long)]
         case_sensitive: bool,
         /// Image query for semantic or hybrid retrieval.

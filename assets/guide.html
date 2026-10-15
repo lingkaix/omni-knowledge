@@ -20,7 +20,7 @@
 <li><strong>纳入原始文件。</strong> 目录树旁的 <span class="inline-label">Add files</span> 按钮把所选文件复制到底部状态栏标明的目标文件夹（未选择文件夹时为知识库 root），保留外部原件，也不会覆盖同名文件。你也可以直接用 Finder 或 AI Agent，把文件放进知识库的任意合适目录。</li>
 <li><strong>添加可检索的说明。</strong> 选中文件后，点击预览栏的 <span class="inline-label">File details</span> 按钮，在带标签的 Tags 和 Notes 中填写标签与备注，再点击 Save tags and notes。内容写入当前知识库的独立 JSON 记录，不修改原文件；面板显示保存位置，并可在 Finder 查看已保存的记录。重新选中文件并打开 File details，即可看到已保存的内容。切换文件前请先保存；未保存内容不会跨文件保留。编辑器平时收起，再次点击按钮可收起它；选择另一个文件时也会收起。这对二进制文件、图片和无文字内容的文件尤其有用。</li>
 <li><strong>外部编辑后刷新。</strong> 在 Finder 或编辑器中添加、修改、移动或删除文件后，点击 <span class="inline-label">↻ Refresh index</span> 图标。检索读取最近成功发布的索引；后台会定期检查文件元数据变化，仍需你主动刷新索引。</li>
-<li><strong>检索并查看证据。</strong> 输入查询，点击搜索框内的 <span class="inline-label">Search options</span>，按需选择搜索方式或填写标签，按 Enter 或点击 <span class="inline-label">Search</span>。下拉菜单支持方向键、Enter 和 Escape。未搜索时，目录树直接读取磁盘上的文件，包括新文件和空文件夹，展开时按需加载；列表采用虚拟化，没有 1,000 个文件的浏览上限。搜索后显示索引匹配过滤视图；点击搜索输入框尾部的清除按钮，同时清空查询和标签，立即回到完整浏览。点击三角形展开或折叠目录，点击文件查看预览。搜索结果中的 <code>#数字</code> 保留原检索排名；同一文件的多个匹配按返回顺序列出，保留各自的行号或时间位置。</li>
+<li><strong>检索并查看证据。</strong> 在同一个搜索框输入关键词，用英文或中文逗号分隔；点击下方的小标签启用或关闭检索方式，再按 Enter 或点击 <span class="inline-label">Search</span>。未搜索时，目录树直接读取磁盘上的文件，包括新文件和空文件夹，展开时按需加载；列表采用虚拟化，没有 1,000 个文件的浏览上限。搜索后显示索引匹配过滤视图；点击搜索输入框尾部的清除按钮，清空查询，立即回到完整浏览。点击三角形展开或折叠目录，点击文件查看预览。搜索结果中的 <code>#数字</code> 保留原检索排名；图片只显示一个文件结果；文本可展开不同命中行，音视频可展开不同时间位置。</li>
 </ol>
 <p>模板保留 LLM Wiki 和 Open Knowledge Format 的原始离线文章，并提供链接到原文的参考概念页。软件负责文件管理、索引和检索；知识摘要、交叉链接和 wiki 的持续维护由你使用的 AI Agent 完成。</p>
 <p>底部状态栏平时只占一行，集中显示知识库位置、粘贴／拖入目标、环境状态和索引操作；不再常驻显示文件操作说明或 Preview ready。鼠标悬停在图标或状态项目时，才会临时显示完整提示；移开后恢复单行。提示在自己的布局范围内显示，不会被预览遮挡。信息图标打开“说明与环境”。选中文件后，预览栏始终提供 Quick Look、Open original、Finder 和 File details 按钮；右键文件也能找到这些操作。折叠文件夹和切换指南不会清除当前预览、查询或编辑内容。目录树标题显示文件数，一个文件可能包含多处匹配。</p>
@@ -33,17 +33,17 @@
 <p>所有文本框使用 GPUI Kit 输入组件。双击选词，⌘A 全选；⌘X／⌘C／⌘V 剪切、复制和粘贴文本；Option+Backspace 删除前一个词，⌘Z 撤销。macOS 顶部 Edit 菜单提供同样的入口。中文输入可先组合、选字，再提交检索。</p>
 
 <h2 id="search">选择合适的检索方式</h2>
+<p>搜索框下方的小标签表示参与检索的方式：绿色为启用，点击可切换。默认启用 Full text。关键词用英文逗号 <code>,</code> 或中文逗号 <code>，</code> 分隔，忽略空项和大小写；同一个关键词会交给每种启用的方式。任一关键词通过任一方式命中即可进入结果。例如输入 <code>research, travel</code> 并只启用 Tags，可以找到带 research 或 travel 完整标签的文件。</p>
 <table><thead><tr><th>方式</th><th>适合什么问题</th><th>实际行为</th></tr></thead><tbody>
-<tr><td><strong>精确标签</strong></td><td>“只看研究、硬件相关的文件”</td><td>在 Search options 的 Tags 中输入逗号分隔的标签。所有标签都必须匹配，区分大小写，不做模糊匹配。标签过滤适用于每种检索方式。</td></tr>
-<tr><td><strong>Full text · 全文搜索</strong></td><td>关键词、主题名、中文短语</td><td>使用已建立的文字索引，综合标题、路径、描述和内容排序。多个词按相关性组合；需要严格原文匹配时使用 Text pattern（Grep）。</td></tr>
-<tr><td><strong>Text pattern · 原文模式</strong></td><td>准确词句、代码符号、正则表达式</td><td>在索引中的提取文本上验证 Rust 正则表达式，并提供匹配文本行号（转换文档为提取文本行号）；找不到正文时还会检查路径和描述。它读取索引快照，外部修改后需要刷新。</td></tr>
-<tr><td><strong>Meaning · 语义</strong></td><td>换一种说法描述内容，或描述图片／视频画面</td><td>使用兼容的本地多模态模型和已建立的向量。模型不可用或尚未建立向量时，会给出明确错误。</td></tr>
-<tr><td><strong>Text + meaning · 文字与语义</strong></td><td>同时利用关键词与语义</td><td>合并 BM25 与语义结果，保留可用的时间证据。仍然需要本地模型和向量索引。</td></tr>
-<tr><td><strong>File names &amp; notes · 文件与备注</strong></td><td>文件名、路径、描述，或浏览所有资产</td><td>无需模型，包含无法提取正文的文件。空查询也会按当前标签过滤浏览文件。</td></tr>
+<tr><td><strong>Full text · 全文搜索</strong></td><td>关键词、主题名、中文短语</td><td>使用 BM25 文字索引，综合标题、路径、描述和内容排序；一个关键词内的多个词按相关性组合。</td></tr>
+<tr><td><strong>Text · 原文文字</strong></td><td>准确词句、代码符号</td><td>按字面查找提取文本，不区分大小写；<code>C++</code>、<code>a.b</code> 等标点不作为正则表达式。正文命中保留行号，转换文档使用提取文本行号；没有正文命中时也检查路径和描述。CLI 的 <code>--mode grep</code> 仍支持正则表达式。</td></tr>
+<tr><td><strong>Meaning · 语义</strong></td><td>换一种说法描述内容，或描述图片／视频画面</td><td>使用兼容的本地多模态模型和已有向量。模型不可用或尚未建立向量时，会给出明确错误；可关闭 Meaning 后使用本地文字检索。</td></tr>
+<tr><td><strong>Files · 文件与备注</strong></td><td>文件名、路径、描述</td><td>不依赖模型，也覆盖无法提取正文的二进制文件。</td></tr>
+<tr><td><strong>Tags · 精确标签</strong></td><td>已知的分类标签</td><td>直接使用搜索框内的关键词，不需要另填标签。忽略大小写，但必须匹配整个标签；多个标签是“任一匹配”，不是对其他方式的额外限制。</td></tr>
 </tbody></table>
-<p>搜索选项平时收起；非默认搜索方式和标签数量会在入口显示。修改后需点击 Apply 或 Search 才会应用；changes not applied 表示修改尚未生效，显示的结果仍保留之前的条件。搜索失败也会保留之前成功的结果与条件。标签限制只属于搜索，添加文件在目录树旁，索引刷新在底部右侧，知识库位置与语义索引生成选项在 Library 中。</p>
-<p>“研究”和“研”不是同一个标签；“Rust”和“rust”也不同。Markdown front matter 中的标签与手工元数据标签会合并。保存会立即写入可编辑标签和备注，不会启动整库索引；面板会区分未保存、保存中、已保存和失败。这里编辑的是独立记录中的标签，不是原文 front matter。之后主动点击 Refresh index，检索才会使用新的标签与描述。原文 front matter 保持不变。</p>
-<p>搜索按检索相关性显示文件，不会再被目录名称重新排序。同一文件只占一个主结果，展开可看其他行或时间位置；先显示前 50 个文件，Show 50 more files 可继续加载。语义结果中的 candidates 是候选文件数，不是确定匹配数；悬停数量可查看文件和证据片段的区别。清空搜索可恢复完整目录树。</p>
+<p>启用多种方式时合并文件排名；同一文件的多个向量不会重复增加排名权重。修改关键词或方式后，按 Enter 或 Search 应用；未应用的修改会提示，搜索失败会保留之前成功的结果与条件。至少启用一种方式才能执行非空查询。添加文件在目录树旁，索引刷新在底部右侧，知识库位置与语义索引生成选项在 Library 中。</p>
+<p>“研究”和“研”不是同一个标签；“Rust”和“rust”匹配同一个完整标签。原有索引即可使用此规则，无需重建。Markdown front matter 中的标签与手工元数据标签会合并。保存会立即写入可编辑标签和备注，不会启动整库索引；面板会区分未保存、保存中、已保存和失败。这里编辑的是独立记录中的标签，不是原文 front matter。之后主动点击 Refresh index，检索才会使用新的标签与描述。原文 front matter 保持不变。</p>
+<p>搜索按检索相关性显示文件，不会被目录名称重新排序。图片、无定位信息的文件只占一行，不展开“更多证据”；文本只展开不同的行，音视频只展开不同的时间位置。先显示前 50 个文件，Show 50 more files 可继续加载。包含 Meaning 时，candidates 表示候选文件数，不是确定匹配数；悬停数量可查看保留的检索记录与可定位位置的区别。清空搜索可恢复完整目录树。</p>
 <p>点击带行号的结果，会在带左侧行号的文本预览中定位并高亮该行。Markdown 保留原始行号（包括 front matter）；HTML、EPUB、PDF、Office 显示索引所用的提取文本行号。关闭 Source lines 或 Extracted text lines 可返回排版阅读。文件改变导致原行不存在时会明确提醒。超长文本最多显示命中附近的 20,000 行，完整内容可用 Open original 打开。</p>
 <p>结果是候选内容和来源证据，分数不代表事实可信度。重要结论应通过 <span class="inline-label">Open original</span> 或原文预览复核。</p>
 
@@ -79,9 +79,9 @@
 <li>在已有的 <code>embedding-wemm</code> 项目中启动兼容的服务，例如 <code>./scripts/serve.sh gpu</code>。</li>
 <li>确认知识库的 <code>omni-knowledge.json</code> 中 <code>embedding</code> 配置与服务身份一致。用 CLI 的 <code>doctor --embeddings</code> 检查本地连接。</li>
 <li>回到知识库，在 Library 面板开启 <span class="inline-label">Build semantic search index</span>，再点击底部 <span class="inline-label">Refresh index</span>。</li>
-<li>索引完成后，在 Search options 中使用 Meaning 或 Text + meaning。外部修改过的文件需要重新建立相应向量。</li>
+<li>索引完成后，启用 Meaning；需要综合关键词时，同时启用 Full text。外部修改过的文件需要重新建立相应向量。</li>
 </ol>
-<p>模型停止时仍能使用标签、File names &amp; notes、Full text 和 Text pattern。Library 中的语义索引选项只决定这个窗口下次主动刷新索引时是否生成向量；它不会启动模型服务，也不是搜索可用性的开关，不会保存为新的知识库偏好。关闭它也不会删除所有未修改文件的已有向量。</p>
+<p>模型停止时仍能使用Tags、Files、Full text 和 Text。Library 中的语义索引选项只决定这个窗口下次主动刷新索引时是否生成向量；它不会启动模型服务，也不是搜索可用性的开关，不会保存为新的知识库偏好。关闭它也不会删除所有未修改文件的已有向量。</p>
 <h3 id="asr">让音频内容可检索</h3>
 <p>最简单的方式是在音频旁边放置 <code>文件名.transcript.json</code>，例如 <code>interview.m4a.transcript.json</code>：</p>
 <pre>{"segments":[{"start":3.0,"end":8.0,"text":"这一段的转写内容"}]}</pre>
@@ -128,17 +128,17 @@ omni --root /path/to/library export-epub /path/to/library.epub --include-media</
 <li>文字提取有 8 MiB 源文件／输出上限；过大或无法解析的文件仍可按文件名、标签和描述检索。扫描 PDF 的 OCR 为后续可选能力。</li>
 <li>Office 预览为文字预览；EPUB 预览不复现出版样式、固定版式或交互内容。</li>
 <li>本地媒体是否可播放取决于 WebKit 支持的编码。单次预览资源读取上限 32 MiB；支持范围请求的媒体可分段加载，更大的非分段资源请用原生应用。</li>
-<li>GUI 浏览按需读取目录且没有任意文件数量截断；GUI／CLI 单次索引查询最多返回 10,000 条匹配，全部保留原排名和行号／时间证据。GUI 暂未提供图片查询选择和 EPUB 导出按钮，这两项可使用 CLI。</li>
+<li>GUI 浏览按需读取目录且没有任意文件数量截断；GUI／CLI 单次索引查询最多返回 10,000 条匹配，按相关性合并文件，并保留可用的行号／时间位置。GUI 暂未提供图片查询选择和 EPUB 导出按钮，这两项可使用 CLI。</li>
 <li>精确向量检索与 JSON 快照优先保证结果透明；大规模个人文件库的速度和召回率仍需用你的真实数据测试。</li>
 <li>没有内置自动 wiki 合成、文件夹事件实时监控、云同步或自动模型下载。定期元数据检查只提示可能需要刷新；索引完成与检索命中不能替代原文核实。</li>
 </ul>
 
 <h2 id="troubleshoot">遇到问题时</h2>
 <table><thead><tr><th>现象</th><th>下一步</th></tr></thead><tbody>
-<tr><td>没有检索结果</td><td>先点击搜索输入框尾部的清除按钮，回到完整实时文件树确认原件存在。新文件尚未索引时不会出现在索引搜索中；清空标签过滤，再刷新索引。Text pattern 检查原文模式，Full text 适合关键词相关性。</td></tr>
+<tr><td>没有检索结果</td><td>先点击搜索输入框尾部的清除按钮，回到完整实时文件树确认原件存在。新文件尚未索引时不会出现在索引搜索中；确认已启用合适的方式，再刷新索引。Text 查找原文文字，Full text 适合关键词相关性。</td></tr>
 <tr><td>显示“no index”或索引目录缺失</td><td>打开正确的知识库 root，点击 Refresh index。配置文件和原件应保留，派生索引可以重建。</td></tr>
 <tr><td>一直显示“Opening knowledge folder…”</td><td>检查 macOS 是否正在等待访问“文稿”“桌面”或“下载”目录的权限确认；对你选择的知识库允许访问，或使用 Library 面板的 Choose 选择目录。应用重新签名后可能再次请求授权；不要绕过系统权限。</td></tr>
-<tr><td>Meaning / Text + meaning 报错</td><td>确认本地服务运行且身份匹配，再在 Library 开启 Build semantic search index 并刷新。使用 CLI doctor --embeddings 获取检查结果。</td></tr>
+<tr><td>启用 Meaning 后报错</td><td>确认本地服务运行且身份匹配，再在 Library 开启 Build semantic search index 并刷新。使用 CLI doctor --embeddings 获取检查结果。</td></tr>
 <tr><td>视频或语音索引缺少覆盖</td><td>左侧重新检查 FFmpeg / ffprobe；音频还需转写 sidecar，或同时配置 whisper-cli 与本地模型。</td></tr>
 <tr><td>终端未打开或安装失败</td><td>启动请求失败或未确认时，先看左侧交接记录，再确认终端是否已经打开；安装中的错误与结束结果在终端查看。缺少 Homebrew 时先按官方说明配置；联网、磁盘、权限或编译问题需要在本机解决，完成后重新检查依赖。</td></tr>
 <tr><td>无法完整预览文档</td><td>尝试 Quick Look 或 Open original 查看原始文件。提取状态和警告说明当前检索覆盖，不会宣称未读到的内容已经被索引。</td></tr>

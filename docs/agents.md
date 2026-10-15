@@ -39,3 +39,6 @@ Read larger originals through the agent's file tools after using the returned pa
 Use `index` with `embeddings: true` only when the local provider is running.
 A failed provider is an error, not evidence of an empty corpus.
 JSON output on the CLI is equivalent evidence for agents without MCP support.
+CLI and MCP search keep a single mode and required-tag filters; repeated tags require every complete value, ignoring case by default.
+The CLI's explicit `--case-sensitive` flag also makes tag filters case-sensitive.
+The desktop's method chips instead treat comma-separated keywords, including tag values, as alternatives through any enabled method.

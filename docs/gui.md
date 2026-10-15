@@ -36,21 +36,30 @@ Read [the dependency guide](dependencies.md#runtime-portability) before copying 
 2. Select **Open** for an existing knowledge root, or **Initialize** to create the template and first lexical index.
 3. Select a destination folder and **Add files** beside the tree to copy files there without replacing an existing file; no selection uses the root.
 4. Select **Refresh index** in the bottom status bar after external file changes.
-5. Enter a query and press Enter or select **Search**; use **Search options** for another search method or exact tags.
+5. Enter a query and press Enter or select **Search**; enable the compact method chips for the same comma-separated keywords.
 6. Select a result to inspect its preview and source path.
 
-The tag filter in **Search options** uses comma-separated exact values.
-Every entered tag must match.
-An empty query browses files with the current tag filters.
+Enable **Full text**, **Text**, **Meaning**, **Files**, and **Tags** independently below the query field.
+Full text is enabled by default; click a chip to include or exclude that method from the next search.
+ASCII and Chinese commas separate keywords; empty entries and case-insensitive duplicates are ignored.
+Any keyword through any enabled method can retrieve a file.
+Tags matches complete tag values without case sensitivity and uses the same query field.
+For example, enable only Tags and enter `research, travel` to find either complete tag.
+Text searches literal text without case sensitivity; regex punctuation remains literal in the desktop.
+The CLI retains its existing regex mode and required-tag filters.
+An empty query restores live browsing, and a nonempty query requires at least one enabled method.
+A selected Meaning method requires a compatible local provider; a method failure retains the previous successful results and their conditions.
+
 The browsing tree reads live directories, including empty folders and files that have not been indexed.
 Search retains up to 10,000 evidence records from the last published snapshot.
-Active searches show ranked file rows rather than directory groups; each file starts with its best returned evidence.
-Expand a file to inspect its other occurrences, including separate line and media-time locations.
+Active searches show ranked file rows rather than directory groups.
+Images have one leaf row, without separate metadata and visual-vector children.
+Text results expand only for distinct line locations; recordings expand only for distinct time ranges.
+Repeated locations and unlocated metadata do not appear as extra navigation targets.
 The first page shows 50 distinct files; **Show 50 more files** reveals the next page in the same order.
-Semantic and combined results use **candidates**, because vector similarity has no calibrated match threshold.
-Hover over the file count to inspect the distinct returned file count, evidence count, and any result-limit notice.
-Use the clear button inside the search field to clear the query and tags and restore directory browsing.
-It remains available for tag-only searches and existing results.
+Results involving Meaning use **candidates**, because vector similarity has no calibrated match threshold.
+Hover over the file count to inspect distinct files, useful locations, retained retrieval records, and any result-limit notice.
+Use the clear button inside the search field to clear keywords and restore directory browsing without changing enabled methods.
 
 Open **File details** for the selected file's labelled **Tags** and **Notes** fields.
 Select **Save tags and notes** to write a separate record with the knowledge library, without changing the original or starting indexing.
@@ -64,18 +73,18 @@ The description is useful for binary files that have no extractable text.
 
 ## Workspace
 
-The single top search row contains the query, inline clearing, a search-options disclosure, and Search.
-Search options group the mode dropdown and exact tags; their summary keeps active restrictions visible when closed.
-Select **Apply** or **Search** to apply edited options; **changes not applied** distinguishes them from the conditions that produced the displayed results.
+The single top search row contains the query, inline clearing, and Search.
+A compact row of method chips keeps enabled retrieval methods visible without a second query field or dropdown.
+Press Enter or select **Search** to apply edited keywords and methods; unapplied changes remain distinguishable from the displayed results.
 A failed search retains the last successful view and its actual conditions.
-Descriptive search labels identify full-text, text-pattern, meaning, combined, and filename/notes retrieval without requiring algorithm names.
+Descriptive chip labels identify full text, literal text, meaning, file names and notes, and exact tags without requiring algorithm names.
 The bottom status bar normally occupies one row, with the library name and path, transfer destination, environment observations, and index controls.
 Hover over an action icon or status item to show its full hint temporarily; leaving it restores the single-row layout.
 The library name and path share one Finder action, and routine preview-ready and file-row instructions are omitted.
 The **Library** panel contains folder selection, initialization, and the next-refresh semantic-index option and is collapsed during normal reading.
 **Add files** belongs to the file-tree toolbar; index refresh appears only beside index status in the footer.
 During browsing, the left pane groups live files by directory; expand or collapse a folder to control the visible tree.
-During search, the same pane preserves returned file rank and collapses additional evidence under each source.
+During search, the same pane preserves returned file rank and collapses distinct line or time locations under each source.
 Use a file's context menu to open it, reveal it in Finder, copy it, copy its absolute or relative path, inspect metadata, or move it to Trash after confirmation.
 Right-click selects the menu's target directly; clicking the preview or elsewhere outside the menu dismisses it, as does Escape.
 Paste copied files into a folder, drop external files to copy them, or drag an owned file to move it within the library.
@@ -90,7 +99,7 @@ Click the green logo to return from the guide without clearing the query, result
 ## Guide And Environment
 
 Select **说明与环境** to read the in-app Chinese guide and check external tools.
-The guide covers initialization, imports, exact tags, each search mode, previews, metadata, CLI/MCP use, backup, and current limits.
+The guide covers initialization, imports, exact tags, enabled search methods, previews, metadata, CLI/MCP use, backup, and current limits.
 The environment controls check Homebrew, FFmpeg, ffprobe, and whisper-cli without installing anything.
 Select **在终端安装 FFmpeg** or **在终端安装 whisper.cpp** to start the fixed Homebrew command.
 Terminal shows progress, output, and the command's exit result; Omni Knowledge reports that it handed off the command.
