@@ -99,9 +99,92 @@ fn frontmatter_and_preview_preserve_unicode_without_active_content() {
     assert!(html.contains("<h1>标题</h1>"));
     assert!(!html.contains("<script"));
     assert!(!html.contains("onerror"));
-    assert!(!html.contains("javascript:"));
+    assert!(!html.contains("href=\"javascript:"));
+    assert!(!html.contains("src=\"javascript:"));
+    assert!(html.contains("javascript:alert(3)"));
     assert!(!html.contains("https://example.com/tracker"));
     assert!(!html.contains("remote.example"));
+}
+
+/// Source evidence uses the same CRLF, blank-line, and Unicode positions as indexed text.
+#[test]
+fn text_preview_numbers_and_targets_exact_source_lines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("lines.txt");
+    fs::write(
+        &path,
+        "First\r\n\r\n帽子 <script>unsafe</script>\r\nLast\r\n",
+    )
+    .unwrap();
+    let html = extract::preview_html_at_line(&path, 4096, Some(3)).unwrap();
+    assert_eq!(html.matches("class=\"line-number\"").count(), 4);
+    assert!(html.contains("id=\"source-line-2\""));
+    assert!(html.contains("id=\"source-line-3\" data-preview-target=\"true\""));
+    assert_eq!(html.matches("data-preview-target=\"true\"").count(), 1);
+    assert!(html.contains("帽子 &lt;script&gt;unsafe&lt;/script&gt;"));
+    assert!(!html.contains("<script>"));
+    assert!(!html.contains("source-line-5"));
+}
+
+/// Markdown remains rendered by default, while a source hit includes original front-matter lines.
+#[test]
+fn markdown_preview_retains_rendering_and_targets_source_not_rendered_lines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    fs::write(&path, "---\ntitle: 帽子\n---\n# Heading\n\nA matching sentence.\n\n```mermaid\ngraph LR; A-->B\n```\n").unwrap();
+    let normal = extract::preview_html(&path, 4096).unwrap();
+    assert!(normal.contains("<details class=\"line-preview\">"));
+    assert!(normal.contains("<h1>Heading</h1>"));
+    assert!(normal.contains("language-mermaid"));
+    assert!(!normal.contains("data-preview-target=\"true\""));
+    let targeted = extract::preview_html_at_line(&path, 4096, Some(6)).unwrap();
+    assert!(targeted.contains("<details class=\"line-preview\" open>"));
+    assert!(targeted.contains("id=\"source-line-6\" data-preview-target=\"true\""));
+    assert!(targeted.contains("Source lines"));
+    assert!(targeted.contains("A matching sentence."));
+}
+
+/// Converted HTML evidence numbers extracted lines, and imported attributes cannot forge a hit.
+#[test]
+fn html_preview_targets_extracted_lines_without_accepting_source_targets() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("document.html");
+    fs::write(&path, "<h1>Title</h1><p>First paragraph.</p><p data-preview-target=\"true\">Second paragraph.</p>").unwrap();
+    let text = extract::extract(&path, 4096).unwrap().text;
+    let target = text
+        .lines()
+        .position(|line| line.contains("Second"))
+        .unwrap()
+        + 1;
+    let html = extract::preview_html_at_line(&path, 4096, Some(target)).unwrap();
+    assert!(html.contains("Extracted text lines"));
+    assert!(html.contains(&format!(
+        "id=\"source-line-{target}\" data-preview-target=\"true\""
+    )));
+    assert_eq!(html.matches("data-preview-target=\"true\"").count(), 1);
+    assert!(html.contains("<h1>Title</h1>"));
+    let stale = extract::preview_html_at_line(&path, 4096, Some(999)).unwrap();
+    assert!(stale.contains("Line 999 is not available in the current text"));
+    assert!(!stale.contains("data-preview-target=\"true\""));
+}
+
+/// Distant evidence remains visible in a bounded row window without highlighting a wrong line.
+#[test]
+fn numbered_preview_bounds_rows_and_rejects_unavailable_line_evidence() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("many-lines.txt");
+    let text: String = (1..=20_050).map(|line| format!("Line {line}\n")).collect();
+    fs::write(&path, text).unwrap();
+    let html = extract::preview_html_at_line(&path, 512_000, Some(20_040)).unwrap();
+    assert_eq!(html.matches("class=\"line-number\"").count(), 20_000);
+    assert!(html.contains("id=\"source-line-20040\" data-preview-target=\"true\""));
+    assert!(html.contains("Showing lines 51–20050 of 20050"));
+    assert!(!html.contains("id=\"source-line-1\""));
+    for missing in [0, 20_051] {
+        let stale = extract::preview_html_at_line(&path, 512_000, Some(missing)).unwrap();
+        assert!(stale.contains(&format!("Line {missing} is not available")));
+        assert!(!stale.contains("data-preview-target=\"true\""));
+    }
 }
 
 /// ZIP document extraction reads text values instead of archive-order or shared-string indices.

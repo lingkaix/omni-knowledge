@@ -1,7 +1,7 @@
 # Product Requirements
 
 Status: Accepted user requirements.
-Acceptance source: The engineer's request in the Codex conversation on 2026-10-14.
+Acceptance source: The engineer's request in the Codex conversation on 2026-10-14, with the desktop and ranked-result follow-ups on 2026-10-15.
 This document owns the requested product outcome; implementation defaults below remain replaceable methods under the engineer's instruction to explore and design.
 
 ## Outcome
@@ -54,7 +54,10 @@ Use suitable GPUI Kit components for the desktop's controls and interaction.
 Keep knowledge-folder selection and initialization in an on-demand panel because they are infrequent operations.
 Place the next-refresh semantic-index option in that panel and explain that it neither starts processing nor indicates service availability.
 Keep adding files beside the tree and index refresh beside index status; do not duplicate index refresh in the search toolbar.
-Show files in a collapsible directory tree, with selectable leaves and visible source identity.
+Show unfiltered files in a collapsible directory tree, with selectable leaves and visible source identity.
+For an active search, preserve the retrieval order in ranked file rows instead of regrouping files by directory.
+Group a file's additional evidence beneath its best returned evidence, and distinguish semantic candidates from exact matches.
+Clicking line evidence must reveal and highlight its numbered text location; retain formatted document reading separately.
 Preserve search settings, results, and the selected document when opening and closing the guide.
 Keep metadata editing available without reserving a large permanent toolbar row.
 Save editable metadata directly without starting an index build, and show whether the write succeeded.

@@ -17,7 +17,7 @@ Open **Library**, then select **Choose** for an existing knowledge folder or ent
 Use **Refresh index** after an agent edits files.
 Select a result to preview it; **Open original** opens the source in its installed application.
 See [the desktop guide](docs/gui.md) for controls and preview limits.
-The main workspace keeps one search row at the top and files in a collapsible directory tree.
+The main workspace keeps one search row at the top, a collapsible directory tree for browsing, and ranked file results during search.
 Use **Search options** for tags or another search method, and clear the query and filters inside the search field.
 **File details** shows readable file properties, copyable paths, and labelled tags and notes saved with the library.
 The build script applies and verifies a local ad-hoc signature; it does not create a notarized distribution package.

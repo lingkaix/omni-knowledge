@@ -55,7 +55,13 @@ Opening a file menu returns Cocoa focus to GPUI; the existing foreground tick di
 Identify each menu session so delayed dismissal from a replaced menu cannot close the new target's menu.
 This bridge uses AppKit view identity and adds no document script or source-content privilege.
 Use a virtualized tree with live directory contents so empty folders and unindexed files remain manageable.
-Keep search as a clearable filter over this browsing tree.
+Keep search clearable and restore the complete live browsing tree after clearing it.
+While search is active, display distinct files in first-occurrence retrieval order, with additional evidence collapsed beneath the file.
+Do not regroup ranked results by directory: that traversal can put a weak license fragment ahead of highly relevant photos.
+Initially show 50 distinct files and disclose more in the retained order; this is a presentation bound, not a similarity threshold.
+Describe semantic results as candidates and distinguish returned files from repeated vector fragments.
+Pass exact indexed line coordinates through the background preview request and show a numbered, highlighted text view for a selected occurrence.
+Keep Markdown source lines separate from its rendered layout, and label HTML and converted-document coordinates as extracted text.
 Offer native Quick Look and default-application actions for formats such as RAF that the embedded image renderer does not support.
 
 ## Alternatives And Consequences

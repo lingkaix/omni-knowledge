@@ -43,7 +43,12 @@ The tag filter in **Search options** uses comma-separated exact values.
 Every entered tag must match.
 An empty query browses files with the current tag filters.
 The browsing tree reads live directories, including empty folders and files that have not been indexed.
-Search shows up to 10,000 hits from the last published snapshot.
+Search retains up to 10,000 evidence records from the last published snapshot.
+Active searches show ranked file rows rather than directory groups; each file starts with its best returned evidence.
+Expand a file to inspect its other occurrences, including separate line and media-time locations.
+The first page shows 50 distinct files; **Show 50 more files** reveals the next page in the same order.
+Semantic and combined results use **candidates**, because vector similarity has no calibrated match threshold.
+Hover over the file count to inspect the distinct returned file count, evidence count, and any result-limit notice.
 Use the clear button inside the search field to clear the query and tags and restore directory browsing.
 It remains available for tag-only searches and existing results.
 
@@ -69,7 +74,8 @@ Hover over an action icon or status item to show its full hint temporarily; leav
 The library name and path share one Finder action, and routine preview-ready and file-row instructions are omitted.
 The **Library** panel contains folder selection, initialization, and the next-refresh semantic-index option and is collapsed during normal reading.
 **Add files** belongs to the file-tree toolbar; index refresh appears only beside index status in the footer.
-The left pane groups files by directory; expand or collapse a folder to control the visible tree.
+During browsing, the left pane groups live files by directory; expand or collapse a folder to control the visible tree.
+During search, the same pane preserves returned file rank and collapses additional evidence under each source.
 Use a file's context menu to open it, reveal it in Finder, copy it, copy its absolute or relative path, inspect metadata, or move it to Trash after confirmation.
 Right-click selects the menu's target directly; clicking the preview or elsewhere outside the menu dismisses it, as does Escape.
 Paste copied files into a folder, drop external files to copy them, or drag an owned file to move it within the library.
@@ -130,6 +136,12 @@ Images, supported audio, and supported video use WKWebView media elements.
 Unsupported image formats such as RAF show a clear coverage message and remain available through **Quick Look** or **Open original**.
 The file-details inspector shows live paths, MIME type, readable size, creation and modification dates, saved-record location, tags, and notes without reading source contents or the complete index.
 Selecting a timed audio or video result starts its preview at the returned evidence timestamp.
+Selecting line evidence opens numbered text and centers the highlighted line; selecting another occurrence of the same file changes that location.
+Plain text has a left number gutter; Markdown retains original source coordinates, including front matter.
+For Markdown, HTML, and EPUB, close the numbered-text disclosure to return to formatted reading.
+HTML, EPUB, PDF, and Office lines describe the extracted text used by the index, rather than page or source-markup positions.
+If the current text has no requested line, the preview reports that stale evidence instead of highlighting a substitute.
+Numbered previews contain at most 20,000 rows, centered around a distant requested line, with an explicit window notice.
 PDF previews attempt the native WebKit viewer and include extracted text.
 If the embedded PDF viewer is unavailable, expand **Extracted text** or select **Open original**.
 EPUB and Office files use the available safe extraction preview.

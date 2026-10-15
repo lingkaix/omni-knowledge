@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::File,
     io::{Read, Seek, SeekFrom},
     ops::Range,
@@ -70,7 +70,25 @@ document.querySelectorAll('pre > code').forEach(code => {
   } else { hljs.highlightElement(code); }
 });
 mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'neutral',maxTextSize:100000});
-mermaid.run({querySelector:'.mermaid',suppressErrors:true}).catch(() => {});
+/** Render only visible diagrams, then retain the selected source line after their layout settles. */
+function renderDiagrams() {
+  const nodes = Array.from(document.querySelectorAll('.mermaid:not([data-processed])')).filter(node => node.getClientRects().length);
+  return nodes.length ? mermaid.run({nodes,suppressErrors:true}).catch(() => {}) : Promise.resolve();
+}
+/** Reveal all containing disclosures and position the exact indexed text row. */
+function scrollEvidence() {
+  const target = document.querySelector('[data-preview-target="true"]');
+  if (!target) return;
+  for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === 'DETAILS') parent.open = true;
+  }
+  target.scrollIntoView({block:'center'});
+}
+renderDiagrams().then(() => { if (!window.location.hash) scrollEvidence(); });
+window.addEventListener('load', () => { if (!window.location.hash) scrollEvidence(); }, {once:true});
+document.querySelectorAll('details.line-preview').forEach(detail => detail.addEventListener('toggle', () => {
+  if (!detail.open) renderDiagrams();
+}));
 const ids = new Set();
 for (const heading of document.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
   const base = heading.id || heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N} _-]/gu, '').replace(/\s+/g, '-') || 'section';
@@ -122,100 +140,61 @@ struct PreviewState {
     body: Arc<str>,
 }
 
-/// A directory containing sorted subdirectories and every matching source occurrence.
-#[derive(Default)]
-struct FileTree {
-    folders: BTreeMap<String, FileTree>,
-    files: BTreeMap<String, Vec<usize>>,
-    matches: usize,
+/// Files displayed per page; evidence is grouped before applying this presentation bound.
+const RESULT_PAGE_SIZE: usize = 50;
+
+/// One source with its best returned evidence first and every additional occurrence retained.
+struct RankedFile {
+    path: String,
+    indices: Vec<usize>,
 }
 
-/// One visible directory or source occurrence, retaining the original search result index.
-#[cfg(test)]
-#[derive(Debug, PartialEq, Eq)]
-enum TreeRow {
-    Folder {
-        path: String,
-        name: String,
-        depth: usize,
-        matches: usize,
-    },
-    File {
-        name: String,
-        depth: usize,
-        hit_index: usize,
-        continuation: bool,
-    },
-}
-
-impl FileTree {
-    /// Add a validated root-relative path without merging its line or media occurrences.
-    fn insert(&mut self, path: &str, hit_index: usize) {
-        self.matches += 1;
-        if let Some((folder, remainder)) = path.split_once('/') {
-            self.folders
-                .entry(folder.to_owned())
-                .or_default()
-                .insert(remainder, hit_index);
-        } else {
-            self.files
-                .entry(path.to_owned())
-                .or_default()
-                .push(hit_index);
-        }
-    }
-
-    #[cfg(test)]
-    /// Append visible rows; collapse identities use full relative directory paths.
-    fn append_rows(
-        &self,
-        parent: &str,
-        depth: usize,
-        collapsed: &BTreeSet<String>,
-        rows: &mut Vec<TreeRow>,
-    ) {
-        for (name, folder) in &self.folders {
-            let path = if parent.is_empty() {
-                name.clone()
-            } else {
-                format!("{parent}/{name}")
-            };
-            rows.push(TreeRow::Folder {
-                path: path.clone(),
-                name: name.clone(),
-                depth,
-                matches: folder.matches,
-            });
-            if !collapsed.contains(&path) {
-                folder.append_rows(&path, depth + 1, collapsed, rows);
-            }
-        }
-        for (name, indices) in &self.files {
-            for (occurrence, &hit_index) in indices.iter().enumerate() {
-                rows.push(TreeRow::File {
-                    name: name.clone(),
-                    depth: depth + usize::from(occurrence > 0),
-                    hit_index,
-                    continuation: occurrence > 0,
-                });
-            }
-        }
-    }
-}
-
-/// Group indexed results into directories while preserving ranked occurrences inside each file.
-#[cfg(test)]
-fn tree_rows(hits: &[SearchHit], collapsed: &BTreeSet<String>) -> Vec<TreeRow> {
-    let mut tree = FileTree::default();
+/// Group occurrences in their returned order without introducing directory or filename sorting.
+fn ranked_files(hits: &[SearchHit]) -> Vec<RankedFile> {
+    let mut positions = HashMap::new();
+    let mut files: Vec<RankedFile> = Vec::new();
     for (index, hit) in hits.iter().enumerate() {
-        tree.insert(&hit.path, index);
+        let position = *positions.entry(hit.path.as_str()).or_insert_with(|| {
+            files.push(RankedFile {
+                path: hit.path.clone(),
+                indices: Vec::new(),
+            });
+            files.len() - 1
+        });
+        files[position].indices.push(index);
     }
-    let mut rows = Vec::new();
-    tree.append_rows("", 0, collapsed, &mut rows);
-    rows
+    files
 }
 
-/// Clear directory collapse identities only when the canonical library root changes.
+/// Describe returned file candidates separately from evidence fragments and unknown corpus totals.
+fn search_result_summary(hits: &[SearchHit], mode: SearchMode, shown: usize) -> String {
+    let files = ranked_files(hits).len();
+    let shown = shown.min(files);
+    let noun = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        "candidate files"
+    } else {
+        "files"
+    };
+    let bound = if hits.len() == 10_000 {
+        " · result limit reached"
+    } else {
+        ""
+    };
+    format!(
+        "{shown} of {files} {noun} · {} evidence fragments{bound}",
+        hits.len()
+    )
+}
+
+/// Describe an evidence location without treating similarity as a confidence percentage.
+fn evidence_label(hit: &SearchHit) -> String {
+    hit.line
+        .map(|line| format!("Line {line}"))
+        .or_else(|| hit.start_seconds.map(|time| format!("At {time:.1}s")))
+        .unwrap_or_else(|| "File evidence".into())
+}
+
+/// Clear retained expansion identities only when the canonical library root changes.
 fn reset_tree_on_root_change(
     previous: Option<&Path>,
     next: &Path,
@@ -239,18 +218,18 @@ fn status_target_matches(requested: &Path, selected: Option<&Path>) -> bool {
 /// Attach transient help to a stable native control identity instead of its changing diagnostic text.
 #[derive(Default)]
 struct HoverHint {
-    active: Option<(&'static str, String)>,
+    active: Option<(String, String)>,
 }
 
 impl HoverHint {
     /// Replace help on entry; an exit can clear only the control that still owns the visible hint.
-    fn update(&mut self, owner: &'static str, hovered: bool, detail: &str) {
+    fn update(&mut self, owner: &str, hovered: bool, detail: &str) {
         if hovered {
-            self.active = Some((owner, detail.to_owned()));
+            self.active = Some((owner.to_owned(), detail.to_owned()));
         } else if self
             .active
             .as_ref()
-            .is_some_and(|(active, _)| *active == owner)
+            .is_some_and(|(active, _)| active == owner)
         {
             self.clear();
         }
@@ -413,51 +392,20 @@ fn browse_items(
         .collect()
 }
 
-/// Convert all ranked occurrences to a virtualized tree without discarding duplicate evidence.
+/// Build ranked file rows, with additional occurrences collapsed beneath their source.
 fn match_items(
     hits: &[SearchHit],
-    collapsed: &BTreeSet<String>,
+    expanded: &BTreeSet<String>,
+    limit: usize,
     targets: &mut BTreeMap<String, TreeTarget>,
 ) -> Vec<TreeItem> {
-    /// Recursively convert sorted directory groups, preserving each hit index.
-    fn convert(
-        node: &FileTree,
-        parent: &str,
-        hits: &[SearchHit],
-        collapsed: &BTreeSet<String>,
-        targets: &mut BTreeMap<String, TreeTarget>,
-    ) -> Vec<TreeItem> {
-        let mut items = Vec::new();
-        for (name, folder) in &node.folders {
-            let path = if parent.is_empty() {
-                name.clone()
-            } else {
-                format!("{parent}/{name}")
-            };
-            let id = format!("match-folder:{path}");
-            targets.insert(
-                id.clone(),
-                TreeTarget {
-                    relative: path.clone(),
-                    directory: true,
-                    nested: false,
-                    hit_index: None,
-                },
-            );
-            items.push(
-                TreeItem::new(id, name.clone())
-                    .children(convert(folder, &path, hits, collapsed, targets))
-                    .expanded(!collapsed.contains(&path)),
-            );
-        }
-        for (name, indices) in &node.files {
-            for &index in indices {
+    ranked_files(hits)
+        .into_iter()
+        .enumerate()
+        .take(limit)
+        .map(|(rank, file)| {
+            let mut occurrences = file.indices.iter().map(|&index| {
                 let hit = &hits[index];
-                let evidence = hit
-                    .line
-                    .map(|line| format!(" · line {line}"))
-                    .or_else(|| hit.start_seconds.map(|time| format!(" · {time:.1}s")))
-                    .unwrap_or_default();
                 let id = format!("match:{index}:{}", hit.path);
                 targets.insert(
                     id.clone(),
@@ -468,19 +416,40 @@ fn match_items(
                         hit_index: Some(index),
                     },
                 );
-                items.push(TreeItem::new(
+                TreeItem::new(
                     id,
-                    format!("#{rank} {name}{evidence}", rank = index + 1),
-                ));
-            }
-        }
-        items
-    }
-    let mut root = FileTree::default();
-    for (index, hit) in hits.iter().enumerate() {
-        root.insert(&hit.path, index);
-    }
-    convert(&root, "", hits, collapsed, targets)
+                    format!(
+                        "{} · {}",
+                        evidence_label(hit),
+                        hit.snippet
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(90)
+                            .collect::<String>()
+                    ),
+                )
+            });
+            let best_index = file.indices[0];
+            let best = &hits[best_index];
+            let mut parent = occurrences.next().expect("ranked files contain evidence");
+            let location = if best.line.is_some() || best.start_seconds.is_some() {
+                format!(" · {}", evidence_label(best))
+            } else {
+                String::new()
+            };
+            let other = if file.indices.len() > 1 {
+                format!(" · {} more", file.indices.len() - 1)
+            } else {
+                String::new()
+            };
+            parent.label = format!("#{} {}{location}{other}", rank + 1, file.path).into();
+            parent
+                .children(occurrences)
+                .expanded(expanded.contains(&file.path))
+        })
+        .collect()
 }
 
 /// Visit retained items to persist expansion state after the component changes it.
@@ -578,13 +547,20 @@ impl<T> CoalescedRead<T> {
     }
 }
 
+/// Source coordinates are independent of the native selection and the document's rendered layout.
+#[derive(Clone, Default)]
+struct PreviewLocation {
+    start_seconds: Option<f64>,
+    line: Option<usize>,
+    anchor: Option<String>,
+}
+
 /// One immutable preview intent; only the latest root and request may update the window.
 #[derive(Clone)]
 struct PreviewRequest {
     root: PathBuf,
     relative: String,
-    start_seconds: Option<f64>,
-    anchor: Option<String>,
+    location: PreviewLocation,
     show_metadata: bool,
     revision: u64,
     metadata_revision: u64,
@@ -611,6 +587,15 @@ impl SearchFilter {
     /// Distinguish an actual tree restriction from the next query's mode setting.
     fn restricts_files(&self) -> bool {
         !self.query.trim().is_empty() || !self.tags.is_empty()
+    }
+
+    /// Empty text uses exact-tag file browsing even when a semantic mode remains selected.
+    fn effective_mode(&self) -> SearchMode {
+        if self.query.trim().is_empty() {
+            SearchMode::Files
+        } else {
+            self.mode
+        }
     }
 }
 
@@ -1057,7 +1042,8 @@ struct LibraryWindow {
     guide_anchor: Option<&'static str>,
     library_panel_open: bool,
     metadata_open: bool,
-    collapsed_folders: BTreeSet<String>,
+    expanded_result_files: BTreeSet<String>,
+    result_file_limit: usize,
     hover_hint: HoverHint,
     runtime_status: Option<RuntimeStatus>,
     runtime_log: String,
@@ -1295,7 +1281,8 @@ impl LibraryWindow {
             guide_anchor: None,
             library_panel_open: false,
             metadata_open: false,
-            collapsed_folders: BTreeSet::new(),
+            expanded_result_files: BTreeSet::new(),
+            result_file_limit: RESULT_PAGE_SIZE,
             hover_hint: HoverHint::default(),
             runtime_status: None,
             runtime_log:
@@ -1403,7 +1390,7 @@ impl LibraryWindow {
                 this.busy = false;
                 match result {
                     Ok(JobResult::Library { root, name, hits, message, initialize_index }) => {
-                        reset_tree_on_root_change(this.root.as_deref(), &root, &mut this.collapsed_folders);
+                        reset_tree_on_root_change(this.root.as_deref(), &root, &mut this.expanded_result_files);
                         let changed = this.root.as_ref() != Some(&root);
                         this.file_menu = None;
                         this.preview_revision+=1;
@@ -1604,11 +1591,7 @@ impl LibraryWindow {
             self.refresh_directories(cx);
             return;
         }
-        let mode = if filter.query.trim().is_empty() {
-            SearchMode::Files
-        } else {
-            self.mode
-        };
+        let mode = filter.effective_mode();
         let lane = self.search_lane.enqueue(SearchRequest {
             root,
             revision: self.search_revision,
@@ -1647,9 +1630,14 @@ impl LibraryWindow {
                     match result {
                         Ok(hits) => {
                             this.search_active = true;
-                            this.applied_search = Some(filter);
-                            this.status =
-                                format!("Matches: {} · clear × to show all files", hits.len());
+                            this.applied_search = Some(filter.clone());
+                            this.result_file_limit = RESULT_PAGE_SIZE;
+                            this.expanded_result_files.clear();
+                            this.status = search_result_summary(
+                                &hits,
+                                filter.effective_mode(),
+                                this.result_file_limit,
+                            );
                             this.hits = Rc::new(hits);
                             this.rebuild_tree(cx);
                         }
@@ -1664,16 +1652,30 @@ impl LibraryWindow {
     }
 
     /// Prepare a safe preview fragment for a selected search result.
-    fn select(&mut self, relative: String, start_seconds: Option<f64>, cx: &mut Context<Self>) {
-        self.select_document(relative, start_seconds, None, false, cx);
+    fn select(
+        &mut self,
+        relative: String,
+        start_seconds: Option<f64>,
+        line: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_document(
+            relative,
+            PreviewLocation {
+                start_seconds,
+                line,
+                anchor: None,
+            },
+            false,
+            cx,
+        );
     }
 
     /// Resolve local navigation on a worker and preserve a requested heading or inspector state.
     fn select_document(
         &mut self,
         relative: String,
-        start_seconds: Option<f64>,
-        anchor: Option<String>,
+        location: PreviewLocation,
         show_metadata: bool,
         cx: &mut Context<Self>,
     ) {
@@ -1691,8 +1693,7 @@ impl LibraryWindow {
         self.preview_lane.enqueue(PreviewRequest {
             root,
             relative,
-            start_seconds,
-            anchor,
+            location,
             show_metadata,
             revision: self.preview_revision,
             metadata_revision: self.metadata_revision,
@@ -1732,7 +1733,8 @@ impl LibraryWindow {
             let body = preview_body(
                 &info.path,
                 &info.relative,
-                request.start_seconds,
+                request.location.start_seconds,
+                request.location.line,
                 &request.issuer,
             )?;
             let properties = FilePropertyLabels {
@@ -1746,7 +1748,7 @@ impl LibraryWindow {
                 body: body.into(),
                 info: Box::new(info),
                 properties,
-                anchor: request.anchor,
+                anchor: request.location.anchor,
                 show_metadata: request.show_metadata,
             })
         });
@@ -2995,7 +2997,15 @@ impl LibraryWindow {
                     self.reload_preview();
                 }
                 Ok(LinkRoute::Local { relative, anchor }) => {
-                    self.select_document(relative, None, anchor, false, cx);
+                    self.select_document(
+                        relative,
+                        PreviewLocation {
+                            anchor,
+                            ..Default::default()
+                        },
+                        false,
+                        cx,
+                    );
                 }
                 Err(error) => self.status = format!("Link blocked: {error:#}"),
             }
@@ -3012,7 +3022,12 @@ impl LibraryWindow {
             .map(|entry| entry.item().id.to_string());
         let mut targets = BTreeMap::new();
         self.tree_items = if self.search_active {
-            match_items(&self.hits, &self.collapsed_folders, &mut targets)
+            match_items(
+                &self.hits,
+                &self.expanded_result_files,
+                self.result_file_limit,
+                &mut targets,
+            )
         } else {
             browse_items(
                 &self.directory_cache,
@@ -3035,23 +3050,22 @@ impl LibraryWindow {
     fn tree_changed(&mut self, cx: &mut Context<Self>) {
         let mut loads = Vec::new();
         visit_items(&self.tree_items, &mut |item| {
-            if let Some(target) = self.tree_targets.get(item.id.as_ref())
-                && target.directory
-                && !target.nested
-            {
-                if self.search_active {
+            if let Some(target) = self.tree_targets.get(item.id.as_ref()) {
+                if self.search_active && item.is_folder() {
                     if item.is_expanded() {
-                        self.collapsed_folders.remove(&target.relative);
+                        self.expanded_result_files.insert(target.relative.clone());
                     } else {
-                        self.collapsed_folders.insert(target.relative.clone());
+                        self.expanded_result_files.remove(&target.relative);
                     }
-                } else if item.is_expanded() {
-                    self.expanded_folders.insert(target.relative.clone());
-                    if !self.directory_cache.contains_key(&target.relative) {
-                        loads.push(target.relative.clone());
+                } else if !self.search_active && target.directory && !target.nested {
+                    if item.is_expanded() {
+                        self.expanded_folders.insert(target.relative.clone());
+                        if !self.directory_cache.contains_key(&target.relative) {
+                            loads.push(target.relative.clone());
+                        }
+                    } else {
+                        self.expanded_folders.remove(&target.relative);
                     }
-                } else {
-                    self.expanded_folders.remove(&target.relative);
                 }
             }
         });
@@ -3169,11 +3183,10 @@ impl LibraryWindow {
     /// Expand all physical folders on demand, or collapse them without losing the selected preview.
     fn expand_folders(&mut self, expand: bool, cx: &mut Context<Self>) {
         if self.search_active {
-            self.collapsed_folders.clear();
-            if !expand {
-                for target in self.tree_targets.values().filter(|target| target.directory) {
-                    self.collapsed_folders.insert(target.relative.clone());
-                }
+            self.expanded_result_files.clear();
+            if expand {
+                self.expanded_result_files
+                    .extend(self.hits.iter().map(|hit| hit.path.clone()));
             }
         } else {
             self.expand_all = expand;
@@ -3233,7 +3246,7 @@ impl LibraryWindow {
                         self.metadata_open = true;
                         cx.notify();
                     } else {
-                        self.select_document(target.relative, None, None, true, cx);
+                        self.select_document(target.relative, PreviewLocation::default(), true, cx);
                     }
                 }
             }
@@ -3309,7 +3322,15 @@ impl LibraryWindow {
                 .hit_index
                 .and_then(|index| self.hits.get(index))
                 .and_then(|hit| hit.start_seconds);
-            self.select(target.relative.clone(), start, cx);
+            self.select(
+                target.relative.clone(),
+                start,
+                target
+                    .hit_index
+                    .and_then(|index| self.hits.get(index))
+                    .and_then(|hit| hit.line),
+                cx,
+            );
         }
         self.focus_native_input(cx);
         let revision = self.file_menu_session.open();
@@ -3572,7 +3593,15 @@ impl LibraryWindow {
                     .hit_index
                     .and_then(|index| self.hits.get(index))
                     .and_then(|hit| hit.start_seconds);
-                self.select(target.relative, time, cx);
+                self.select(
+                    target.relative,
+                    time,
+                    target
+                        .hit_index
+                        .and_then(|index| self.hits.get(index))
+                        .and_then(|hit| hit.line),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -3590,7 +3619,7 @@ impl LibraryWindow {
             .filter(|target| self.root.as_ref() == Some(&target.root))
             .map(|target| target.relative.clone())
             .or_else(|| self.selected.clone());
-        tree(&self.tree_state, move |ix, entry, _, _, _| {
+        tree(&self.tree_state, move |ix, entry, row_selected, _, _| {
             let target = targets.get(entry.item().id.as_ref()).cloned();
             let mut row = div()
                 .id(("source-content", ix))
@@ -3601,7 +3630,7 @@ impl LibraryWindow {
                 .h(px(32.))
                 .cursor_pointer();
             row = row.child(
-                Icon::new(if target.as_ref().is_some_and(|target| target.directory) {
+                Icon::new(if entry.is_folder() {
                     if entry.is_expanded() {
                         IconName::ChevronDown
                     } else {
@@ -3629,7 +3658,24 @@ impl LibraryWindow {
                     root,
                     relative: target.relative.clone(),
                 };
-                let selected = selected.as_ref() == Some(&target.relative) && !target.directory;
+                let hint_id = format!("source-row:{}", entry.item().id);
+                let detail = target
+                    .hit_index
+                    .and_then(|index| hits.get(index))
+                    .map(|hit| format!("{} · {} · {}", hit.path, evidence_label(hit), hit.snippet))
+                    .unwrap_or_else(|| target.relative.clone());
+                let hover_weak = weak.clone();
+                row = row.on_hover(move |hovered, _, cx| {
+                    let _ = hover_weak.update(cx, |this, cx| {
+                        this.hover_hint.update(&hint_id, *hovered, &detail);
+                        cx.notify();
+                    });
+                });
+                let selected = if target.hit_index.is_some() {
+                    row_selected
+                } else {
+                    selected.as_ref() == Some(&target.relative) && !target.directory
+                };
                 if target.nested {
                     row = row.child(div().text_size(px(10.)).child("child KB"));
                 }
@@ -3682,6 +3728,10 @@ impl LibraryWindow {
                     .hit_index
                     .and_then(|index| hits.get(index))
                     .and_then(|hit| hit.start_seconds);
+                let line = target
+                    .hit_index
+                    .and_then(|index| hits.get(index))
+                    .and_then(|hit| hit.line);
                 let folder_target = folder.clone();
                 let click = target.clone();
                 row = row.on_click(move |_, window, cx| {
@@ -3689,7 +3739,7 @@ impl LibraryWindow {
                         this.file_focus.focus(window);
                         this.selected_folder = folder_target.clone();
                         if !click.directory {
-                            this.select(click.relative.clone(), start, cx);
+                            this.select(click.relative.clone(), start, line, cx);
                         }
                         cx.notify();
                     });
@@ -3841,15 +3891,39 @@ impl Render for LibraryWindow {
                                 "Files"
                             }),
                     )
-                    .child(div().text_size(px(10.)).text_color(rgb(0x748a79)).child(
-                        if self.search_active {
-                            format!("Files: {files}")
-                        } else {
-                            format!("{files} loaded")
-                        },
-                    ))
                     .child(
-                        button("import", "Add files", false)
+                        div()
+                            .id("result-count")
+                            .text_size(px(10.))
+                            .text_color(rgb(0x748a79))
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                let detail = if this.search_active {
+                                    search_result_summary(&this.hits, this.applied_search.as_ref().map(|s| s.effective_mode()).unwrap_or(this.mode), this.result_file_limit)
+                                } else {
+                                    format!("{files} live files loaded from opened folders · Expand folders to load their contents")
+                                };
+                                this.hover_hint.update("result-count", *hovered, &detail);
+                                cx.notify();
+                            }))
+                            .child(if self.search_active {
+                                format!(
+                                    "{} / {files}{}",
+                                    self.result_file_limit.min(files),
+                                    if self.applied_search.as_ref().is_some_and(|search| matches!(
+                                        search.effective_mode(),
+                                        SearchMode::Semantic | SearchMode::Hybrid
+                                    )) {
+                                        " candidates"
+                                    } else {
+                                        " files"
+                                    }
+                                )
+                            } else {
+                                format!("{files} loaded")
+                            }),
+                    )
+                    .child(
+                        button("import", "", false)
                             .icon(IconName::Plus)
                             .disabled(self.root.is_none() || self.busy)
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -3863,15 +3937,42 @@ impl Render for LibraryWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
                     )
                     .child(
-                        self.action_icon("tree-expand", "＋", "Expand all folders", false, cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.expand_folders(true, cx))),
+                        self.action_icon(
+                            "tree-expand",
+                            "＋",
+                            "Expand all folders or result evidence",
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.expand_folders(true, cx))),
                     )
                     .child(
-                        self.action_icon("tree-collapse", "−", "Collapse all folders", false, cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.expand_folders(false, cx))),
+                        self.action_icon(
+                            "tree-collapse",
+                            "−",
+                            "Collapse all folders or result evidence",
+                            false,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.expand_folders(false, cx))),
                     ),
             )
             .child(div().flex_1().min_h_0().child(self.source_tree(cx)))
+            .when(
+                self.search_active && files > self.result_file_limit,
+                |sidebar| {
+                    sidebar.child(
+                        button("more-results", "Show 50 more files", false)
+                            .m_2()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.result_file_limit =
+                                    this.result_file_limit.saturating_add(RESULT_PAGE_SIZE);
+                                this.status = search_result_summary(&this.hits, this.applied_search.as_ref().map(|s| s.effective_mode()).unwrap_or(this.mode), this.result_file_limit);
+                                this.rebuild_tree(cx);
+                            })),
+                    )
+                },
+            )
             .when(popup.is_some(), |sidebar| {
                 sidebar.child(
                     div()
@@ -4193,6 +4294,7 @@ fn preview_body(
     path: &Path,
     relative: &str,
     start_seconds: Option<f64>,
+    line: Option<usize>,
     authority: &str,
 ) -> Result<String> {
     let mime = mime_guess::from_path(path).first_or_octet_stream();
@@ -4206,7 +4308,14 @@ fn preview_body(
     }
     let uri = escape(&url);
     let heading = format!("<h2>{}</h2>", escape(relative));
-    let body = if inline_image(path) {
+    let svg_text_hit = line.is_some()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("svg"));
+    let body = if svg_text_hit {
+        crate::extract::preview_html_at_line(path, 8 * 1024 * 1024, line)?
+    } else if inline_image(path) {
         format!("<img src=\"{uri}\" alt=\"{}\">", escape(relative))
     } else if unsupported_image(path, mime.essence_str()) {
         r#"<p class="warning">This image format is not supported by the embedded preview. Use Quick Look or Open original above. The original remains available for metadata indexing.</p>"#.into()
@@ -4215,13 +4324,13 @@ fn preview_body(
     } else if mime.type_() == mime_guess::mime::AUDIO {
         format!("<audio controls preload=\"metadata\" src=\"{uri}\"></audio>")
     } else if mime.essence_str() == "application/pdf" {
-        let text = crate::extract::preview_html(path, PREVIEW_LIMIT)
+        let text = crate::extract::preview_html_at_line(path, 8 * 1024 * 1024, line)
             .unwrap_or_else(|e| format!("<p>{}</p>", escape(&e.to_string())));
         format!(
             "<object type=\"application/pdf\" data=\"{uri}\"><p>Use Open original for the native PDF viewer.</p></object><details><summary>Extracted text</summary>{text}</details>"
         )
     } else {
-        crate::extract::preview_html(path, PREVIEW_LIMIT)?
+        crate::extract::preview_html_at_line(path, 8 * 1024 * 1024, line)?
     };
     Ok(format!("{heading}{body}"))
 }
@@ -5109,20 +5218,25 @@ mod tests {
             tree_hit("docs/b.md", Some(11), None),
         ];
         let mut targets = BTreeMap::new();
-        let items = match_items(&hits, &BTreeSet::new(), &mut targets);
+        let items = match_items(
+            &hits,
+            &BTreeSet::from(["docs/b.md".into()]),
+            usize::MAX,
+            &mut targets,
+        );
         assert_eq!(
             context_tree_selection(&items, &targets, &targets["match:0:docs/a.md"]),
-            Some(1)
+            Some(0)
         );
         assert_eq!(
             context_tree_selection(&items, &targets, &targets["match:1:docs/b.md"]),
-            Some(2)
+            Some(1)
         );
         assert_eq!(
             context_tree_selection(&items, &targets, &targets["match:2:docs/b.md"]),
-            Some(3)
+            Some(2)
         );
-        items[0].clone().expanded(false);
+        items[1].clone().expanded(false);
         assert_eq!(
             context_tree_selection(&items, &targets, &targets["match:2:docs/b.md"]),
             None
@@ -5139,7 +5253,7 @@ mod tests {
             tree_hit("clips/one.mp4", None, Some(10.)),
         ];
         let mut targets = BTreeMap::new();
-        let items = match_items(&hits, &BTreeSet::new(), &mut targets);
+        let items = match_items(&hits, &BTreeSet::new(), usize::MAX, &mut targets);
         let mut indices = Vec::new();
         visit_items(&items, &mut |item| {
             if let Some(index) = targets
@@ -5152,6 +5266,61 @@ mod tests {
         indices.sort_unstable();
         assert_eq!(indices, [0, 1, 2, 3]);
         assert_eq!(targets["match:3:clips/one.mp4"].hit_index, Some(3));
+    }
+
+    /// Keep photo relevance ahead of alphabetically earlier folders and group repeated evidence.
+    #[test]
+    fn search_file_rows_keep_relevance_instead_of_directory_order() {
+        let hits = vec![
+            tree_hit("z-photo.jpg", None, None),
+            tree_hit("pictures/a-photo.jpg", None, None),
+            tree_hit("z-photo.jpg", Some(7), None),
+            tree_hit("raw/LICENSE.txt", Some(1), None),
+        ];
+        let mut targets = BTreeMap::new();
+        let items = match_items(&hits, &BTreeSet::new(), usize::MAX, &mut targets);
+        let indices: Vec<_> = items
+            .iter()
+            .map(|item| targets[item.id.as_ref()].hit_index)
+            .collect();
+        assert_eq!(indices, [Some(0), Some(1), Some(3)]);
+        assert!(!items[0].is_expanded());
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(targets[items[0].children[0].id.as_ref()].hit_index, Some(2));
+        let page = match_items(&hits, &BTreeSet::new(), 2, &mut BTreeMap::new());
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].children.len(), 1);
+        assert!(page[1].label.contains("pictures/a-photo.jpg"));
+        let next = match_items(&hits, &BTreeSet::new(), 3, &mut BTreeMap::new());
+        assert!(next[2].label.starts_with("#3 raw/LICENSE.txt"));
+        assert!(match_items(&[], &BTreeSet::new(), 50, &mut BTreeMap::new()).is_empty());
+        assert_eq!(
+            search_result_summary(&[], SearchMode::Semantic, 50),
+            "0 of 0 candidate files · 0 evidence fragments"
+        );
+    }
+
+    /// Forward exact indexed lines through the GUI adapter when one source is selected again.
+    #[test]
+    fn preview_adapter_keeps_exact_source_line_evidence() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let path = fixture.path().join("lines.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: Lines\n---\n# Header\n\nfirst target\nsecond target\n",
+        )?;
+        let first = preview_body(&path, "lines.md", None, Some(6), TEST_AUTHORITY)?;
+        let second = preview_body(&path, "lines.md", None, Some(7), TEST_AUTHORITY)?;
+        assert!(first.contains("id=\"source-line-6\" data-preview-target=\"true\""));
+        assert!(second.contains("id=\"source-line-7\" data-preview-target=\"true\""));
+        assert!(!second.contains("id=\"source-line-6\" data-preview-target=\"true\""));
+        let svg = fixture.path().join("drawing.svg");
+        std::fs::write(&svg, "<svg>\n<text>source text</text>\n</svg>\n")?;
+        let numbered = preview_body(&svg, "drawing.svg", None, Some(2), TEST_AUTHORITY)?;
+        assert!(numbered.contains("id=\"source-line-2\" data-preview-target=\"true\""));
+        assert!(!numbered.contains("<img"));
+        assert!(preview_body(&svg, "drawing.svg", None, None, TEST_AUTHORITY)?.contains("<img"));
+        Ok(())
     }
 
     /// Permit contained relative links and plain web URLs while refusing escapes and active schemes.
@@ -5236,7 +5405,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let path = root.path().join("camera.RAF");
         std::fs::write(&path, b"FUJIFILMCCD-RAW")?;
-        let html = preview_body(&path, "camera.RAF", None, TEST_AUTHORITY)?;
+        let html = preview_body(&path, "camera.RAF", None, None, TEST_AUTHORITY)?;
         assert!(html.contains("not supported by the embedded preview"));
         assert!(html.contains("Quick Look"));
         assert!(!html.contains("<img"));
@@ -5245,98 +5414,30 @@ mod tests {
         Ok(())
     }
 
-    /// Preserve directory identity, actual filenames, and every ranked line or time occurrence.
+    /// Page whole files rather than cutting off the best file's repeated evidence fragments.
     #[test]
-    fn tree_preserves_paths_and_matching_occurrences() {
-        let hits = vec![
-            tree_hit("docs/shared/a.md", Some(3), None),
-            tree_hit("raw/shared/a.md", Some(7), None),
-            tree_hit("docs/shared/a.md", Some(9), None),
-            tree_hit("video/clip.mp4", None, Some(0.)),
-            tree_hit("video/clip.mp4", None, Some(10.)),
-            tree_hit("索引.md", None, None),
-        ];
-        let rows = tree_rows(&hits, &BTreeSet::new());
-        let folders = rows
-            .iter()
-            .filter_map(|row| match row {
-                TreeRow::Folder { path, .. } => Some(path.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+    fn ranked_file_counts_and_pagination_use_distinct_sources() {
+        let mut hits = vec![tree_hit("photo.jpg", None, None); 80];
+        hits.push(tree_hit("docs/a.md", Some(3), None));
+        let files = ranked_files(&hits);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].indices.len(), 80);
+        assert_eq!(files[1].indices, [80]);
         assert_eq!(
-            folders,
-            ["docs", "docs/shared", "raw", "raw/shared", "video"]
+            search_result_summary(&hits, SearchMode::Semantic, 1),
+            "1 of 2 candidate files · 81 evidence fragments"
         );
-        let leaves = rows
-            .iter()
-            .filter_map(|row| match row {
-                TreeRow::File {
-                    name,
-                    hit_index,
-                    continuation,
-                    ..
-                } => Some((name.as_str(), *hit_index, *continuation)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            leaves,
-            [
-                ("a.md", 0, false),
-                ("a.md", 2, true),
-                ("a.md", 1, false),
-                ("clip.mp4", 3, false),
-                ("clip.mp4", 4, true),
-                ("索引.md", 5, false)
-            ]
+        assert!(!search_result_summary(&hits, SearchMode::Semantic, 50).contains("matches"));
+        let mut targets = BTreeMap::new();
+        let items = match_items(
+            &hits,
+            &BTreeSet::from(["photo.jpg".into()]),
+            usize::MAX,
+            &mut targets,
         );
-        assert_eq!(hits[leaves[1].1].line, Some(9));
-        assert_eq!(hits[leaves[3].1].start_seconds, Some(0.));
-        assert_eq!(hits[leaves[4].1].start_seconds, Some(10.));
-    }
-
-    /// Hide only descendants of collapsed full paths and restore every source occurrence on expansion.
-    #[test]
-    fn tree_collapse_is_scoped_to_the_full_directory_path() {
-        let hits = vec![
-            tree_hit("docs/shared/a.md", None, None),
-            tree_hit("raw/shared/a.md", None, None),
-            tree_hit("raw/shared/deep/b.md", None, None),
-            tree_hit("raw/other.md", None, None),
-        ];
-        let mut collapsed = BTreeSet::from(["raw/shared".into()]);
-        let rows = tree_rows(&hits, &collapsed);
-        assert!(rows.iter().any(
-            |row| matches!(row, TreeRow::Folder { path, matches: 2, .. } if path == "raw/shared")
-        ));
-        assert!(
-            !rows.iter().any(
-                |row| matches!(row, TreeRow::Folder { path, .. } if path == "raw/shared/deep")
-            )
-        );
-        let indices = rows
-            .iter()
-            .filter_map(|row| match row {
-                TreeRow::File { hit_index, .. } => Some(*hit_index),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(indices, [0, 3]);
-        collapsed.insert("raw".into());
-        assert!(
-            !tree_rows(&hits, &collapsed)
-                .iter()
-                .any(|row| matches!(row, TreeRow::Folder { path, .. } if path == "raw/shared"))
-        );
-        collapsed.clear();
-        assert_eq!(
-            tree_rows(&hits, &collapsed)
-                .iter()
-                .filter(|row| matches!(row, TreeRow::File { .. }))
-                .count(),
-            hits.len()
-        );
+        assert!(items[0].is_expanded());
+        assert_eq!(items[0].children.len(), 79);
+        assert_eq!(targets[items[1].id.as_ref()].hit_index, Some(80));
     }
 
     /// Retain collapsed directories across refreshes and clear them when another root is opened.
@@ -5546,16 +5647,16 @@ mod tests {
         std::fs::write(&video, [0, 1])?;
         std::fs::write(&audio, [0, 1])?;
         assert!(
-            preview_body(&video, "raw/clip.mp4", Some(12.5), TEST_AUTHORITY)?
+            preview_body(&video, "raw/clip.mp4", Some(12.5), None, TEST_AUTHORITY)?
                 .contains("omni://kb-fixture/raw/clip.mp4#t=12.500")
         );
         assert!(
-            preview_body(&audio, "raw/talk.wav", Some(3.0), TEST_AUTHORITY)?
+            preview_body(&audio, "raw/talk.wav", Some(3.0), None, TEST_AUTHORITY)?
                 .contains("omni://kb-fixture/raw/talk.wav#t=3.000")
         );
         for invalid in [f64::NAN, f64::INFINITY, -1.0] {
             assert!(
-                !preview_body(&audio, "raw/talk.wav", Some(invalid), TEST_AUTHORITY)?
+                !preview_body(&audio, "raw/talk.wav", Some(invalid), None, TEST_AUTHORITY)?
                     .contains("#t=")
             );
         }

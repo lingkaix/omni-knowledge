@@ -10,9 +10,14 @@ Process-local reuse must recheck root ownership, current configuration, generati
 A successful reconciliation removes deleted paths and refreshes changed content.
 A query does not claim an atomic live-filesystem view.
 Result records include `root`, relative `path`, display title, bounded snippet, mode, relevance score, exact tags, and available line or time evidence.
-Line numbers refer to original text files or derived lines for converted PDF and Office content.
+Line numbers refer to original text files, including Markdown front matter, or derived lines for HTML, EPUB, PDF, and Office content.
 Speech matches use recording ranges instead of invented lines in a binary recording.
 The software returns candidates and evidence; scores are not truth probabilities.
+Semantic scoring returns ranked vector candidates without a calibrated relevance threshold, so a returned fragment is not a confirmed content match.
+The desktop groups occurrences by file in first-occurrence order, preserving the best returned evidence and each remaining occurrence.
+It labels semantic and hybrid files as candidates, counts distinct returned files separately from fragments, and does not imply a full-corpus total at the result bound.
+It initially displays 50 distinct files and permits further files to be revealed without another query.
+Directory order applies to ordinary browsing and deterministic grep output; it cannot override ranked BM25, semantic, or hybrid presentation.
 
 ## Strategies
 

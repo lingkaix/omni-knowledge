@@ -15,6 +15,9 @@ use pulldown_cmark::{Event, Options, Parser, html};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Keep source-line markup bounded even when a small source contains many empty lines.
+const MAX_PREVIEW_LINES: usize = 20_000;
+
 /// Derived text and explicit coverage for one source file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Extraction {
@@ -214,9 +217,30 @@ pub fn render_markdown(text: &str) -> String {
 /// Network images, active HTML, event handlers, and dangerous URL schemes are removed.
 /// Returns an error for an unreadable source; parser coverage notices remain visible.
 pub fn preview_html(path: &Path, max_bytes: usize) -> Result<String> {
+    preview_html_at_line(path, max_bytes, None)
+}
+
+/// Produce a safe preview with numbered source or extracted lines and optional line evidence.
+///
+/// Markdown uses original source lines, including front matter; HTML, EPUB, PDF, and Office
+/// use the same derived text lines that enter the index, rather than invented source positions.
+/// Formatted documents retain their rendered view and expose their numbered text in a disclosure.
+/// A requested line opens that disclosure and marks exactly one available row for the GUI renderer.
+/// Large text uses a bounded row window around the evidence; missing lines produce a notice,
+/// without highlighting a substitute. Returns the same source-read errors as `preview_html`.
+pub fn preview_html_at_line(path: &Path, max_bytes: usize, line: Option<usize>) -> Result<String> {
     let result = extract(path, max_bytes)?;
     if matches!(result.format.as_str(), "markdown" | "epub") && result.status == "extracted" {
-        return Ok(render_markdown(&result.text));
+        return Ok(rendered_line_preview(
+            &render_markdown(&result.text),
+            &result.text,
+            line,
+            if result.format == "markdown" {
+                "Source lines"
+            } else {
+                "Extracted text lines"
+            },
+        ));
     }
     if result.format == "html" && result.status != "metadata-only" {
         let mut bytes = Vec::new();
@@ -227,7 +251,12 @@ pub fn preview_html(path: &Path, max_bytes: usize) -> Result<String> {
             bail!("HTML source grew beyond the preview limit");
         }
         let source = String::from_utf8(bytes)?;
-        return Ok(sanitize_html(&source));
+        return Ok(rendered_line_preview(
+            &sanitize_html(&source),
+            &result.text,
+            line,
+            "Extracted text lines",
+        ));
     }
     let mut preview = format!(
         "<h2>{}</h2>",
@@ -240,14 +269,79 @@ pub fn preview_html(path: &Path, max_bytes: usize) -> Result<String> {
         ));
     }
     if result.text.is_empty() {
+        if let Some(line) = line {
+            preview.push_str(&unavailable_line_notice(line));
+        }
         preview
             .push_str("<p>Metadata-only coverage. Use the native preview to open this format.</p>");
     } else {
-        preview.push_str("<pre class=\"extracted-text\">");
-        preview.push_str(&escape_html(&result.text));
-        preview.push_str("</pre>");
+        if matches!(
+            result.format.as_str(),
+            "pdf" | "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "doc" | "rtf"
+        ) {
+            preview.push_str("<p class=\"line-origin\">Extracted text lines</p>");
+        }
+        preview.push_str(&numbered_text(&result.text, line));
     }
     Ok(preview)
+}
+
+/// Preserve a formatted document while providing exact numbered text in a separate reading view.
+/// Only trusted extraction output can create the target marker; imported markup stays sanitized.
+fn rendered_line_preview(rendered: &str, text: &str, line: Option<usize>, label: &str) -> String {
+    format!(
+        "<div class=\"text-preview\"><details class=\"line-preview\"{}><summary>{label}<span class=\"line-view-hint\"> · Close to return to formatted view</span></summary>{}</details><section class=\"rendered-document\">{rendered}</section></div>",
+        if line.is_some() { " open" } else { "" },
+        numbered_text(text, line),
+    )
+}
+
+/// Explain stale or invalid line evidence without pretending that another row is its location.
+fn unavailable_line_notice(line: usize) -> String {
+    format!(
+        "<p class=\"warning\">Line {line} is not available in the current text. The file or index may have changed.</p>"
+    )
+}
+
+/// Escape indexed text into bounded, one-based rows with an unselectable number gutter.
+/// The active evidence line receives a trusted marker for scrolling after document layout.
+fn numbered_text(text: &str, line: Option<usize>) -> String {
+    let count = text.lines().count();
+    let target = line.filter(|line| *line > 0 && *line <= count);
+    let start = target
+        .map(|line| line.saturating_sub(MAX_PREVIEW_LINES / 2).max(1))
+        .unwrap_or(1)
+        .min(count.saturating_sub(MAX_PREVIEW_LINES) + 1);
+    let end = start.saturating_add(MAX_PREVIEW_LINES - 1).min(count);
+    let mut result = String::new();
+    if let Some(line) = line.filter(|_| target.is_none()) {
+        result.push_str(&unavailable_line_notice(line));
+    }
+    if count > MAX_PREVIEW_LINES {
+        result.push_str(&format!(
+            "<p class=\"warning\">Showing lines {start}–{end} of {count}. Use Open original to read the remaining lines.</p>"
+        ));
+    }
+    result.push_str(&format!(
+        "<div class=\"numbered-text\" role=\"region\" aria-label=\"Text with line numbers\" style=\"--line-number-width:{}ch\">",
+        end.to_string().len() + 3,
+    ));
+    for (index, text) in text
+        .lines()
+        .enumerate()
+        .skip(start - 1)
+        .take(MAX_PREVIEW_LINES)
+    {
+        let number = index + 1;
+        result.push_str(&format!(
+            "<div class=\"text-line{}\" id=\"source-line-{number}\"{}><span class=\"line-number\" aria-hidden=\"true\">{number}</span><span class=\"line-content\">{}</span></div>",
+            if target == Some(number) { " is-search-hit" } else { "" },
+            if target == Some(number) { " data-preview-target=\"true\"" } else { "" },
+            escape_html(text),
+        ));
+    }
+    result.push_str("</div>");
+    result
 }
 
 /// Remove executable markup while preserving common document structure and local resources.
