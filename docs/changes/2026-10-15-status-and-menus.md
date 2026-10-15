@@ -54,5 +54,4 @@ The test Finder window closed; the existing model service remained running.
 Prior bundles, test pointer backups, and disposable fixtures remain outside tracked product files for recovery and investigation.
 No push, public release, Applications installation, or deployment was performed.
 
-An unrelated metadata feedback issue remains: undoing a draft to its saved value can leave the previous unsaved-status label visible.
-The GUI editor owns this display-only finding; review the change-event feedback when the metadata editor is next changed, and remove this note after a regression proves the label clears.
+The later [file-details correction](2026-10-15-workspace-usability.md) resolves the metadata undo-feedback finding with a regression and a native-window check.

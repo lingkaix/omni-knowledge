@@ -22,7 +22,12 @@ Keep user guidance and explicit Homebrew installation controls in a separate nat
 Keep document preview content unable to invoke installation or mutate files.
 Homebrew install buttons hand off fixed package commands to a visible Terminal window.
 Terminal owns the installation interface and lifetime; the app reports handoff and later tool discovery.
-Keep retrieval controls in compact top rows, folder management in an on-demand panel, and files in a collapsible directory tree.
+Keep one primary search row, with inline clearing and disclosed search options for mode and exact tags.
+Show active search restrictions when the options are closed so a hidden tag cannot silently constrain browsing.
+Attach the applied query and options to successful search results; keep unapplied edits explicit and retain the last successful view after an error.
+Keep folder management and next-refresh semantic indexing in an on-demand Library panel, with adding files beside the tree.
+The semantic-index option belongs to explicit index preparation; it is not a service switch or a persisted library preference.
+Expose index refresh beside index status in the footer without a duplicate retrieval-toolbar action.
 Use the mark as the return-to-workspace control and make selected-file metadata editing contextual.
 Use GPUI Kit 0.5.1 controls and InputState because they share GPUI 0.2.2 with the existing runtime-shader setup.
 Delegate native editing, input-method composition, selection, and clipboard shortcuts to the maintained input component.
@@ -33,10 +38,13 @@ Run preview selection, search, and explicit indexing independently, and coalesce
 Give each opened library a resource-origin token and bind document bases, media URLs, and navigation to it; obsolete pages cannot resolve the next library's same-named source.
 Read selected-file facts from live attributes and authored metadata instead of the full vector manifest.
 Save metadata without starting indexing; this keeps a small authored edit separate from model work and derived publication.
+Present filesystem facts as labelled readable values, with explicit path-copy actions and honest missing-date states.
+Label authored tags and notes, show their separate saved-record location, and confirm persistence without implying that the search snapshot changed.
 Update native preview bounds and visibility only when they change.
 Keep one bottom status row during normal browsing; temporarily show full hover hints within its layout because a native child WebKit view can cover GPUI overlays above it.
 Collapse that temporary hint area on pointer exit and omit routine preview-ready and file-row instruction messages.
 Track hover ownership by stable control identity so changing diagnostics cannot prevent their hints from closing.
+Flatten multiline diagnostics in the fixed status row and retain the complete message in its hover detail.
 Group the library name and path as one Finder action, and place index state beside explicit index refresh at the right end.
 Bind freshness actions to their observed root so an edited folder cannot redirect indexing to a previously opened library.
 Do not reserve separate instructional or transfer-destination strips under the tree.

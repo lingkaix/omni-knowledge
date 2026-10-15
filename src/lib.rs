@@ -760,8 +760,9 @@ impl KnowledgeBase {
         Ok(file)
     }
 
-    /// Returns the path-keyed metadata sidecar after validating its managed parent.
-    fn metadata_path(&self, relative: &str) -> Result<PathBuf> {
+    /// Returns the authored sidecar location for an already validated canonical root-relative source identity.
+    /// Rejects symlink components and managed-path inspection failures; does not require or create a sidecar.
+    pub(crate) fn metadata_path(&self, relative: &str) -> Result<PathBuf> {
         let filename = format!(
             ".omni/metadata/{}.json",
             hex::encode(Sha256::digest(relative.as_bytes()))

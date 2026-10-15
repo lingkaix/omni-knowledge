@@ -34,38 +34,51 @@ Read [the dependency guide](dependencies.md#runtime-portability) before copying 
 
 1. Open **Library**, then enter a folder path or select **Choose**.
 2. Select **Open** for an existing knowledge root, or **Initialize** to create the template and first lexical index.
-3. Select a destination folder and **Import** to copy files there without replacing an existing file; no selection uses the root.
-4. Select **Refresh index** after external file changes.
-5. Enter a query, select a retrieval mode, and press Enter or select **Search**.
+3. Select a destination folder and **Add files** beside the tree to copy files there without replacing an existing file; no selection uses the root.
+4. Select **Refresh index** in the bottom status bar after external file changes.
+5. Enter a query and press Enter or select **Search**; use **Search options** for another search method or exact tags.
 6. Select a result to inspect its preview and source path.
 
-The tag filter uses comma-separated exact values.
+The tag filter in **Search options** uses comma-separated exact values.
 Every entered tag must match.
 An empty query browses files with the current tag filters.
 The browsing tree reads live directories, including empty folders and files that have not been indexed.
 Search shows up to 10,000 hits from the last published snapshot.
-Clear the filter to restore directory browsing.
+Use the clear button inside the search field to clear the query and tags and restore directory browsing.
+It remains available for tag-only searches and existing results.
 
-The selected file has separate inputs for editable tags and a description.
-Select **Save metadata** to write its sidecar without starting indexing.
+Open **File details** for the selected file's labelled **Tags** and **Notes** fields.
+Select **Save tags and notes** to write a separate record with the knowledge library, without changing the original or starting indexing.
+Notes support multiple lines; returning to the saved values clears the unsaved-change indicator.
+Save before selecting another file; unsaved drafts are not retained between files.
+The editor identifies the record location and provides an action to inspect an existing saved record in Finder.
+Select the file again and reopen **File details** to read the saved tags and notes.
 Refresh the index explicitly when the saved tags and description should appear in retrieval.
-Source front matter remains part of the combined tag set.
+The editor shows only tags saved in that separate record; source front matter remains unchanged and joins the combined tag set during indexing.
 The description is useful for binary files that have no extractable text.
 
 ## Workspace
 
-The compact top toolbar keeps search, a mode dropdown, and exact-tag filtering accessible.
+The single top search row contains the query, inline clearing, a search-options disclosure, and Search.
+Search options group the mode dropdown and exact tags; their summary keeps active restrictions visible when closed.
+Select **Apply** or **Search** to apply edited options; **changes not applied** distinguishes them from the conditions that produced the displayed results.
+A failed search retains the last successful view and its actual conditions.
+Descriptive search labels identify full-text, text-pattern, meaning, combined, and filename/notes retrieval without requiring algorithm names.
 The bottom status bar normally occupies one row, with the library name and path, transfer destination, environment observations, and index controls.
 Hover over an action icon or status item to show its full hint temporarily; leaving it restores the single-row layout.
 The library name and path share one Finder action, and routine preview-ready and file-row instructions are omitted.
-The **Library** panel contains folder selection and initialization and is collapsed during normal reading.
+The **Library** panel contains folder selection, initialization, and the next-refresh semantic-index option and is collapsed during normal reading.
+**Add files** belongs to the file-tree toolbar; index refresh appears only beside index status in the footer.
 The left pane groups files by directory; expand or collapse a folder to control the visible tree.
 Use a file's context menu to open it, reveal it in Finder, copy it, copy its absolute or relative path, inspect metadata, or move it to Trash after confirmation.
 Right-click selects the menu's target directly; clicking the preview or elsewhere outside the menu dismisses it, as does Escape.
 Paste copied files into a folder, drop external files to copy them, or drag an owned file to move it within the library.
 Transfers reject destination collisions and retain authored metadata; they do not silently refresh the search index.
 File selections keep their source path and available line or media-time evidence.
-Use **Metadata** beside the selected-file preview to open its tags and description editor.
+Use **File details** beside the selected-file preview to inspect source properties and edit its tags and notes.
+Path-copy actions copy the complete absolute or relative path, including characters truncated in the display.
+Sizes use readable units with an exact byte count, and creation and modification dates use labelled local times.
+Unavailable dates remain explicit rather than borrowing another timestamp.
 Click the green logo to return from the guide without clearing the query, results, or selected preview.
 
 ## Guide And Environment
@@ -84,7 +97,9 @@ Use **返回知识库** to return to the existing results and preview.
 
 ## Semantic Indexing
 
-Select **Embeddings: on** before refreshing the index to generate semantic vectors through the configured local provider.
+Enable **Build semantic search index** in **Library** before refreshing the index to generate semantic vectors through the configured local provider.
+This per-window option applies to the next explicit refresh; it does not start the model service or persist a new library preference.
+Disabling generation does not remove every existing unchanged vector.
 Semantic and hybrid retrieval require a working provider and indexed vectors.
 The status bar shows provider and extraction failures.
 Filesystem and model work runs outside the UI thread.
@@ -110,7 +125,7 @@ Their versions and licenses are recorded in [the vendor guide](../assets/vendor/
 
 Images, supported audio, and supported video use WKWebView media elements.
 Unsupported image formats such as RAF show a clear coverage message and remain available through **Quick Look** or **Open original**.
-The metadata inspector shows live path, MIME type, size, modification time, and editable notes without reading source contents or the complete index.
+The file-details inspector shows live paths, MIME type, readable size, creation and modification dates, saved-record location, tags, and notes without reading source contents or the complete index.
 Selecting a timed audio or video result starts its preview at the returned evidence timestamp.
 PDF previews attempt the native WebKit viewer and include extracted text.
 If the embedded PDF viewer is unavailable, expand **Extracted text** or select **Open original**.
@@ -146,3 +161,4 @@ Binary metadata edits were verified through the CLI and exact-tag retrieval.
 See [the first-version record](changes/2026-10-14-first-version.md) for commands, evidence, and remaining limits.
 The [desktop workspace record](changes/2026-10-15-desktop-workspace.md) covers the later input, file management, responsiveness, metadata, status, and signed-bundle checks.
 The [status and menu record](changes/2026-10-15-status-and-menus.md) covers the compact footer, direct index actions, hover transitions, and native menu boundary.
+The [usability record](changes/2026-10-15-workspace-usability.md) covers contextual search options, applied-filter identity, readable file details, and authored-record persistence.

@@ -16,14 +16,14 @@
 
 <h2 id="start">快速开始</h2>
 <ol class="steps">
-<li><strong>准备知识库目录。</strong> 点击顶部 <span class="inline-label">Library</span> 文件夹图标展开位置面板，填写文件夹路径，例如 <code>~/Documents/Omni Knowledge</code>。<span class="inline-label">Initialize</span> 创建模板并建立第一个文字索引；已有知识库使用面板中的 <span class="inline-label">Choose</span> 或 <span class="inline-label">Open</span>。位置面板平时收起，目录树顶部显示当前知识库名称。</li>
-<li><strong>纳入原始文件。</strong> <span class="inline-label">Import</span> 加号按钮把所选文件复制到底部状态栏标明的目标文件夹（未选择文件夹时为知识库 root），保留外部原件，也不会覆盖同名文件。你也可以直接用 Finder 或 AI Agent，把文件放进知识库的任意合适目录。</li>
-<li><strong>添加可检索的说明。</strong> 选中文件后，点击预览栏的 <span class="inline-label">Metadata</span> 按钮展开编辑器。在“Selected file tags”和“Selected file description / notes”中填写标签与描述，再点击 <span class="inline-label">Save metadata</span>。编辑器平时收起，再次点击按钮可收起它；选择另一个文件时也会收起。这对二进制文件、图片和无文字内容的文件尤其有用。</li>
+<li><strong>准备知识库目录。</strong> 点击顶部 <span class="inline-label">Library</span> 文件夹图标展开位置面板，填写文件夹路径，例如 <code>~/Documents/Omni Knowledge</code>。<span class="inline-label">Initialize</span> 创建模板并建立第一个文字索引；已有知识库使用面板中的 <span class="inline-label">Choose</span> 或 <span class="inline-label">Open</span>。位置面板平时收起，底部左侧显示当前知识库名称与路径。</li>
+<li><strong>纳入原始文件。</strong> 目录树旁的 <span class="inline-label">Add files</span> 按钮把所选文件复制到底部状态栏标明的目标文件夹（未选择文件夹时为知识库 root），保留外部原件，也不会覆盖同名文件。你也可以直接用 Finder 或 AI Agent，把文件放进知识库的任意合适目录。</li>
+<li><strong>添加可检索的说明。</strong> 选中文件后，点击预览栏的 <span class="inline-label">File details</span> 按钮，在带标签的 Tags 和 Notes 中填写标签与备注，再点击 Save tags and notes。内容写入当前知识库的独立 JSON 记录，不修改原文件；面板显示保存位置，并可在 Finder 查看已保存的记录。重新选中文件并打开 File details，即可看到已保存的内容。切换文件前请先保存；未保存内容不会跨文件保留。编辑器平时收起，再次点击按钮可收起它；选择另一个文件时也会收起。这对二进制文件、图片和无文字内容的文件尤其有用。</li>
 <li><strong>外部编辑后刷新。</strong> 在 Finder 或编辑器中添加、修改、移动或删除文件后，点击 <span class="inline-label">↻ Refresh index</span> 图标。检索读取最近成功发布的索引；后台会定期检查文件元数据变化，仍需你主动刷新索引。</li>
-<li><strong>检索并查看证据。</strong> 输入查询，在左侧模式下拉菜单选择 BM25、Grep、Semantic、Hybrid 或 Files，按 Enter 或点击 <span class="inline-label">Search</span>。下拉菜单支持方向键、Enter 和 Escape。未搜索时，目录树直接读取磁盘上的文件，包括新文件和空文件夹，展开时按需加载；列表采用虚拟化，没有 1,000 个文件的浏览上限。搜索后显示索引匹配过滤视图；点击 Search 旁的关闭／清除按钮，同时清空查询和标签，立即回到完整浏览。点击三角形展开或折叠目录，点击文件查看预览。搜索结果中的 <code>#数字</code> 保留原检索排名；同一文件的多个匹配按返回顺序列出，保留各自的行号或时间位置。</li>
+<li><strong>检索并查看证据。</strong> 输入查询，点击搜索框内的 <span class="inline-label">Search options</span>，按需选择搜索方式或填写标签，按 Enter 或点击 <span class="inline-label">Search</span>。下拉菜单支持方向键、Enter 和 Escape。未搜索时，目录树直接读取磁盘上的文件，包括新文件和空文件夹，展开时按需加载；列表采用虚拟化，没有 1,000 个文件的浏览上限。搜索后显示索引匹配过滤视图；点击搜索输入框尾部的清除按钮，同时清空查询和标签，立即回到完整浏览。点击三角形展开或折叠目录，点击文件查看预览。搜索结果中的 <code>#数字</code> 保留原检索排名；同一文件的多个匹配按返回顺序列出，保留各自的行号或时间位置。</li>
 </ol>
 <p>模板保留 LLM Wiki 和 Open Knowledge Format 的原始离线文章，并提供链接到原文的参考概念页。软件负责文件管理、索引和检索；知识摘要、交叉链接和 wiki 的持续维护由你使用的 AI Agent 完成。</p>
-<p>底部状态栏平时只占一行，集中显示知识库位置、粘贴／拖入目标、环境状态和索引操作；不再常驻显示文件操作说明或 Preview ready。鼠标悬停在图标或状态项目时，才会临时显示完整提示；移开后恢复单行。提示在自己的布局范围内显示，不会被预览遮挡。信息图标打开“说明与环境”。选中文件后，预览栏始终提供 Quick Look、Open original、Finder 和 Metadata 按钮；右键文件也能找到这些操作。折叠文件夹和切换指南不会清除当前预览、查询或编辑内容。文件数与匹配数分别显示，一个文件可能包含多处匹配。</p>
+<p>底部状态栏平时只占一行，集中显示知识库位置、粘贴／拖入目标、环境状态和索引操作；不再常驻显示文件操作说明或 Preview ready。鼠标悬停在图标或状态项目时，才会临时显示完整提示；移开后恢复单行。提示在自己的布局范围内显示，不会被预览遮挡。信息图标打开“说明与环境”。选中文件后，预览栏始终提供 Quick Look、Open original、Finder 和 File details 按钮；右键文件也能找到这些操作。折叠文件夹和切换指南不会清除当前预览、查询或编辑内容。目录树标题显示文件数，一个文件可能包含多处匹配。</p>
 <p>底部左侧的知识库名称与绝对路径共用一个入口，点击可用 Finder 打开该目录。工具、本地模型和 ASR 状态在中间，点击可查看对应的依赖安装或修复说明。索引状态位于最右侧，紧邻 Refresh index；点击“索引过期”或“需要建立索引”可直接刷新当前知识库的索引。修改 Library 面板的路径后，状态检查会跟随新路径；目录树仍显示上一次打开的知识库。输入另一个尚未打开的知识库时，索引区域会引导你先选择 Open 或 Initialize，不会误刷新旧知识库。</p>
 <p>状态每 12 秒在后台检查一次；打开目录、建立索引和保存元数据后会再次检查。索引状态比较文件名、大小与修改时间，以及配置和元数据的修改时间；“索引未见变化”不代表逐字节验证。扫描未完成时会明确说明，外部编辑造成索引过期时仍需主动刷新索引。Refresh index 会实际建立索引，不只是检查状态。后台检查不会替你初始化、安装工具或启动模型。</p>
 
@@ -34,14 +34,15 @@
 
 <h2 id="search">选择合适的检索方式</h2>
 <table><thead><tr><th>方式</th><th>适合什么问题</th><th>实际行为</th></tr></thead><tbody>
-<tr><td><strong>精确标签</strong></td><td>“只看研究、硬件相关的文件”</td><td>在“Exact tags”输入逗号分隔的标签。所有标签都必须匹配，区分大小写，不做模糊匹配。标签过滤适用于每种检索方式。</td></tr>
-<tr><td><strong>BM25</strong></td><td>关键词、主题名、中文短语</td><td>使用已建立的文字索引，综合标题、路径、描述和内容排序。多个词按相关性组合；需要严格原文匹配时使用 Grep。</td></tr>
-<tr><td><strong>Grep</strong></td><td>准确词句、代码符号、正则表达式</td><td>在索引中的提取文本上验证 Rust 正则表达式，并提供匹配文本行号（转换文档为提取文本行号）；找不到正文时还会检查路径和描述。它读取索引快照，外部修改后需要刷新。</td></tr>
-<tr><td><strong>Semantic</strong></td><td>换一种说法描述内容，或描述图片／视频画面</td><td>使用兼容的本地多模态模型和已建立的向量。模型不可用或尚未建立向量时，会给出明确错误。</td></tr>
-<tr><td><strong>Hybrid</strong></td><td>同时利用关键词与语义</td><td>合并 BM25 与语义结果，保留可用的时间证据。仍然需要本地模型和向量索引。</td></tr>
-<tr><td><strong>Files</strong></td><td>文件名、路径、描述，或浏览所有资产</td><td>无需模型，包含无法提取正文的文件。空查询也会按当前标签过滤浏览文件。</td></tr>
+<tr><td><strong>精确标签</strong></td><td>“只看研究、硬件相关的文件”</td><td>在 Search options 的 Tags 中输入逗号分隔的标签。所有标签都必须匹配，区分大小写，不做模糊匹配。标签过滤适用于每种检索方式。</td></tr>
+<tr><td><strong>Full text · 全文搜索</strong></td><td>关键词、主题名、中文短语</td><td>使用已建立的文字索引，综合标题、路径、描述和内容排序。多个词按相关性组合；需要严格原文匹配时使用 Text pattern（Grep）。</td></tr>
+<tr><td><strong>Text pattern · 原文模式</strong></td><td>准确词句、代码符号、正则表达式</td><td>在索引中的提取文本上验证 Rust 正则表达式，并提供匹配文本行号（转换文档为提取文本行号）；找不到正文时还会检查路径和描述。它读取索引快照，外部修改后需要刷新。</td></tr>
+<tr><td><strong>Meaning · 语义</strong></td><td>换一种说法描述内容，或描述图片／视频画面</td><td>使用兼容的本地多模态模型和已建立的向量。模型不可用或尚未建立向量时，会给出明确错误。</td></tr>
+<tr><td><strong>Text + meaning · 文字与语义</strong></td><td>同时利用关键词与语义</td><td>合并 BM25 与语义结果，保留可用的时间证据。仍然需要本地模型和向量索引。</td></tr>
+<tr><td><strong>File names &amp; notes · 文件与备注</strong></td><td>文件名、路径、描述，或浏览所有资产</td><td>无需模型，包含无法提取正文的文件。空查询也会按当前标签过滤浏览文件。</td></tr>
 </tbody></table>
-<p>“研究”和“研”不是同一个标签；“Rust”和“rust”也不同。Markdown front matter 中的标签与手工元数据标签会合并。“Save metadata”立即保存可编辑标签和描述，不会启动整库索引；保存成功后会明确提示。之后主动点击 Refresh index，检索才会使用新的标签与描述。原文 front matter 保持不变。</p>
+<p>搜索选项平时收起；非默认搜索方式和标签数量会在入口显示。修改后需点击 Apply 或 Search 才会应用；changes not applied 表示修改尚未生效，显示的结果仍保留之前的条件。搜索失败也会保留之前成功的结果与条件。标签限制只属于搜索，添加文件在目录树旁，索引刷新在底部右侧，知识库位置与语义索引生成选项在 Library 中。</p>
+<p>“研究”和“研”不是同一个标签；“Rust”和“rust”也不同。Markdown front matter 中的标签与手工元数据标签会合并。保存会立即写入可编辑标签和备注，不会启动整库索引；面板会区分未保存、保存中、已保存和失败。这里编辑的是独立记录中的标签，不是原文 front matter。之后主动点击 Refresh index，检索才会使用新的标签与描述。原文 front matter 保持不变。</p>
 <p>结果是候选内容和来源证据，分数不代表事实可信度。重要结论应通过 <span class="inline-label">Open original</span> 或原文预览复核。</p>
 
 <h2 id="files">文件、预览与转换</h2>
@@ -55,7 +56,7 @@
 <tr><td>EPUB</td><td>按阅读顺序显示章节文字；CLI 可把知识库中的 Markdown 和 HTML 打包为带导航的 EPUB，可选包含引用的本地媒体。</td></tr>
 <tr><td>其他文件 / 二进制</td><td>始终可纳入文件管理与元数据检索。没有成熟正文解析器时，请用标签和描述说明用途与内容；不会把任意二进制字节假装成可读文本。</td></tr>
 </tbody></table>
-<p><span class="inline-label">Quick Look</span> 请求 macOS 快速查看；是否能显示该格式由本机解码器决定。<span class="inline-label">Finder</span> 显示原件所在位置。<span class="inline-label">Metadata</span> 显示实时路径、MIME、大小与修改时间，并提供标签和描述编辑器；查看时不会读取整个索引或计算文件哈希。<span class="inline-label">Open original</span> 用已安装的原生应用打开文件，适合复杂 Office 文档、不支持的媒体编码或需要完整排版的 EPUB。预览不会执行导入文件中的脚本，也不会加载远程图片。</p>
+<p><span class="inline-label">Quick Look</span> 请求 macOS 快速查看；是否能显示该格式由本机解码器决定。<span class="inline-label">Finder</span> 显示原件所在位置。<span class="inline-label">File details</span> 显示实时路径、文件类型、可读大小、创建与修改日期，并提供标签和备注编辑器；Copy path 与 Copy relative path 可复制完整路径。日期按本机时间显示，不可用时会明确说明；查看时不会读取整个索引或计算文件哈希。<span class="inline-label">Open original</span> 用已安装的原生应用打开文件，适合复杂 Office 文档、不支持的媒体编码或需要完整排版的 EPUB。预览不会执行导入文件中的脚本，也不会加载远程图片。</p>
 
 <p>Markdown／HTML 中的章节链接可滚动到当前文档标题；知识库内的相对文件链接在应用中打开，文件夹链接定位到目录树。明确点击 HTTP(S) 链接会交给系统浏览器；它不会在预览中加载远程页面。带凭据、危险协议、越过 root 或指向内部状态的链接会被拒绝。源文件中的脚本仍不能执行。</p>
 
@@ -75,14 +76,14 @@
 <ol>
 <li>在已有的 <code>embedding-wemm</code> 项目中启动兼容的服务，例如 <code>./scripts/serve.sh gpu</code>。</li>
 <li>确认知识库的 <code>omni-knowledge.json</code> 中 <code>embedding</code> 配置与服务身份一致。用 CLI 的 <code>doctor --embeddings</code> 检查本地连接。</li>
-<li>回到知识库，将 <span class="inline-label">Embeddings: off</span> 切换为 on，再点击 <span class="inline-label">Refresh index</span>。</li>
-<li>索引完成后使用 Semantic 或 Hybrid。外部修改过的文件需要重新建立相应向量。</li>
+<li>回到知识库，在 Library 面板开启 <span class="inline-label">Build semantic search index</span>，再点击底部 <span class="inline-label">Refresh index</span>。</li>
+<li>索引完成后，在 Search options 中使用 Meaning 或 Text + meaning。外部修改过的文件需要重新建立相应向量。</li>
 </ol>
-<p>模型停止时仍能使用标签、Files、BM25 和 Grep。GUI 中的 Embeddings 开关只决定下一次索引是否生成向量；它不会启动模型服务。</p>
+<p>模型停止时仍能使用标签、File names &amp; notes、Full text 和 Text pattern。Library 中的语义索引选项只决定这个窗口下次主动刷新索引时是否生成向量；它不会启动模型服务，也不是搜索可用性的开关，不会保存为新的知识库偏好。关闭它也不会删除所有未修改文件的已有向量。</p>
 <h3 id="asr">让音频内容可检索</h3>
 <p>最简单的方式是在音频旁边放置 <code>文件名.transcript.json</code>，例如 <code>interview.m4a.transcript.json</code>：</p>
 <pre>{"segments":[{"start":3.0,"end":8.0,"text":"这一段的转写内容"}]}</pre>
-<p>也可以在知识库配置中填写已存在的 <code>whisper_executable</code> 与 <code>whisper_model</code> 两个绝对路径，然后开启 Embeddings 并刷新。界面安装的 whisper.cpp 只提供前者；模型文件由你单独选择。转写是可出错的观察结果，结果中的时间位置帮助你回到录音复核。</p>
+<p>也可以在知识库配置中填写已存在的 <code>whisper_executable</code> 与 <code>whisper_model</code> 两个绝对路径，然后在 Library 开启 Build semantic search index 并刷新。界面安装的 whisper.cpp 只提供前者；模型文件由你单独选择。转写是可出错的观察结果，结果中的时间位置帮助你回到录音复核。</p>
 
 <h2 id="agents">AI Agent、CLI 与 MCP</h2>
 <p>知识库是普通文件夹，AI Agent 可以直接编辑 wiki、标签、描述和索引页。让 Agent 先读知识库里的 <code>AGENTS.md</code> 与 <code>index.md</code>，保留 <code>raw/</code> 原件，修改后调用索引，并为总结保留来源链接。</p>
@@ -132,10 +133,10 @@ omni --root /path/to/library export-epub /path/to/library.epub --include-media</
 
 <h2 id="troubleshoot">遇到问题时</h2>
 <table><thead><tr><th>现象</th><th>下一步</th></tr></thead><tbody>
-<tr><td>没有检索结果</td><td>先点击 Search 旁的清除按钮，回到完整实时文件树确认原件存在。新文件尚未索引时不会出现在索引搜索中；清空标签过滤，再刷新索引。Grep 检查严格原文，BM25 适合关键词相关性。</td></tr>
+<tr><td>没有检索结果</td><td>先点击搜索输入框尾部的清除按钮，回到完整实时文件树确认原件存在。新文件尚未索引时不会出现在索引搜索中；清空标签过滤，再刷新索引。Text pattern 检查原文模式，Full text 适合关键词相关性。</td></tr>
 <tr><td>显示“no index”或索引目录缺失</td><td>打开正确的知识库 root，点击 Refresh index。配置文件和原件应保留，派生索引可以重建。</td></tr>
 <tr><td>一直显示“Opening knowledge folder…”</td><td>检查 macOS 是否正在等待访问“文稿”“桌面”或“下载”目录的权限确认；对你选择的知识库允许访问，或使用 Library 面板的 Choose 选择目录。应用重新签名后可能再次请求授权；不要绕过系统权限。</td></tr>
-<tr><td>Semantic / Hybrid 报错</td><td>确认本地服务运行且身份匹配，再开启 Embeddings 并刷新。使用 CLI doctor --embeddings 获取检查结果。</td></tr>
+<tr><td>Meaning / Text + meaning 报错</td><td>确认本地服务运行且身份匹配，再在 Library 开启 Build semantic search index 并刷新。使用 CLI doctor --embeddings 获取检查结果。</td></tr>
 <tr><td>视频或语音索引缺少覆盖</td><td>左侧重新检查 FFmpeg / ffprobe；音频还需转写 sidecar，或同时配置 whisper-cli 与本地模型。</td></tr>
 <tr><td>终端未打开或安装失败</td><td>启动请求失败或未确认时，先看左侧交接记录，再确认终端是否已经打开；安装中的错误与结束结果在终端查看。缺少 Homebrew 时先按官方说明配置；联网、磁盘、权限或编译问题需要在本机解决，完成后重新检查依赖。</td></tr>
 <tr><td>无法完整预览文档</td><td>尝试 Quick Look 或 Open original 查看原始文件。提取状态和警告说明当前检索覆盖，不会宣称未读到的内容已经被索引。</td></tr>

@@ -475,6 +475,24 @@ pub fn reveal(root: &Path, relative: &str) -> Result<()> {
     dispatch_open(Some("-R"), &source)
 }
 
+/// Reveal the saved authored JSON for an owned source after revalidating its exact root and sidecar.
+/// Returns an error for missing or invalid metadata and unsafe source identities without opening a path.
+/// Run on a worker; dispatch waits at most ten seconds and does not confirm subsequent Finder interaction.
+pub fn reveal_metadata(root: &Path, relative: &str) -> Result<()> {
+    let path = metadata_reveal_path(root, relative)?;
+    dispatch_open(Some("-R"), &path)
+}
+
+/// Resolve a real authored sidecar through live source validation without an index read or native effect.
+fn metadata_reveal_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    let info = crate::file_info::source_info(root, relative)?;
+    ensure!(
+        info.metadata_saved,
+        "No saved metadata exists for this file"
+    );
+    Ok(info.metadata_path)
+}
+
 /// Open an owned source with its installed default macOS application, using typed arguments.
 /// Run on a worker; the result confirms launcher dispatch, not that the target application rendered it.
 pub fn open_original(root: &Path, relative: &str) -> Result<()> {
@@ -743,6 +761,61 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use std::fs::OpenOptions;
+
+    /// Resolve only a real saved record for the validated source; do not launch Finder or publish an index.
+    #[test]
+    fn metadata_reveal_requires_a_saved_record_and_preserves_its_identity() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let kb = KnowledgeBase::init(directory.path(), "Metadata reveal")?;
+        let relative = "raw/资料 + #1.txt";
+        fs::write(kb.root.join(relative), "source")?;
+        let missing = metadata_reveal_path(&kb.root, relative).unwrap_err();
+        assert!(format!("{missing:#}").contains("No saved metadata"));
+        kb.set_metadata(relative, &["keep".into()], Some("Saved notes"))?;
+        let expected = kb.metadata_path(relative)?;
+        let original = fs::read(&expected)?;
+        let path = metadata_reveal_path(&kb.root, "raw/./资料 + #1.txt")?;
+        assert_eq!(path, expected);
+        assert_eq!(fs::read(path)?, original);
+        assert_eq!(fs::read_to_string(kb.root.join(relative))?, "source");
+        assert!(!kb.root.join(".omni/current.json").exists());
+        Ok(())
+    }
+
+    /// Reject unsafe identities, nested ownership, symlink sidecars, and removed exact roots before dispatch.
+    #[test]
+    fn metadata_reveal_revalidates_source_and_sidecar_containment() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let parent = KnowledgeBase::init(directory.path(), "Parent")?;
+        let child = KnowledgeBase::init(&parent.root.join("child"), "Child")?;
+        let relative = "raw/source.txt";
+        fs::write(parent.root.join(relative), "parent source")?;
+        fs::write(child.root.join(relative), "child source")?;
+        parent.set_metadata(relative, &[], Some("Parent notes"))?;
+        child.set_metadata(relative, &[], Some("Child notes"))?;
+        for rejected in [
+            "../outside",
+            CONFIG_FILE,
+            ".omni/write.lock",
+            "raw",
+            "raw/missing",
+            "child/raw/source.txt",
+        ] {
+            assert!(metadata_reveal_path(&parent.root, rejected).is_err());
+        }
+        #[cfg(unix)]
+        {
+            let sidecar = parent.metadata_path(relative)?;
+            let outside = directory.path().join("outside.json");
+            fs::rename(&sidecar, &outside)?;
+            std::os::unix::fs::symlink(&outside, &sidecar)?;
+            assert!(metadata_reveal_path(&parent.root, relative).is_err());
+            assert!(outside.is_file());
+        }
+        fs::remove_file(child.root.join(CONFIG_FILE))?;
+        assert!(metadata_reveal_path(&child.root, relative).is_err());
+        Ok(())
+    }
 
     /// Native launch commands are inspected without launching any host application or test helper.
     #[test]

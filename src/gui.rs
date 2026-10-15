@@ -23,6 +23,7 @@ use gpui::{
 use gpui_component::{
     Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
+    checkbox::Checkbox,
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
     list::ListItem,
@@ -52,11 +53,11 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(12);
 
 /// Available retrieval choices in the visible and keyboard menu order.
 const SEARCH_MODES: [(SearchMode, &str); 5] = [
-    (SearchMode::Bm25, "BM25"),
-    (SearchMode::Grep, "Grep"),
-    (SearchMode::Semantic, "Semantic"),
-    (SearchMode::Hybrid, "Hybrid"),
-    (SearchMode::Files, "Files"),
+    (SearchMode::Bm25, "Full text"),
+    (SearchMode::Grep, "Text pattern"),
+    (SearchMode::Semantic, "Meaning"),
+    (SearchMode::Hybrid, "Text + meaning"),
+    (SearchMode::Files, "File names & notes"),
 ];
 
 /// Trusted preview initialization; document source cannot supply executable scripts.
@@ -590,9 +591,33 @@ struct PreviewRequest {
     issuer: String,
 }
 
+/// User-selected query restrictions captured separately from editable search controls.
+/// Normalized tags compare meaning rather than comma spacing or order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchFilter {
+    query: String,
+    mode: SearchMode,
+    tags: Vec<String>,
+}
+
+impl SearchFilter {
+    /// Capture query text and selected mode while normalizing exact-tag set equality.
+    fn new(query: String, mode: SearchMode, mut tags: Vec<String>) -> Self {
+        tags.sort();
+        tags.dedup();
+        Self { query, mode, tags }
+    }
+
+    /// Distinguish an actual tree restriction from the next query's mode setting.
+    fn restricts_files(&self) -> bool {
+        !self.query.trim().is_empty() || !self.tags.is_empty()
+    }
+}
+
 /// One immutable indexed query, coalesced while an earlier search finishes.
 struct SearchRequest {
     root: PathBuf,
+    filter: SearchFilter,
     options: SearchOptions,
     revision: u64,
 }
@@ -617,6 +642,225 @@ fn refresh_authored_metadata(
     new_source || (!dirty && read_revision == current_revision)
 }
 
+/// Show the in-field reset affordance for typed, tag-only, and already-published searches.
+fn search_filter_is_clearable(query: &str, tags: &[String], published_filter: bool) -> bool {
+    !query.is_empty() || !tags.is_empty() || published_filter
+}
+
+/// Keep optional restrictions discoverable when their disclosure is closed.
+fn search_options_label(mode: SearchMode, tag_count: usize) -> String {
+    let mut label = "Search options".to_owned();
+    if mode != SearchMode::Bm25
+        && let Some((_, name)) = SEARCH_MODES
+            .iter()
+            .find(|(candidate, _)| *candidate == mode)
+    {
+        label.push_str(" · ");
+        label.push_str(name);
+    }
+    if tag_count > 0 {
+        label.push_str(&format!(
+            " · {tag_count} {}",
+            if tag_count == 1 { "tag" } else { "tags" }
+        ));
+    }
+    label
+}
+
+/// Summarize the displayed results, not unapplied edits, and explain their exact restrictions on hover.
+/// With no results filter, a nondefault mode configures the next query without implying filtered files.
+fn search_options_presentation(
+    draft: &SearchFilter,
+    applied: Option<&SearchFilter>,
+) -> (String, String) {
+    let showing = applied.unwrap_or(draft);
+    let mode = if applied.is_some() && showing.query.trim().is_empty() {
+        SearchMode::Bm25
+    } else {
+        showing.mode
+    };
+    let mut label = search_options_label(mode, showing.tags.len());
+    let pending = applied.map_or_else(|| draft.restricts_files(), |applied| applied != draft);
+    if pending {
+        label.push_str(" · changes not applied");
+    }
+    let mut hint = if let Some(applied) = applied {
+        let selected_mode = SEARCH_MODES
+            .iter()
+            .find(|(mode, _)| *mode == applied.mode)
+            .map(|(_, label)| *label)
+            .unwrap_or("Full text");
+        format!(
+            "Showing results for: {}\nSearch mode: {}\nRequired tags: {}",
+            if applied.query.trim().is_empty() {
+                "all indexed files"
+            } else {
+                &applied.query
+            },
+            if applied.query.trim().is_empty() {
+                "Tags only"
+            } else {
+                selected_mode
+            },
+            if applied.tags.is_empty() {
+                "None".into()
+            } else {
+                applied.tags.join(", ")
+            }
+        )
+    } else {
+        "Showing all files in the library.".into()
+    };
+    if pending {
+        hint.push_str("\nChanges are not applied. Select Search or Apply to update the results.");
+    } else {
+        hint.push_str("\nChoose a search mode or exact tags in Search options.");
+    }
+    (label, hint)
+}
+
+/// Keep the compact footer label on one physical line while callers retain the full hover diagnostic.
+fn single_line_status_label(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Present decimal file units like Finder while retaining the precise byte count for small files.
+fn human_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1000 {
+        return format!("{bytes} {}", if bytes == 1 { "byte" } else { "bytes" });
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000. && unit + 1 < UNITS.len() {
+        value /= 1000.;
+        unit += 1;
+    }
+    let digits = bytes.to_string();
+    let exact = digits
+        .chars()
+        .enumerate()
+        .fold(String::new(), |mut formatted, (index, digit)| {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                formatted.push(',');
+            }
+            formatted.push(digit);
+            formatted
+        });
+    format!("{value:.1} {} ({exact} bytes)", UNITS[unit])
+}
+
+/// Describe common source formats with familiar names; unknown extensions remain honest file labels.
+fn human_file_type(relative: &str, mime: &str) -> String {
+    let extension = Path::new(relative)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let name = match extension.to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "Markdown",
+        "txt" | "text" => "Plain text",
+        "html" | "htm" => "HTML document",
+        "pdf" => "PDF document",
+        "doc" | "docx" | "odt" => "Text document",
+        "xls" | "xlsx" | "ods" | "csv" => "Spreadsheet",
+        "ppt" | "pptx" | "odp" => "Presentation",
+        "epub" => "EPUB book",
+        "jpg" | "jpeg" => "JPEG image",
+        "png" => "PNG image",
+        "gif" => "GIF image",
+        "webp" => "WebP image",
+        "svg" => "SVG image",
+        "heic" | "heif" => "HEIF image",
+        "mp3" => "MP3 audio",
+        "wav" => "WAV audio",
+        "m4a" => "M4A audio",
+        "mp4" | "m4v" => "MP4 video",
+        "mov" => "QuickTime video",
+        "webm" => "WebM video",
+        "json" => "JSON data",
+        "yaml" | "yml" => "YAML data",
+        "zip" => "ZIP archive",
+        _ => {
+            if mime.starts_with("image/") {
+                "Image"
+            } else if mime.starts_with("video/") {
+                "Video"
+            } else if mime.starts_with("audio/") {
+                "Audio"
+            } else if mime.starts_with("text/") {
+                "Text file"
+            } else {
+                ""
+            }
+        }
+    };
+    if name.is_empty() {
+        if extension.is_empty() {
+            "File".into()
+        } else {
+            format!("{} file", extension.to_uppercase())
+        }
+    } else if extension.is_empty() {
+        name.into()
+    } else {
+        format!("{name} (.{extension})")
+    }
+}
+
+/// Convert an observed filesystem timestamp to local calendar time without inventing missing dates.
+/// `localtime_r` writes caller-owned storage and handles the offset at that date, including DST.
+fn local_file_date(milliseconds: Option<u64>) -> String {
+    let Some(seconds) = milliseconds.and_then(|value| libc::time_t::try_from(value / 1000).ok())
+    else {
+        return "Unavailable".into();
+    };
+    let mut calendar = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both arguments point to valid storage; localtime_r initializes tm on a nonnull return.
+    let result = unsafe { libc::localtime_r(&seconds, calendar.as_mut_ptr()) };
+    if result.is_null() {
+        return "Unavailable".into();
+    }
+    // SAFETY: the successful localtime_r call initialized every tm field.
+    let calendar = unsafe { calendar.assume_init() };
+    let offset = calendar.tm_gmtoff;
+    let sign = if offset < 0 { '-' } else { '+' };
+    let offset = offset.unsigned_abs();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} (UTC{sign}{:02}:{:02})",
+        calendar.tm_year + 1900,
+        calendar.tm_mon + 1,
+        calendar.tm_mday,
+        calendar.tm_hour,
+        calendar.tm_min,
+        offset / 3600,
+        offset % 3600 / 60
+    )
+}
+
+/// Recompute draft feedback for every edit, including undo back to the saved baseline.
+fn metadata_edit_feedback(dirty: bool, saving: bool, previously_saved: bool) -> &'static str {
+    if saving && dirty {
+        "Saving earlier changes · current edits are not saved"
+    } else if saving {
+        "Saving tags and notes…"
+    } else if dirty {
+        "Unsaved changes"
+    } else if previously_saved {
+        "Saved in .omni/metadata/"
+    } else {
+        "No saved tags or notes yet"
+    }
+}
+
+/// Human-readable filesystem observations prepared by the existing background preview worker.
+#[derive(Default)]
+struct FilePropertyLabels {
+    file_type: String,
+    size: String,
+    created: String,
+    modified: String,
+}
+
 /// Values last loaded from or successfully committed to one authored sidecar.
 #[derive(Clone)]
 struct MetadataDraft {
@@ -634,12 +878,15 @@ fn authored_tags(value: &str) -> Vec<String> {
 }
 
 /// Commit one authored sidecar only; derived indexes are deliberately refreshed by a separate action.
-fn save_authored_metadata(target: &SourceTarget, tags: &[String], description: &str) -> Result<()> {
-    file_actions::open_exact_root(&target.root)?.set_metadata(
-        &target.relative,
-        tags,
-        Some(description),
-    )
+fn save_authored_metadata(
+    target: &SourceTarget,
+    tags: &[String],
+    description: &str,
+) -> Result<PathBuf> {
+    let kb = file_actions::open_exact_root(&target.root)?;
+    let path = kb.metadata_path(&target.relative)?;
+    kb.set_metadata(&target.relative, tags, Some(description))?;
+    Ok(path)
 }
 
 /// Compare only directory identities used by the tree, without refreshing unchanged component items.
@@ -700,9 +947,8 @@ enum JobResult {
     Preview {
         relative: String,
         body: Arc<str>,
-        tags: Vec<String>,
-        description: String,
-        inspector: String,
+        info: Box<crate::file_info::SourceInfo>,
+        properties: FilePropertyLabels,
         anchor: Option<String>,
         show_metadata: bool,
     },
@@ -728,6 +974,7 @@ struct LibraryWindow {
     hits: Rc<Vec<SearchHit>>,
     selected: Option<String>,
     mode: SearchMode,
+    search_options_open: bool,
     mode_menu_open: bool,
     mode_popup: Option<Entity<PopupMenu>>,
     embeddings: bool,
@@ -760,12 +1007,14 @@ struct LibraryWindow {
     expanded_folders: BTreeSet<String>,
     expand_all: bool,
     search_active: bool,
+    applied_search: Option<SearchFilter>,
     search_revision: u64,
     file_focus: FocusHandle,
     file_menu: Option<Entity<PopupMenu>>,
     file_menu_session: MenuSession,
     selected_folder: String,
-    inspector: String,
+    file_info: Option<crate::file_info::SourceInfo>,
+    file_properties: FilePropertyLabels,
     link_events: Arc<Mutex<VecDeque<LinkEvent>>>,
     document_anchor: Option<String>,
     preview_surface: Rc<RefCell<PreviewSurface>>,
@@ -795,11 +1044,16 @@ impl LibraryWindow {
         let query_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search your knowledge…"));
         let tags_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Exact tags, comma separated"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("For example: research, travel"));
         let edit_tags_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Selected file tags"));
-        let description_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Selected file description / notes"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Separate tags with commas"));
+        let description_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .rows(2)
+                .soft_wrap(true)
+                .placeholder("Add a note about this file…")
+        });
         for field in [
             &root_input,
             &query_input,
@@ -828,22 +1082,30 @@ impl LibraryWindow {
         )
         .detach();
         for field in [&query_input, &tags_input] {
-            cx.subscribe_in(field, window, |this, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    this.search(cx);
-                }
-            })
+            cx.subscribe_in(
+                field,
+                window,
+                |this, _, event: &InputEvent, _, cx| match event {
+                    InputEvent::PressEnter { .. } => this.search(cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            )
             .detach();
         }
         for field in [&edit_tags_input, &description_input] {
             cx.subscribe_in(field, window, |this, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) && this.metadata_is_dirty(cx) {
+                if matches!(event, InputEvent::Change) {
                     this.metadata_revision += 1;
-                    this.metadata_feedback = if this.metadata_saving.is_some() {
-                        "Saving previous values · current edits are not saved".into()
-                    } else {
-                        "Unsaved edits".into()
-                    };
+                    this.metadata_feedback = metadata_edit_feedback(
+                        this.metadata_is_dirty(cx),
+                        this.metadata_saving.is_some(),
+                        this.file_info
+                            .as_ref()
+                            .is_some_and(|info| info.metadata_saved),
+                    )
+                    .into();
+                    this.status = this.metadata_feedback.clone();
                     cx.notify();
                 }
             })
@@ -947,6 +1209,7 @@ impl LibraryWindow {
             hits: Rc::new(vec![]),
             selected: None,
             mode: SearchMode::Bm25,
+            search_options_open: false,
             mode_menu_open: false,
             mode_popup: None,
             embeddings: false,
@@ -984,12 +1247,14 @@ impl LibraryWindow {
             expanded_folders: BTreeSet::new(),
             expand_all: false,
             search_active: false,
+            applied_search: None,
             search_revision: 0,
             file_focus: cx.focus_handle().tab_stop(true),
             file_menu: None,
             file_menu_session: MenuSession::default(),
             selected_folder: String::new(),
-            inspector: String::new(),
+            file_info: None,
+            file_properties: FilePropertyLabels::default(),
             link_events,
             document_anchor: None,
             preview_surface: Rc::new(RefCell::new(PreviewSurface::default())),
@@ -1080,6 +1345,7 @@ impl LibraryWindow {
                         this.index_warning = None;
                         this.hits = Rc::new(hits);
                         this.search_active = false;
+                        this.applied_search = None;
                         this.search_revision += 1;
                         if changed {
                             this.directory_epoch += 1;
@@ -1109,7 +1375,7 @@ impl LibraryWindow {
                                 if let Ok(mut preview) = this.preview_state.write() { preview.relative = None; preview.body = "<h2>Source moved</h2><p>Select its new location to preview. Refresh the index to update indexed search results.</p>".into(); }
                                 this.reload_preview();
                             }
-                            this.search_active = false; this.search_revision += 1;
+                            this.search_active = false; this.applied_search = None; this.search_lane.clear(); this.search_revision += 1;
                             this.refresh_directories(cx); this.rebuild_tree(cx); this.refresh_status(cx);
                         }
                     }
@@ -1242,6 +1508,15 @@ impl LibraryWindow {
         .detach();
     }
 
+    /// Read editable search intent without changing the applied filter or dispatching background work.
+    fn search_draft(&self, cx: &App) -> SearchFilter {
+        SearchFilter::new(
+            self.query_input.read(cx).value().to_string(),
+            self.mode,
+            parse_tags(self.tags_input.read(cx).value().as_ref()),
+        )
+    }
+
     /// Queue only the newest query while preserving access to the previous published snapshot.
     fn search(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else {
@@ -1249,18 +1524,17 @@ impl LibraryWindow {
             cx.notify();
             return;
         };
-        let query = self.query_input.read(cx).value().to_string();
-        let tags = parse_tags(self.tags_input.read(cx).value().as_ref());
+        let filter = self.search_draft(cx);
         self.search_revision += 1;
-        if query.trim().is_empty() && tags.is_empty() {
+        if !filter.restricts_files() {
             self.search_active = false;
+            self.applied_search = None;
             self.search_lane.clear();
             self.rebuild_tree(cx);
             self.refresh_directories(cx);
             return;
         }
-        self.search_active = true;
-        let mode = if query.trim().is_empty() {
+        let mode = if filter.query.trim().is_empty() {
             SearchMode::Files
         } else {
             self.mode
@@ -1268,10 +1542,11 @@ impl LibraryWindow {
         self.search_lane.enqueue(SearchRequest {
             root,
             revision: self.search_revision,
+            filter: filter.clone(),
             options: SearchOptions {
-                query,
+                query: filter.query,
                 mode,
-                tags,
+                tags: filter.tags,
                 limit: 10000,
                 case_sensitive: false,
                 query_image: None,
@@ -1289,6 +1564,7 @@ impl LibraryWindow {
         cx.notify();
         let root = request.root.clone();
         let revision = request.revision;
+        let filter = request.filter.clone();
         let task = cx.background_executor().spawn(async move {
             file_actions::open_exact_root(&request.root)?.search(&request.options)
         });
@@ -1296,20 +1572,14 @@ impl LibraryWindow {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.search_lane.complete();
-                if this.search_active
-                    && current_read_request(
-                        this.root.as_deref(),
-                        &root,
-                        this.search_revision,
-                        revision,
-                    )
+                if current_read_request(this.root.as_deref(), &root, this.search_revision, revision)
                 {
                     match result {
                         Ok(hits) => {
-                            this.status = format!(
-                                "{} indexed matches · clear × to browse all files",
-                                hits.len()
-                            );
+                            this.search_active = true;
+                            this.applied_search = Some(filter);
+                            this.status =
+                                format!("Matches: {} · clear × to show all files", hits.len());
                             this.hits = Rc::new(hits);
                             this.rebuild_tree(cx);
                         }
@@ -1395,22 +1665,17 @@ impl LibraryWindow {
                 request.start_seconds,
                 &request.issuer,
             )?;
-            let modified = info
-                .modified_ms
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unavailable".into());
-            let inspector = format!(
-                "{} · {} · {} bytes · modified Unix ms {modified}\nLive file properties.",
-                info.path.display(),
-                info.media_type,
-                info.size
-            );
+            let properties = FilePropertyLabels {
+                file_type: human_file_type(&info.relative, &info.media_type),
+                size: human_file_size(info.size),
+                created: local_file_date(info.created_ms),
+                modified: local_file_date(info.modified_ms),
+            };
             Ok(JobResult::Preview {
-                relative: info.relative,
+                relative: info.relative.clone(),
                 body: body.into(),
-                tags: info.tags,
-                description: info.description,
-                inspector,
+                info: Box::new(info),
+                properties,
                 anchor: request.anchor,
                 show_metadata: request.show_metadata,
             })
@@ -1449,19 +1714,28 @@ impl LibraryWindow {
             Ok(JobResult::Preview {
                 relative,
                 body,
-                tags,
-                description,
-                inspector,
+                info,
+                properties,
                 anchor,
                 show_metadata,
             }) => {
+                let mut info = *info;
+                let tags = info.tags.clone();
+                let description = info.description.clone();
                 let changed = self.selected.as_ref() != Some(&relative);
                 if changed {
                     self.metadata_open = false;
                     self.metadata_feedback.clear();
                 }
                 self.selected = Some(relative.clone());
-                self.inspector = inspector;
+                if !changed
+                    && metadata_revision != self.metadata_revision
+                    && let Some(previous) = &self.file_info
+                {
+                    info.metadata_saved = previous.metadata_saved;
+                }
+                self.file_info = Some(info);
+                self.file_properties = properties;
                 self.document_anchor = anchor;
                 if show_metadata {
                     self.metadata_open = true;
@@ -1510,6 +1784,7 @@ impl LibraryWindow {
                 }
                 self.directory_cache.insert(relative.clone(), entries);
                 self.search_active = false;
+                self.applied_search = None;
                 self.search_lane.clear();
                 self.search_revision += 1;
                 self.rebuild_tree(cx);
@@ -1588,7 +1863,7 @@ impl LibraryWindow {
     fn save_tags(&mut self, cx: &mut Context<Self>) {
         if self.metadata_saving.is_some() {
             self.metadata_feedback =
-                "A metadata save is already running; your edits remain in the fields".into();
+                "A save is already running; your current edits are kept here".into();
             cx.notify();
             return;
         }
@@ -1604,7 +1879,7 @@ impl LibraryWindow {
         };
         self.metadata_saving = Some(saved.target.clone());
         let source = saved.clone();
-        self.metadata_feedback = "Saving authored metadata…".into();
+        self.metadata_feedback = "Saving tags and notes…".into();
         cx.notify();
         let task = cx.background_executor().spawn(async move {
             save_authored_metadata(&source.target, &source.tags, &source.description)
@@ -1617,13 +1892,17 @@ impl LibraryWindow {
                     && this.selected.as_ref() == Some(&saved.target.relative)
                 {
                     this.metadata_feedback = match result {
-                        Ok(()) => {
+                        Ok(path) => {
+                            if let Some(info) = this.file_info.as_mut() {
+                                info.metadata_saved = true;
+                                info.metadata_path = path;
+                            }
                             this.metadata_revision += 1;
                             this.metadata_baseline = Some(saved.clone());
                             if this.metadata_is_dirty(cx) {
-                                "Saved earlier values · newer edits are not saved".into()
+                                "Saved earlier changes · newer edits are not saved".into()
                             } else {
-                                "Saved · Refresh index explicitly to update search".into()
+                                "Saved in this library · refresh the index to update search".into()
                             }
                         }
                         Err(error) => {
@@ -1736,7 +2015,12 @@ impl LibraryWindow {
                 this.hover_hint.update(id, *hovered, &detail);
                 cx.notify();
             }))
-            .child(div().text_ellipsis().whitespace_nowrap().child(label))
+            .child(
+                div()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(single_line_status_label(&label)),
+            )
     }
 
     /// Revalidate the displayed observation and opened owner before an explicit footer action.
@@ -1949,7 +2233,9 @@ impl LibraryWindow {
                 .on_click(cx.listener(|this, _, _, cx| this.show_guide("asr", cx))),
             );
         }
-        let routine = self.status == "Preview ready"
+        let routine = self.status == "Saved in .omni/metadata/"
+            || self.status == "No saved tags or notes yet"
+            || self.status == "Preview ready"
             || self.status.starts_with("Folder selected:")
             || self.status.starts_with("All files ·")
             || self.status.starts_with("Knowledge folder opened")
@@ -2216,19 +2502,19 @@ impl LibraryWindow {
             .iter()
             .find(|(mode, _)| *mode == self.mode)
             .map(|(_, label)| *label)
-            .unwrap_or("BM25");
+            .unwrap_or("Full text");
         Popover::new("mode-popover")
             .open(self.mode_menu_open)
             .appearance(false)
             .trigger(
                 button("mode-selector", label, false)
-                    .w(px(108.))
+                    .w(px(164.))
                     .dropdown_caret(true)
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                         this.hover_hint.update(
                             "mode-selector",
                             *hovered,
-                            "Search mode · 选择检索方式",
+                            "Choose what to search: file contents, text patterns, meaning, or names and notes",
                         );
                         cx.notify();
                     })),
@@ -2250,7 +2536,7 @@ impl LibraryWindow {
             })
     }
 
-    /// Render frequent search controls; infrequent root actions live in an explicit panel.
+    /// Keep one primary search field; expose optional restrictions only when requested.
     fn header(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut header = div()
             .flex()
@@ -2273,8 +2559,11 @@ impl LibraryWindow {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(0xe2ede0)))
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        this.hover_hint
-                            .update("home-logo", *hovered, "Home · 返回知识库");
+                        this.hover_hint.update(
+                            "home-logo",
+                            *hovered,
+                            "Home · Return to your files",
+                        );
                         cx.notify();
                     }))
                     .child(
@@ -2289,13 +2578,74 @@ impl LibraryWindow {
         if self.guide_open {
             header = header.child(div().flex_1().text_color(rgb(0x526b59)).child("说明与环境"));
         } else {
+            let draft = self.search_draft(cx);
+            let (options_label, options_hint) =
+                search_options_presentation(&draft, self.applied_search.as_ref());
+            let clearable = search_filter_is_clearable(
+                &draft.query,
+                &draft.tags,
+                self.search_active || self.search_lane.running,
+            );
+            let options_active = self.search_options_open
+                || self.applied_search.is_some()
+                || !draft.tags.is_empty()
+                || self.mode != SearchMode::Bm25;
+            let suffix = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    button("search-options", "Search options", options_active)
+                        .label(options_label)
+                        .h(px(22.))
+                        .dropdown_caret(true)
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            this.hover_hint
+                                .update("search-options", *hovered, &options_hint);
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.search_options_open = !this.search_options_open;
+                            this.mode_menu_open = false;
+                            this.mode_popup = None;
+                            this.hover_hint.clear();
+                            cx.notify();
+                            cx.stop_propagation();
+                        })),
+                )
+                .when(clearable, |suffix| {
+                    suffix.child(
+                        Button::new("clear-search")
+                            .icon(IconName::Close)
+                            .ghost()
+                            .compact()
+                            .size(px(22.))
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                this.hover_hint.update(
+                                    "clear-search",
+                                    *hovered,
+                                    "Clear search and tag filters · Show all files",
+                                );
+                                cx.notify();
+                            }))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clear_search(window, cx);
+                                cx.stop_propagation();
+                            })),
+                    )
+                });
             header = header
-                .child(self.mode_selector(cx))
                 .child(
                     div()
+                        .id("search-field")
                         .flex_1()
                         .min_w_0()
-                        .child(self.native_input(&self.query_input, cx)),
+                        .h(px(CONTROL_HEIGHT))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.focus_native_input(cx)),
+                        )
+                        .child(input(&self.query_input).suffix(suffix)),
                 )
                 .child(
                     button("search", "Search", true)
@@ -2304,19 +2654,9 @@ impl LibraryWindow {
                 )
                 .child(
                     self.action_icon(
-                        "clear-search",
-                        "×",
-                        "Clear query and tags · Browse all files",
-                        false,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.clear_search(window, cx))),
-                )
-                .child(
-                    self.action_icon(
                         "library-panel",
                         "▤",
-                        "Library · 知识库位置与初始化",
+                        "Library · Choose a folder and configure the next index refresh",
                         self.library_panel_open,
                         cx,
                     )
@@ -2333,43 +2673,82 @@ impl LibraryWindow {
             )
         } else {
             header.child(
-                self.action_icon("guide", "?", "说明与环境 · 使用指南与依赖检查", false, cx)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_guide(cx))),
+                self.action_icon(
+                    "guide",
+                    "?",
+                    "Help · Usage guide and optional tools",
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_guide(cx))),
             )
         }
     }
 
-    /// Reveal root selection and initialization only when the Library panel is expanded.
-    fn library_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
+    /// Group retrieval scope and exact-tag restrictions under the primary search field.
+    fn search_options(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
             .items_center()
             .gap_2()
-            .h(px(42.))
-            .flex_shrink_0()
             .px_3()
+            .py_2()
+            .flex_shrink_0()
             .bg(rgb(0xe9f0e5))
+            .child(div().text_size(px(12.)).child("Search in"))
+            .child(self.mode_selector(cx))
+            .child(
+                div()
+                    .ml_2()
+                    .text_size(px(12.))
+                    .child("Tags (all must match)"),
+            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(self.native_input(&self.root_input, cx)),
+                    .child(self.native_input(&self.tags_input, cx)),
             )
             .child(
-                button("choose", "Choose", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_root(cx))),
+                button("apply-search-options", "Apply", true).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.search_options_open = false;
+                        this.search(cx);
+                    },
+                )),
             )
             .child(
-                button("open", "Open", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.open(false, cx))),
-            )
-            .child(
-                button("init", "Initialize", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.open(true, cx))),
+                button("reset-search-options", "Reset options", false).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.tags_input
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        this.mode = SearchMode::Bm25;
+                        this.mode_menu_open = false;
+                        this.mode_popup = None;
+                        this.search(cx);
+                        cx.notify();
+                    },
+                )),
             )
     }
 
-    /// Render source actions and a collapsed metadata editor inside the selected preview pane.
+    /// Keep folder lifecycle and the next explicit refresh's model option out of daily retrieval.
+    fn library_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div().flex().flex_col().gap_2().px_3().py_2().flex_shrink_0().bg(rgb(0xe9f0e5))
+            .child(div().flex().items_center().gap_2()
+                .child(div().text_size(px(12.)).child("Knowledge folder"))
+                .child(div().flex_1().min_w_0().child(self.native_input(&self.root_input, cx)))
+                .child(button("choose", "Choose…", false).on_click(cx.listener(|this, _, _, cx| this.choose_root(cx))))
+                .child(button("open", "Open", false).on_click(cx.listener(|this, _, _, cx| this.open(false, cx))))
+                .child(button("init", "Initialize", false).on_click(cx.listener(|this, _, _, cx| this.open(true, cx)))))
+            .child(div().flex().items_center().gap_2()
+                .child(Checkbox::new("embedding").label("Build semantic search index").checked(self.embeddings).small()
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| { this.embeddings = *checked; cx.notify(); })))
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(0x526758))
+                    .child("Include text, images and video in the next index refresh. Requires the local model service. This choice lasts until the app closes.")))
+    }
+
+    /// Render selected-file actions and an optional, labelled details and notes editor.
     fn preview_controls(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut controls = div().flex().flex_col().flex_shrink_0();
         let mut toolbar = div()
@@ -2408,7 +2787,7 @@ impl LibraryWindow {
                 )));
             }
             toolbar = toolbar.child(
-                button("metadata-panel", "Metadata", self.metadata_open)
+                button("metadata-panel", "File details", self.metadata_open)
                     .icon(IconName::Info)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.metadata_open = !this.metadata_open;
@@ -2418,46 +2797,102 @@ impl LibraryWindow {
         }
         controls = controls.child(toolbar);
         if self.selected.is_some() && self.metadata_open {
-            controls = controls.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .bg(rgb(0xeaf0e6))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x526758))
-                            .child(self.inspector.clone()),
-                    )
-                    .child(div().text_size(px(11.)).text_color(rgb(0x627668)).child(if self.metadata_feedback.is_empty(){"Editable tags and description · Save updates metadata only; Refresh index updates search".to_owned()}else{self.metadata_feedback.clone()}))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(210.))
-                                    .flex_shrink_0()
-                                    .child(self.native_input(&self.edit_tags_input, cx)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.native_input(&self.description_input, cx)),
-                            )
-                            .child(
-                                button("save-metadata", "Save metadata", false)
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_tags(cx))),
-                            ),
-                    ),
-            );
+            let Some(info) = self.file_info.as_ref().filter(|info| {
+                self.root.as_ref() == Some(&info.root)
+                    && self.selected.as_ref() == Some(&info.relative)
+            }) else {
+                return controls;
+            };
+            let absolute = info.path.to_string_lossy().into_owned();
+            let relative = info.relative.clone();
+            let path_hint = absolute.clone();
+            let mime_hint = format!("MIME type: {}", info.media_type);
+            let storage_hint = info.metadata_path.to_string_lossy().into_owned();
+            let target = SourceTarget {
+                root: info.root.clone(),
+                relative: relative.clone(),
+            };
+            let feedback = if self.metadata_feedback.is_empty() {
+                metadata_edit_feedback(
+                    self.metadata_is_dirty(cx),
+                    self.metadata_saving.is_some(),
+                    info.metadata_saved,
+                )
+                .to_owned()
+            } else {
+                self.metadata_feedback.clone()
+            };
+            let mut notes = Input::new(&self.description_input)
+                .small()
+                .text_size(px(14.))
+                .h(px(52.));
+            notes.style().size.height = Some(px(52.).into());
+            let details = div().flex().flex_col().gap_2().px_3().py_2().bg(rgb(0xeaf0e6))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_size(px(11.)).text_color(rgb(0x627668)).child("Path"))
+                    .child(div().id("file-details-path").flex_1().min_w_0().text_size(px(12.)).text_ellipsis().child(absolute.clone())
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            this.hover_hint.update("file-details-path", *hovered, &path_hint); cx.notify();
+                        })))
+                    .child(button("copy-details-path", "Copy path", false).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(absolute.clone()));
+                        this.status = "File path copied".into(); cx.notify();
+                    })))
+                    .child(button("copy-details-relative", "Copy relative path", false).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(relative.clone()));
+                        this.status = "Relative file path copied".into(); cx.notify();
+                    }))))
+                .child(div().flex().flex_wrap().gap_3().text_size(px(11.)).text_color(rgb(0x526758))
+                    .child(div().id("file-details-type").child(format!("Type: {}", self.file_properties.file_type))
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            this.hover_hint.update("file-details-type", *hovered, &mime_hint); cx.notify();
+                        })))
+                    .child(format!("Size: {}", self.file_properties.size))
+                    .child(format!("Created: {}", self.file_properties.created))
+                    .child(format!("Modified: {}", self.file_properties.modified)))
+                .child(div().flex().items_start().gap_2()
+                    .child(div().w(px(230.)).flex_shrink_0().flex().flex_col().gap_1()
+                        .child(div().text_size(px(12.)).child("Tags"))
+                        .child(self.native_input(&self.edit_tags_input, cx)))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                        .child(div().text_size(px(12.)).child("Notes"))
+                        .child(div().id("notes-input").h(px(52.)).w_full()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.focus_native_input(cx)))
+                            .child(notes))))
+                .child(div().text_size(px(11.)).text_color(rgb(0x627668))
+                    .child("Tags and notes are saved as JSON in this library’s .omni/metadata/ folder; the original file stays unchanged. Refresh the index to include changes in search."))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(rgb(0x526758)).child(feedback))
+                    .when(info.metadata_saved, |row| row.child(
+                        button("show-saved-metadata", "Show saved metadata", false)
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                this.hover_hint.update("show-saved-metadata", *hovered, &format!("Reveal the saved tags and notes in Finder: {storage_hint}")); cx.notify();
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| this.reveal_metadata(target.clone(), cx)))
+                    ))
+                    .child(button("save-metadata", "Save tags and notes", true).disabled(self.metadata_saving.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_tags(cx)))));
+            controls = controls.child(details);
         }
         controls
+    }
+
+    /// Reveal an existing validated authored sidecar without granting previews an internal-file route.
+    /// Validation and Finder invocation run off-thread; a missing or replaced record is an explicit error.
+    fn reveal_metadata(&mut self, target: SourceTarget, cx: &mut Context<Self>) {
+        self.work(
+            "Opening saved metadata in Finder…",
+            move || {
+                file_actions::reveal_metadata(&target.root, &target.relative)?;
+                Ok(JobResult::FileAction {
+                    root: target.root,
+                    removed: None,
+                    changed: false,
+                    message: "Saved tags and notes revealed in Finder".into(),
+                })
+            },
+            cx,
+        );
     }
 
     /// Drain trusted read-side clicks; stale document identities cannot redirect a later preview.
@@ -2651,8 +3086,10 @@ impl LibraryWindow {
         self.tags_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.search_active = false;
+        self.applied_search = None;
         self.search_lane.clear();
         self.search_revision += 1;
+        self.hover_hint.clear();
         self.status = "All files · live folder browsing".into();
         self.rebuild_tree(cx);
         self.refresh_directories(cx);
@@ -2821,7 +3258,7 @@ impl LibraryWindow {
                     ("Quick Look", "quick-look"),
                     ("Open original (default app)", "open"),
                     ("Reveal in Finder", "reveal"),
-                    ("Metadata / file information", "metadata"),
+                    ("File details", "metadata"),
                     ("Copy file · ⌘C", "copy-file"),
                     ("Copy absolute path", "copy-absolute"),
                     ("Copy relative path", "copy-relative"),
@@ -3245,12 +3682,6 @@ impl Render for LibraryWindow {
         }
         let webview = self.preview.clone();
         let surface = self.preview_surface.clone();
-        let root_name = self
-            .root
-            .as_ref()
-            .and_then(|root| root.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "No library open".into());
         let files = if self.search_active {
             self.hits
                 .iter()
@@ -3334,15 +3765,33 @@ impl Render for LibraryWindow {
                             .min_w_0()
                             .text_ellipsis()
                             .text_size(px(12.))
-                            .child(root_name),
+                            .child(if self.search_active {
+                                "Results"
+                            } else {
+                                "Files"
+                            }),
                     )
                     .child(div().text_size(px(10.)).text_color(rgb(0x748a79)).child(
                         if self.search_active {
-                            format!("{files} files / {} matches", self.hits.len())
+                            format!("Files: {files}")
                         } else {
-                            format!("All files · {files} loaded")
+                            format!("{files} loaded")
                         },
                     ))
+                    .child(
+                        button("import", "Add files", false)
+                            .icon(IconName::Plus)
+                            .disabled(self.root.is_none() || self.busy)
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                this.hover_hint.update(
+                                    "import",
+                                    *hovered,
+                                    "Copy files into the selected folder · Originals stay in place",
+                                );
+                                cx.notify();
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
+                    )
                     .child(
                         self.action_icon("tree-expand", "＋", "Expand all folders", false, cx)
                             .on_click(cx.listener(|this, _, _, cx| this.expand_folders(true, cx))),
@@ -3383,47 +3832,9 @@ impl Render for LibraryWindow {
             .when(self.library_panel_open, |layout| {
                 layout.child(self.library_panel(cx))
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .h(px(34.))
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .w(px(300.))
-                            .flex_shrink_0()
-                            .min_w_0()
-                            .child(self.native_input(&self.tags_input, cx)),
-                    )
-                    .child(
-                        self.action_icon(
-                            "import",
-                            "＋",
-                            "Import · Copy files into the selected folder",
-                            false,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
-                    )
-                    .child(
-                        button(
-                            "embedding",
-                            if self.embeddings {
-                                "Embeddings: on"
-                            } else {
-                                "Embeddings: off"
-                            },
-                            self.embeddings,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.embeddings = !this.embeddings;
-                            cx.notify();
-                        })),
-                    ),
-            )
+            .when(self.search_options_open, |layout| {
+                layout.child(self.search_options(cx))
+            })
             .child(
                 div()
                     .flex()
@@ -4072,6 +4483,142 @@ mod tests {
         assert_eq!(hint.detail(), Some("Updated root path"));
         hint.clear();
         assert!(hint.detail().is_none());
+    }
+
+    /// Keep a way back to the whole tree for text, tag-only, and cleared-but-published queries.
+    #[test]
+    fn search_reset_remains_visible_for_every_filter_kind() {
+        assert!(!search_filter_is_clearable("", &[], false));
+        assert!(search_filter_is_clearable("word", &[], false));
+        assert!(search_filter_is_clearable("", &["research".into()], false));
+        assert!(search_filter_is_clearable("", &[], true));
+        assert_eq!(search_options_label(SearchMode::Bm25, 0), "Search options");
+        assert!(search_options_label(SearchMode::Bm25, 1).contains("1 tag"));
+        assert!(search_options_label(SearchMode::Semantic, 2).contains("Meaning · 2 tags"));
+    }
+
+    /// Keep the applied tag set and mode visible while edited restrictions await an explicit search.
+    #[test]
+    fn applied_search_summary_does_not_claim_draft_changes() {
+        let applied = SearchFilter::new("".into(), SearchMode::Bm25, vec!["research".into()]);
+        let empty = SearchFilter::new("".into(), SearchMode::Bm25, vec![]);
+        let (label, hint) = search_options_presentation(&empty, Some(&applied));
+        assert!(label.contains("1 tag"));
+        assert!(label.contains("changes not applied"));
+        assert!(hint.contains("Required tags: research"));
+        let other = SearchFilter::new("".into(), SearchMode::Bm25, vec!["travel".into()]);
+        let (label, hint) = search_options_presentation(&other, Some(&applied));
+        assert!(label.contains("1 tag · changes not applied"));
+        assert!(hint.contains("Required tags: research"));
+        assert!(!hint.contains("Required tags: travel"));
+        let text = SearchFilter::new("needle".into(), SearchMode::Bm25, vec![]);
+        let meaning = SearchFilter::new("needle".into(), SearchMode::Semantic, vec![]);
+        let (label, hint) = search_options_presentation(&meaning, Some(&text));
+        assert!(label.contains("changes not applied"));
+        assert!(!label.contains("Meaning"));
+        assert!(hint.contains("Search mode: Full text"));
+        let new_query = SearchFilter::new("different".into(), SearchMode::Bm25, vec![]);
+        assert!(
+            search_options_presentation(&new_query, Some(&text))
+                .1
+                .contains("Showing results for: needle")
+        );
+        assert_eq!(
+            search_options_presentation(&empty, None).0,
+            "Search options"
+        );
+        assert!(
+            !search_options_presentation(&applied, Some(&applied))
+                .0
+                .contains("changes not applied")
+        );
+        assert!(
+            search_options_presentation(&other, None)
+                .0
+                .contains("changes not applied")
+        );
+        let reordered = SearchFilter::new(
+            "".into(),
+            SearchMode::Bm25,
+            vec!["research".into(), "research".into()],
+        );
+        assert_eq!(applied, reordered);
+    }
+
+    /// Multiline search failures retain a visible prefix and a complete, unchanged hover diagnostic.
+    #[test]
+    fn compact_status_keeps_error_prefix_without_multiline_clipping() {
+        let diagnostic =
+            "Search failed: regex parse error:\n    [\n    ^\nerror: unclosed character class";
+        let label = single_line_status_label(diagnostic);
+        assert!(label.starts_with("Search failed: regex parse error:"));
+        assert!(!label.contains('\n'));
+        assert!(!label.contains('\r'));
+        let mut hint = HoverHint::default();
+        hint.update("operation-status", true, diagnostic);
+        assert_eq!(hint.detail(), Some(diagnostic));
+        assert!(hint.detail().unwrap().contains("\n    ^\n"));
+    }
+
+    /// Match common desktop size units and retain exact bytes without asking users to calculate.
+    #[test]
+    fn file_sizes_show_readable_units_and_exact_evidence() {
+        assert_eq!(human_file_size(0), "0 bytes");
+        assert_eq!(human_file_size(1), "1 byte");
+        assert_eq!(human_file_size(999), "999 bytes");
+        assert_eq!(human_file_size(1000), "1.0 KB (1,000 bytes)");
+        assert_eq!(human_file_size(37748), "37.7 KB (37,748 bytes)");
+        assert_eq!(human_file_size(1_500_000), "1.5 MB (1,500,000 bytes)");
+    }
+
+    /// Put familiar format names before technical MIME identifiers without claiming unsupported preview.
+    #[test]
+    fn file_type_names_keep_unknown_formats_honest() {
+        assert_eq!(
+            human_file_type("raw/中文.md", "text/markdown"),
+            "Markdown (.md)"
+        );
+        assert_eq!(
+            human_file_type("photo.JPG", "image/jpeg"),
+            "JPEG image (.JPG)"
+        );
+        assert_eq!(
+            human_file_type("photo.RAF", "application/octet-stream"),
+            "RAF file"
+        );
+        assert_eq!(
+            human_file_type("no-extension", "application/octet-stream"),
+            "File"
+        );
+    }
+
+    /// Missing birth dates stay unavailable; known values show local calendar time and its offset.
+    #[test]
+    fn file_dates_use_local_calendar_time_without_fabricated_birth_dates() {
+        assert_eq!(local_file_date(None), "Unavailable");
+        let epoch = local_file_date(Some(0));
+        assert!(epoch.starts_with("1970-") || epoch.starts_with("1969-"));
+        assert!(epoch.contains(" (UTC"));
+        assert!(!epoch.contains("Unix"));
+    }
+
+    /// Undo to baseline clears unsaved feedback without inventing an authored record.
+    #[test]
+    fn metadata_feedback_tracks_dirty_undo_and_save_overlap() {
+        assert_eq!(metadata_edit_feedback(true, false, true), "Unsaved changes");
+        assert_eq!(
+            metadata_edit_feedback(false, false, true),
+            "Saved in .omni/metadata/"
+        );
+        assert_eq!(
+            metadata_edit_feedback(false, false, false),
+            "No saved tags or notes yet"
+        );
+        assert!(metadata_edit_feedback(true, true, true).contains("not saved"));
+        assert_eq!(
+            metadata_edit_feedback(false, true, false),
+            "Saving tags and notes…"
+        );
     }
 
     /// Create a non-I/O folder observation for footer publication decisions.

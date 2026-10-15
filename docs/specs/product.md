@@ -43,15 +43,27 @@ Tool discovery must work after a Finder launch without relying on the interactiv
 
 The engineer requested a compact workspace in the 2026-10-15 desktop follow-up.
 Remove the two brand text lines from the header and use the green mark to return to the main workspace.
-Keep frequent retrieval operations at the top and preserve room for files and previews.
-Use a search-mode dropdown and compact action icons with hover hints where the action remains clear.
+Keep one primary search row at the top and preserve room for files and previews.
+Put a clear-search action inside the search input; it clears both the query and tag restrictions and restores the live directory tree.
+Group search mode and exact tags in a search-options disclosure instead of a permanent second search toolbar.
+Keep active restrictions discoverable when those options are closed, including a tag-only search.
+Distinguish draft search options from the successful search that produced the displayed files; failed searches must not relabel those results.
+Use descriptive retrieval labels and compact action icons with hover hints where the action remains clear.
 Align each input's visible height with adjacent compact buttons.
 Use suitable GPUI Kit components for the desktop's controls and interaction.
 Keep knowledge-folder selection and initialization in an on-demand panel because they are infrequent operations.
+Place the next-refresh semantic-index option in that panel and explain that it neither starts processing nor indicates service availability.
+Keep adding files beside the tree and index refresh beside index status; do not duplicate index refresh in the search toolbar.
 Show files in a collapsible directory tree, with selectable leaves and visible source identity.
 Preserve search settings, results, and the selected document when opening and closing the guide.
 Keep metadata editing available without reserving a large permanent toolbar row.
 Save editable metadata directly without starting an index build, and show whether the write succeeded.
+Present file details with labelled type, readable size, local creation and modification dates, and explicit path-copy actions.
+Show an unavailable date honestly instead of substituting another timestamp.
+Label editable tags and notes separately from source properties and explain that they are saved with the knowledge library without changing the source.
+Identify the saved record's location, make it inspectable, and reload the saved values when the file is selected again.
+Explain that an explicit index refresh makes new tags and notes available to search.
+Distinguish unsaved changes, saving, saved values, and failures, including edits that return to their saved value.
 Keep preview selection, typing, and metadata inspection responsive while searches or explicit index builds run.
 Read selected-file attributes independently of the complete search index.
 Keep the bottom status bar to one compact row during normal browsing.
