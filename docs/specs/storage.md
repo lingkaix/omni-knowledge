@@ -59,6 +59,9 @@ Optional local parsing or media preparation failures are reported as missing cov
 Lexical reconciliation drops stale vectors for changed sources until a requested embedding build refreshes them.
 
 Readers hold a shared `.omni/read.lock` through one search.
+Process-local search caches may retain validated immutable data, but each query must recheck its current owner and generation under a fresh reader lease.
+Changed manifest identity or configuration must prevent reuse of incompatible cached state.
+An idle cache must not prevent publication or retirement.
 Publication takes this gate exclusively for the pointer switch and retirement, after the expensive build completes.
 Retain the newly published generation and the actual previous pointer target.
 Retire only recognized older generated state inside the selected root, using its complete file and directory inventory.

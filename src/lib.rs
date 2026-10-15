@@ -32,7 +32,7 @@ pub const CONFIG_FILE: &str = "omni-knowledge.json";
 pub const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
 /// User-owned library settings; version changes must be explicitly supported.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     /// Durable configuration schema version.
     pub version: u32,
@@ -664,8 +664,12 @@ impl KnowledgeBase {
         if options.limit > 10_000 {
             bail!("result limit exceeds 10000");
         }
-        let (snapshot, directory, _lease) = storage::load(self)?;
-        search::search(self, &snapshot, &directory, options)
+        let loaded = storage::load_search(self)?;
+        let current = KnowledgeBase {
+            root: self.root.clone(),
+            config: loaded.config.clone(),
+        };
+        search::search(&current, &loaded.snapshot, &loaded.directory, options)
     }
 
     /// Lists indexed regular files; call index to reconcile recent filesystem edits.

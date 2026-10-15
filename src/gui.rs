@@ -622,6 +622,75 @@ struct SearchRequest {
     revision: u64,
 }
 
+/// Keep local index reads independent of a slower embedding provider request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchLane {
+    Local,
+    Model,
+}
+
+impl SearchLane {
+    /// Route the effective mode, including tag-only queries already converted to Files.
+    fn for_mode(mode: SearchMode) -> Self {
+        match mode {
+            SearchMode::Semantic | SearchMode::Hybrid => Self::Model,
+            SearchMode::Files | SearchMode::Grep | SearchMode::Bm25 => Self::Local,
+        }
+    }
+}
+
+/// Bound searches to two active workers and one latest queued intent across both lanes.
+#[derive(Default)]
+struct SearchLanes {
+    local: CoalescedRead<SearchRequest>,
+    model: CoalescedRead<SearchRequest>,
+    current_revision: Option<u64>,
+}
+
+impl SearchLanes {
+    /// Select one worker slot without changing the other lane's active request.
+    fn lane(&mut self, lane: SearchLane) -> &mut CoalescedRead<SearchRequest> {
+        match lane {
+            SearchLane::Local => &mut self.local,
+            SearchLane::Model => &mut self.model,
+        }
+    }
+
+    /// Replace all undispatched work and return the lane for the newest user intent.
+    fn enqueue(&mut self, request: SearchRequest) -> SearchLane {
+        self.clear();
+        let lane = SearchLane::for_mode(request.options.mode);
+        self.current_revision = Some(request.revision);
+        self.lane(lane).enqueue(request);
+        lane
+    }
+
+    /// Dispatch only when this lane's previous blocking operation has finished.
+    fn dispatch(&mut self, lane: SearchLane) -> Option<SearchRequest> {
+        self.lane(lane).dispatch()
+    }
+
+    /// Release this worker without letting a stale completion clear the newest progress state.
+    fn complete(&mut self, lane: SearchLane, revision: u64) {
+        self.lane(lane).complete();
+        if self.current_revision == Some(revision) {
+            self.current_revision = None;
+        }
+    }
+
+    /// Drop queued intent; active blocking operations retain their bounded slots until completion.
+    fn clear(&mut self) {
+        self.local.clear();
+        self.model.clear();
+        self.current_revision = None;
+    }
+
+    /// Show progress for the current intent, excluding obsolete workers finishing in the background.
+    fn is_searching(&self) -> bool {
+        self.current_revision.is_some()
+    }
+}
+
 /// Compare callback identities independently of unrelated mutation or indexing activity.
 fn current_read_request(
     current_root: Option<&Path>,
@@ -1021,7 +1090,7 @@ struct LibraryWindow {
     preview_revision: u64,
     preview_lane: CoalescedRead<PreviewRequest>,
     preview_target: Option<SourceTarget>,
-    search_lane: CoalescedRead<SearchRequest>,
+    search_lane: SearchLanes,
     indexing: Option<PathBuf>,
     index_failure: Option<(PathBuf, String)>,
     index_warning: Option<(PathBuf, String)>,
@@ -1261,7 +1330,7 @@ impl LibraryWindow {
             preview_revision: 0,
             preview_lane: CoalescedRead::default(),
             preview_target: None,
-            search_lane: CoalescedRead::default(),
+            search_lane: SearchLanes::default(),
             indexing: None,
             index_failure: None,
             index_warning: None,
@@ -1530,6 +1599,7 @@ impl LibraryWindow {
             self.search_active = false;
             self.applied_search = None;
             self.search_lane.clear();
+            self.status = "All files · live folder browsing".into();
             self.rebuild_tree(cx);
             self.refresh_directories(cx);
             return;
@@ -1539,7 +1609,7 @@ impl LibraryWindow {
         } else {
             self.mode
         };
-        self.search_lane.enqueue(SearchRequest {
+        let lane = self.search_lane.enqueue(SearchRequest {
             root,
             revision: self.search_revision,
             filter: filter.clone(),
@@ -1552,12 +1622,12 @@ impl LibraryWindow {
                 query_image: None,
             },
         });
-        self.launch_search(cx);
+        self.launch_search(lane, cx);
     }
 
-    /// Serialize search workers and discard superseded root/query results before changing the tree.
-    fn launch_search(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.search_lane.dispatch() else {
+    /// Run bounded local and model workers independently, publishing only the current root/query.
+    fn launch_search(&mut self, lane: SearchLane, cx: &mut Context<Self>) {
+        let Some(request) = self.search_lane.dispatch(lane) else {
             return;
         };
         self.status = "Searching the published index…".into();
@@ -1571,7 +1641,7 @@ impl LibraryWindow {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.search_lane.complete();
+                this.search_lane.complete(lane, revision);
                 if current_read_request(this.root.as_deref(), &root, this.search_revision, revision)
                 {
                     match result {
@@ -1586,7 +1656,7 @@ impl LibraryWindow {
                         Err(error) => this.status = format!("Search failed: {error:#}"),
                     }
                 }
-                this.launch_search(cx);
+                this.launch_search(lane, cx);
                 cx.notify();
             });
         })
@@ -2247,7 +2317,7 @@ impl LibraryWindow {
             Some("Saving metadata…")
         } else if self.busy {
             Some(self.status.as_str())
-        } else if self.search_lane.running {
+        } else if self.search_lane.is_searching() {
             Some("Searching…")
         } else if self.preview_lane.running {
             Some("Loading preview…")
@@ -2584,7 +2654,7 @@ impl LibraryWindow {
             let clearable = search_filter_is_clearable(
                 &draft.query,
                 &draft.tags,
-                self.search_active || self.search_lane.running,
+                self.search_active || self.search_lane.is_searching(),
             );
             let options_active = self.search_options_open
                 || self.applied_search.is_some()
@@ -4836,6 +4906,86 @@ mod tests {
             authored_tags(" research, code,research "),
             ["code", "research"]
         );
+    }
+
+    /// Build an immutable query intent for worker scheduling tests without accessing a library.
+    fn queued_search(mode: SearchMode, revision: u64) -> SearchRequest {
+        SearchRequest {
+            root: PathBuf::from("/library"),
+            filter: SearchFilter::new("query".into(), mode, Vec::new()),
+            options: SearchOptions {
+                query: "query".into(),
+                mode,
+                ..SearchOptions::default()
+            },
+            revision,
+        }
+    }
+
+    /// Let local queries finish while an obsolete model query still occupies its bounded worker.
+    #[test]
+    fn local_search_does_not_wait_for_an_obsolete_model_request() {
+        let mut lanes = SearchLanes::default();
+        let model = lanes.enqueue(queued_search(SearchMode::Semantic, 1));
+        assert_eq!(model, SearchLane::Model);
+        assert_eq!(lanes.dispatch(model).unwrap().revision, 1);
+        let local = lanes.enqueue(queued_search(SearchMode::Bm25, 2));
+        assert_eq!(local, SearchLane::Local);
+        assert_eq!(lanes.dispatch(local).unwrap().revision, 2);
+        assert!(lanes.is_searching());
+        lanes.complete(local, 2);
+        assert!(!lanes.is_searching());
+        assert!(lanes.model.running);
+        assert!(!current_read_request(
+            Some(Path::new("/library")),
+            Path::new("/library"),
+            2,
+            1
+        ));
+        lanes.complete(model, 1);
+        assert!(!lanes.is_searching());
+        assert!(!lanes.model.running);
+    }
+
+    /// Keep only the newest pending intent globally without starting a second worker in one lane.
+    #[test]
+    fn search_lanes_coalesce_replacements_and_preserve_active_bounds() {
+        let mut lanes = SearchLanes::default();
+        let model = lanes.enqueue(queued_search(SearchMode::Semantic, 1));
+        assert_eq!(lanes.dispatch(model).unwrap().revision, 1);
+        lanes.enqueue(queued_search(SearchMode::Hybrid, 2));
+        lanes.enqueue(queued_search(SearchMode::Hybrid, 3));
+        assert!(lanes.dispatch(model).is_none());
+        let local = lanes.enqueue(queued_search(SearchMode::Grep, 4));
+        assert_eq!(lanes.dispatch(local).unwrap().revision, 4);
+        assert!(lanes.model.pending.is_none());
+        lanes.enqueue(queued_search(SearchMode::Files, 5));
+        assert!(lanes.dispatch(local).is_none());
+        lanes.complete(model, 1);
+        assert!(lanes.is_searching());
+        assert!(lanes.dispatch(model).is_none());
+        lanes.complete(local, 4);
+        assert!(lanes.is_searching());
+        assert_eq!(lanes.dispatch(local).unwrap().revision, 5);
+        lanes.enqueue(queued_search(SearchMode::Bm25, 6));
+        lanes.clear();
+        assert!(!lanes.is_searching());
+        assert!(lanes.local.running);
+        assert!(lanes.dispatch(local).is_none());
+        lanes.complete(local, 5);
+        assert!(lanes.dispatch(local).is_none());
+        assert!(!lanes.local.running);
+    }
+
+    /// Route effective Files, grep and BM25 locally, reserving the model lane for provider queries.
+    #[test]
+    fn effective_search_mode_selects_the_worker_lane() {
+        for mode in [SearchMode::Files, SearchMode::Grep, SearchMode::Bm25] {
+            assert_eq!(SearchLane::for_mode(mode), SearchLane::Local);
+        }
+        for mode in [SearchMode::Semantic, SearchMode::Hybrid] {
+            assert_eq!(SearchLane::for_mode(mode), SearchLane::Model);
+        }
     }
 
     /// Avoid repainting a virtualized tree for identical periodic filesystem child snapshots.

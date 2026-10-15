@@ -374,7 +374,6 @@ fn semantic(
         bail!("configured embedding identity differs from index; run index --embeddings --force");
     }
     let client = embedding::EmbeddingClient::new(identity)?;
-    client.health()?;
     let query = if let Some(image) = &options.query_image {
         client.embed_image(image)?
     } else {

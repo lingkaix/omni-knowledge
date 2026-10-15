@@ -35,6 +35,8 @@ When a native input receives focus or a pointer click, return the Cocoa first re
 GPUI's logical focus alone does not restore the native responder after a preview click.
 Set the single-line input's actual style height to the shared 28-pixel control height; the component's convenience height setter applies to multiline inputs.
 Run preview selection, search, and explicit indexing independently, and coalesce rapid selections so stale completions cannot replace the chosen file.
+Use separate bounded local and model search workers so an obsolete provider request cannot hold a newer local query in its queue.
+Retain only the newest pending search across both workers, preserve active slots on clear or root changes, and bind result publication to the global root and query revision.
 Give each opened library a resource-origin token and bind document bases, media URLs, and navigation to it; obsolete pages cannot resolve the next library's same-named source.
 Read selected-file facts from live attributes and authored metadata instead of the full vector manifest.
 Save metadata without starting indexing; this keeps a small authored edit separate from model work and derived publication.

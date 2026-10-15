@@ -2,6 +2,7 @@
 
 Read [product requirements](../docs/specs/product.md) before changing behavior.
 The library provides knowledge-base lifecycle and shared search for the CLI and GPUI application.
+`storage.rs` owns buffered manifest loading, validated resident search snapshots, and per-query publication leases.
 Extraction, EPUB packaging, embedding requests, and media segmentation each have a separate module.
 `runtime.rs` owns tool discovery and allowlisted Homebrew installation; document preview cannot invoke these operations.
 `status.rs` owns nonmutating folder, freshness, and local-service checks.

@@ -104,6 +104,9 @@ Semantic and hybrid retrieval require a working provider and indexed vectors.
 The status bar shows provider and extraction failures.
 Filesystem and model work runs outside the UI thread.
 Preview selection, search, metadata saving, and explicit indexing use separate background tasks.
+Local filename, tag, text-pattern, and full-text searches can run while an obsolete semantic request finishes.
+Each local or model search lane has one active worker, with only the newest pending query retained across both lanes.
+Only the latest root and query can replace the displayed results; clearing search drops pending work without claiming to cancel a blocking model request.
 Opening an existing library and selecting files do not load its full search snapshot or start an index build.
 Rapid selections replace pending preview requests; an obsolete completion cannot replace the current selection.
 The bottom bar checks the selected folder, index metadata, installed tools, provider identity, and configured ASR files.

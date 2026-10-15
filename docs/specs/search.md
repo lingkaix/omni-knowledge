@@ -6,6 +6,7 @@ This document owns observable retrieval behavior; [decision 002](../decisions/00
 ## Scope And Evidence
 
 Every query reads the last successfully published generation for one root.
+Process-local reuse must recheck root ownership, current configuration, generation, and manifest identity under a fresh reader lease; it cannot return results from an obsolete generation.
 A successful reconciliation removes deleted paths and refreshes changed content.
 A query does not claim an atomic live-filesystem view.
 Result records include `root`, relative `path`, display title, bounded snippet, mode, relevance score, exact tags, and available line or time evidence.
@@ -43,4 +44,6 @@ Extraction has an 8 MiB source/output limit; metadata stays indexed when content
 Semantic request chunks contain at most 1,600 Unicode characters with a small overlap.
 Provider dimensions, model, package, and space must match the generation; incompatible vectors are never mixed.
 Missing local parsing or media-preparation coverage is explicit in `status` and the index report.
-Exact cosine scoring and JSON snapshots trade simplicity for memory use; large-library latency and recall are not yet benchmarked.
+Exact cosine scoring and JSON snapshots trade simplicity for memory use.
+A bounded process-local snapshot cache removes repeated parsing for unchanged generations; the first query after a restart or publication still loads and validates the full manifest.
+Local measurements and their library size belong in the [search performance record](../changes/2026-10-15-search-performance.md); they are not latency guarantees or a recall benchmark.

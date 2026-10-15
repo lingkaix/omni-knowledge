@@ -54,13 +54,7 @@ fn portable_query_service() -> (
     let identity = config.clone();
     let thread = std::thread::spawn(move || {
         let mut observed = vec![];
-        for expected in [
-            "GET /health",
-            "GET /v1/models",
-            "GET /health",
-            "GET /v1/models",
-            "POST /v1/embeddings",
-        ] {
+        for expected in ["GET /health", "GET /v1/models", "POST /v1/embeddings"] {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut stream = loop {
                 if let Ok((stream, _)) = listener.accept() {
@@ -72,6 +66,7 @@ fn portable_query_service() -> (
                 );
                 std::thread::sleep(Duration::from_millis(5));
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
