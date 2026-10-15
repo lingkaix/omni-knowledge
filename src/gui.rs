@@ -21,7 +21,7 @@ use gpui::{
     rgb, size,
 };
 use gpui_component::{
-    Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
+    Disableable, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
@@ -38,7 +38,7 @@ use wry::{
 
 use crate::file_actions::{self, DirectoryEntry};
 use crate::runtime::{self, BrewPackage, InstallLaunch, RuntimeStatus};
-use crate::status::{FolderState, ServiceState, StatusProbe, StatusReport};
+use crate::status::{FolderState, FolderStatus, ServiceState, StatusProbe, StatusReport};
 use crate::{IndexOptions, IndexReport, KnowledgeBase, SearchHit, SearchMode, SearchOptions};
 
 /// Shared visible border and pointer-target height for native inputs and toolbar buttons.
@@ -233,6 +233,70 @@ fn transfer_target_current(actual: Option<&Path>, captured: &Path) -> bool {
 /// Reject an old status callback after the explicitly selected folder changes.
 fn status_target_matches(requested: &Path, selected: Option<&Path>) -> bool {
     requested == selected.unwrap_or_else(|| Path::new(""))
+}
+
+/// Attach transient help to a stable native control identity instead of its changing diagnostic text.
+#[derive(Default)]
+struct HoverHint {
+    active: Option<(&'static str, String)>,
+}
+
+impl HoverHint {
+    /// Replace help on entry; an exit can clear only the control that still owns the visible hint.
+    fn update(&mut self, owner: &'static str, hovered: bool, detail: &str) {
+        if hovered {
+            self.active = Some((owner, detail.to_owned()));
+        } else if self
+            .active
+            .as_ref()
+            .is_some_and(|(active, _)| *active == owner)
+        {
+            self.clear();
+        }
+    }
+
+    /// Return the current full diagnostic for layout, without exposing ownership to rendering code.
+    fn detail(&self) -> Option<&str> {
+        self.active.as_ref().map(|(_, detail)| detail.as_str())
+    }
+
+    /// Remove help when navigation replaces the relevant controls.
+    fn clear(&mut self) {
+        self.active = None;
+    }
+}
+
+/// Separate explicit indexing of an opened root from checking or managing an unopened draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FooterIndexAction {
+    Index(PathBuf),
+    Check,
+    Library,
+}
+
+/// Permit publication only for a classified root that is also the actual opened library.
+/// Missing observations never fall back to another open library, including explicit refresh clicks.
+fn footer_index_action(
+    opened: Option<&Path>,
+    folder: Option<&FolderStatus>,
+    explicit_refresh: bool,
+) -> FooterIndexAction {
+    let Some(folder) = folder else {
+        return FooterIndexAction::Check;
+    };
+    let Some(opened) = opened.filter(|opened| folder.root.as_deref() == Some(*opened)) else {
+        return FooterIndexAction::Library;
+    };
+    match folder.state {
+        FolderState::Stale | FolderState::NeedsIndex => {
+            FooterIndexAction::Index(opened.to_path_buf())
+        }
+        FolderState::Current | FolderState::Checking if explicit_refresh => {
+            FooterIndexAction::Index(opened.to_path_buf())
+        }
+        FolderState::Current | FolderState::Checking => FooterIndexAction::Check,
+        _ => FooterIndexAction::Library,
+    }
 }
 
 /// Immutable source identity for native actions, drag payloads, and confirmations.
@@ -622,6 +686,7 @@ fn update_preview_bounds(
 enum JobResult {
     Library {
         root: PathBuf,
+        name: String,
         hits: Vec<SearchHit>,
         message: String,
         initialize_index: bool,
@@ -659,6 +724,7 @@ struct LibraryWindow {
     edit_tags_input: Entity<InputState>,
     description_input: Entity<InputState>,
     root: Option<PathBuf>,
+    library_name: String,
     hits: Rc<Vec<SearchHit>>,
     selected: Option<String>,
     mode: SearchMode,
@@ -676,7 +742,7 @@ struct LibraryWindow {
     library_panel_open: bool,
     metadata_open: bool,
     collapsed_folders: BTreeSet<String>,
-    hover_hint: Option<String>,
+    hover_hint: HoverHint,
     runtime_status: Option<RuntimeStatus>,
     runtime_log: String,
     status_target: Option<PathBuf>,
@@ -708,11 +774,12 @@ struct LibraryWindow {
     preview_target: Option<SourceTarget>,
     search_lane: CoalescedRead<SearchRequest>,
     indexing: Option<PathBuf>,
+    index_failure: Option<(PathBuf, String)>,
+    index_warning: Option<(PathBuf, String)>,
     metadata_saving: Option<SourceTarget>,
     metadata_feedback: String,
     metadata_baseline: Option<MetadataDraft>,
     metadata_revision: u64,
-    sidebar_hint: Option<String>,
 }
 
 impl LibraryWindow {
@@ -876,6 +943,7 @@ impl LibraryWindow {
             edit_tags_input,
             description_input,
             root: None,
+            library_name: String::new(),
             hits: Rc::new(vec![]),
             selected: None,
             mode: SearchMode::Bm25,
@@ -896,7 +964,7 @@ impl LibraryWindow {
             library_panel_open: false,
             metadata_open: false,
             collapsed_folders: BTreeSet::new(),
-            hover_hint: None,
+            hover_hint: HoverHint::default(),
             runtime_status: None,
             runtime_log:
                 "依赖检查只读取本机工具的位置，不联网、不修改知识库。安装操作需要你点击对应的按钮。"
@@ -930,11 +998,12 @@ impl LibraryWindow {
             preview_target: None,
             search_lane: CoalescedRead::default(),
             indexing: None,
+            index_failure: None,
+            index_warning: None,
             metadata_saving: None,
             metadata_feedback: String::new(),
             metadata_baseline: None,
             metadata_revision: 0,
-            sidebar_hint: None,
         })
     }
 
@@ -999,13 +1068,16 @@ impl LibraryWindow {
             let _ = cx.update_window(window_handle, |_, _window, cx| this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(JobResult::Library { root, hits, message, initialize_index }) => {
+                    Ok(JobResult::Library { root, name, hits, message, initialize_index }) => {
                         reset_tree_on_root_change(this.root.as_deref(), &root, &mut this.collapsed_folders);
                         let changed = this.root.as_ref() != Some(&root);
                         this.file_menu = None;
                         this.preview_revision+=1;
                         this.preview_lane.clear();this.preview_target=None;this.search_lane.clear();
                         this.root = Some(root.clone());
+                        this.library_name = name;
+                        this.index_failure = None;
+                        this.index_warning = None;
                         this.hits = Rc::new(hits);
                         this.search_active = false;
                         this.search_revision += 1;
@@ -1114,6 +1186,7 @@ impl LibraryWindow {
                     "Knowledge folder opened · live files".into()
                 };
                 Ok(JobResult::Library {
+                    name: kb.config.name,
                     root: kb.root,
                     hits,
                     message,
@@ -1122,16 +1195,6 @@ impl LibraryWindow {
             },
             cx,
         );
-    }
-
-    /// Run an explicit index refresh independently of preview, search, and text editing.
-    fn index(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else {
-            self.status = "Open a knowledge folder first".into();
-            cx.notify();
-            return;
-        };
-        self.start_index(root, self.embeddings, cx);
     }
 
     /// Start one explicit index or first lexical index without using the root-opening mutation lane.
@@ -1145,6 +1208,8 @@ impl LibraryWindow {
             return;
         }
         self.indexing = Some(root.clone());
+        self.index_failure = None;
+        self.index_warning = None;
         let source = root.clone();
         let task = cx.background_executor().spawn(async move {
             file_actions::open_exact_root(&source)?.index(&IndexOptions {
@@ -1159,8 +1224,15 @@ impl LibraryWindow {
                 this.indexing = None;
                 if this.root.as_ref() == Some(&root) {
                     this.status = match result {
-                        Ok(report) => index_message(&report),
-                        Err(error) => format!("Index refresh failed: {error:#}"),
+                        Ok(report) => {
+                            this.index_warning = index_warning_feedback(&root, &report);
+                            index_message(&report)
+                        }
+                        Err(error) => {
+                            let message = format!("Index refresh failed: {error:#}");
+                            this.index_failure = Some((root.clone(), message.clone()));
+                            message
+                        }
                     };
                     this.refresh_status(cx);
                 }
@@ -1574,7 +1646,7 @@ impl LibraryWindow {
         self.mode_menu_open = false;
         self.mode_popup = None;
         self.file_menu = None;
-        self.hover_hint = None;
+        self.hover_hint.clear();
         self.guide_anchor = None;
         self.guide_open = !self.guide_open;
         self.reload_preview();
@@ -1634,21 +1706,20 @@ impl LibraryWindow {
         self.mode_menu_open = false;
         self.mode_popup = None;
         self.file_menu = None;
-        self.hover_hint = None;
+        self.hover_hint.clear();
         self.guide_anchor = Some(anchor);
         self.guide_open = true;
         self.reload_preview();
         cx.notify();
     }
 
-    /// Render a clickable observation whose full diagnostic appears inside the bottom bar.
+    /// Render a hover observation; callers add a pointer cursor only when they also add an action.
     fn status_badge(
         &self,
         id: &'static str,
         label: String,
         detail: String,
         warning: bool,
-        anchor: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         div()
@@ -1656,109 +1727,155 @@ impl LibraryWindow {
             .px_2()
             .py_1()
             .max_w(px(390.))
+            .min_w_0()
             .rounded_md()
-            .cursor_pointer()
             .text_size(px(11.))
             .text_color(rgb(if warning { 0x8a6a39 } else { 0x477458 }))
             .hover(|style| style.bg(rgb(0xe2ebdf)))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.hover_hint = Some(detail.clone());
-                } else if this.hover_hint.as_deref() == Some(detail.as_str()) {
-                    this.hover_hint = None;
-                }
+                this.hover_hint.update(id, *hovered, &detail);
                 cx.notify();
             }))
-            .on_click(cx.listener(move |this, _, _, cx| this.show_guide(anchor, cx)))
             .child(div().text_ellipsis().whitespace_nowrap().child(label))
     }
 
-    /// Keep contextual help, operation feedback, and folder observations inside one native footer.
+    /// Revalidate the displayed observation and opened owner before an explicit footer action.
+    fn activate_footer_index(
+        &mut self,
+        action: FooterIndexAction,
+        requested: Option<PathBuf>,
+        explicit_refresh: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = self
+            .status_report
+            .as_ref()
+            .filter(|report| {
+                status_target_matches(&report.folder.requested, self.status_target.as_deref())
+            })
+            .map(|report| &report.folder);
+        if requested != self.status_target
+            || footer_index_action(self.root.as_deref(), folder, explicit_refresh) != action
+        {
+            self.refresh_status(cx);
+            return;
+        }
+        match action {
+            FooterIndexAction::Index(root) => self.start_index(root, self.embeddings, cx),
+            FooterIndexAction::Check => self.refresh_status(cx),
+            FooterIndexAction::Library => {
+                self.return_to_library(cx);
+                self.library_panel_open = true;
+                self.focus_native_input(cx);
+                window.focus(&self.root_input.read(cx).focus_handle(cx));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Keep one compact bottom row; full action/status hints temporarily expand above its fixed targets.
     fn status_footer(&self, cx: &mut Context<Self>) -> gpui::Div {
         let report = self.status_report.as_ref().filter(|report| {
             status_target_matches(&report.folder.requested, self.status_target.as_deref())
         });
-        let mut footer = div()
+        let folder = report.map(|report| &report.folder);
+        let mut row = div()
             .flex()
             .items_center()
             .gap_1()
             .h(px(30.))
             .flex_shrink_0()
             .px_2()
+            .text_size(px(11.))
             .bg(rgb(0xecf2e8));
         if let Some(root) = self.root.clone() {
-            let detail = format!("Open current knowledge root in Finder: {}", root.display());
+            let name = if self.library_name.is_empty() {
+                root.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                self.library_name.clone()
+            };
+            let detail = format!(
+                "{name} · {} · Click to open this knowledge root in Finder",
+                root.display()
+            );
             let target = SourceTarget {
                 root: root.clone(),
                 relative: String::new(),
             };
-            footer = footer.child(
+            row = row.child(
                 div()
                     .id("actual-root")
-                    .max_w(px(280.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .max_w(px(320.))
                     .min_w_0()
-                    .text_ellipsis()
-                    .text_size(px(11.))
                     .cursor_pointer()
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.hover_hint = Some(detail.clone());
-                        } else if this.hover_hint.as_deref() == Some(detail.as_str()) {
-                            this.hover_hint = None;
-                        }
+                        this.hover_hint.update("actual-root", *hovered, &detail);
                         cx.notify();
                     }))
-                    .child(root.display().to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.source_action(target.clone(), "open-root", cx)
-                    })),
+                    }))
+                    .child(
+                        div()
+                            .max_w(px(110.))
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(rgb(0x6a7f6d))
+                            .child(root.display().to_string()),
+                    ),
+            );
+        } else {
+            row = row.child(
+                button("footer-open-library", "Open library…", false).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.return_to_library(cx);
+                        this.library_panel_open = true;
+                        cx.notify();
+                    },
+                )),
             );
         }
-        if let Some(report) = report {
-            let folder = &report.folder;
-            let (folder_label, anchor, warning) = match folder.state {
-                FolderState::NotSelected => ("选择知识库目录", "start", true),
-                FolderState::Missing => ("目录不存在", "troubleshoot", true),
-                FolderState::NotDirectory => ("需要选择文件夹", "start", true),
-                FolderState::Uninitialized => ("尚未初始化", "start", true),
-                FolderState::NeedsIndex => ("需要建立索引", "troubleshoot", true),
-                FolderState::Current => ("索引未见变化", "storage", false),
-                FolderState::Stale => ("索引过期", "troubleshoot", true),
-                FolderState::Checking => ("索引检查尚未完成", "troubleshoot", true),
-                FolderState::Unavailable => ("目录检查不可用", "troubleshoot", true),
-            };
-            let name = folder
-                .requested
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned());
-            let label = name
-                .map(|name| format!("{} · {folder_label}", truncate(&name, 18)))
-                .unwrap_or_else(|| folder_label.into());
-            let detail = format!("{} · {}", folder.requested.display(), folder.detail);
-            footer = footer.child(self.status_badge(
-                "folder-status",
-                label,
-                detail,
-                warning,
-                anchor,
+        let destination = if self.selected_folder.is_empty() {
+            "/"
+        } else {
+            &self.selected_folder
+        };
+        let destination_detail = self
+            .root
+            .as_ref()
+            .map(|root| {
+                format!(
+                    "Paste / drop destination: {}",
+                    root.join(&self.selected_folder).display()
+                )
+            })
+            .unwrap_or_else(|| "Open a library before copying files into it".into());
+        row = row.child(
+            self.status_badge(
+                "transfer-destination",
+                format!("Paste: {destination}"),
+                destination_detail,
+                false,
                 cx,
-            ));
-            if folder.state == FolderState::Uninitialized {
-                let path = folder.requested.clone();
-                footer = footer.child(
-                    button("initialize-selected", "Initialize", true)
-                        .opacity(if self.busy { 0.45 } else { 1. })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.busy {
-                                return;
-                            }
-                            this.root_input.update(cx, |input, cx| {
-                                input.set_value(path.to_string_lossy().into_owned(), window, cx)
-                            });
-                            this.open(true, cx);
-                        })),
-                );
-            }
+            )
+            .max_w(px(160.)),
+        );
+        if let Some(report) = report {
             let mut missing = Vec::new();
             if report.tools.homebrew.is_none() {
                 missing.push("Homebrew");
@@ -1773,87 +1890,191 @@ impl LibraryWindow {
                 missing.push("whisper.cpp");
             }
             let tools_label = if missing.is_empty() {
-                "工具: 已找到".into()
+                "工具 ✓".into()
             } else {
-                format!("未发现: {}", missing.join("、"))
+                format!("工具缺 {}", missing.len())
             };
-            footer = footer.child(self.status_badge("tools-status", tools_label,
-                "按标准 Homebrew 与 PATH 位置检测可选工具；点击查看用途与安装入口。工具安装不包含模型。".into(), !missing.is_empty(), "environment", cx));
-            let (provider_label, provider_warning) = match report.provider.state {
-                ServiceState::Available => ("本地模型: 可用", false),
-                ServiceState::NotConfigured => ("本地模型: 未配置", true),
-                ServiceState::Unavailable => ("本地模型: 不可用", true),
-            };
-            footer = footer.child(self.status_badge(
-                "provider-status",
-                provider_label.into(),
-                report.provider.detail.clone(),
-                provider_warning,
-                "local-model",
-                cx,
-            ));
-            let (asr_label, asr_warning) = match report.asr.state {
-                ServiceState::Available => ("ASR: 文件就绪", false),
-                ServiceState::NotConfigured => ("ASR: 未配置", true),
-                ServiceState::Unavailable => ("ASR: 不可用", true),
-            };
-            footer = footer.child(self.status_badge(
-                "asr-status",
-                asr_label.into(),
-                report.asr.detail.clone(),
-                asr_warning,
-                "asr",
-                cx,
-            ));
-        } else {
-            footer = footer.child(self.status_badge(
-                "status-pending",
-                "正在检查目录与环境…".into(),
-                "检查独立于检索任务运行；若 macOS 请求目录访问权限，请先确认你选择的目录。".into(),
-                true,
-                "troubleshoot",
-                cx,
-            ));
-        }
-        footer = footer.child(div().flex_1()).child(
-            self.action_icon(
-                "status-refresh",
-                if self.status_probe_running {
-                    "…"
+            let tools_detail = format!(
+                "未发现：{}。按标准 Homebrew 与 PATH 位置检查可选工具；点击查看用途与安装。安装工具不包含模型。",
+                if missing.is_empty() {
+                    "无".into()
                 } else {
-                    "↻"
-                },
-                "重新检查状态 · 每12秒自动检查；不会刷新索引",
-                self.status_probe_running,
-                cx,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.refresh_status(cx))),
-        );
-        let mut operation = self
-            .indexing
-            .as_ref()
-            .map(|root| format!("Indexing {} · ", root.display()))
-            .unwrap_or_else(|| {
-                if self.busy {
-                    "●  ".into()
-                } else {
-                    String::new()
+                    missing.join("、")
                 }
-            });
-        if self.metadata_saving.is_some() {
-            operation.push_str("Saving metadata · ");
+            );
+            row = row.child(
+                self.status_badge(
+                    "tools-status",
+                    tools_label,
+                    tools_detail,
+                    !missing.is_empty(),
+                    cx,
+                )
+                .flex_shrink_0()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.show_guide("environment", cx))),
+            );
+            let provider_label = match report.provider.state {
+                ServiceState::Available => "模型 ✓",
+                ServiceState::NotConfigured => "模型 —",
+                ServiceState::Unavailable => "模型 ×",
+            };
+            row = row.child(
+                self.status_badge(
+                    "provider-status",
+                    provider_label.into(),
+                    report.provider.detail.clone(),
+                    report.provider.state != ServiceState::Available,
+                    cx,
+                )
+                .flex_shrink_0()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.show_guide("local-model", cx))),
+            );
+            let asr_label = match report.asr.state {
+                ServiceState::Available => "ASR 文件 ✓",
+                ServiceState::NotConfigured => "ASR —",
+                ServiceState::Unavailable => "ASR ×",
+            };
+            row = row.child(
+                self.status_badge(
+                    "asr-status",
+                    asr_label.into(),
+                    report.asr.detail.clone(),
+                    report.asr.state != ServiceState::Available,
+                    cx,
+                )
+                .flex_shrink_0()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.show_guide("asr", cx))),
+            );
         }
-        operation.push_str(&self.status);
-        let destination = if self.selected_folder.is_empty() {
-            "knowledge root"
+        let routine = self.status == "Preview ready"
+            || self.status.starts_with("Folder selected:")
+            || self.status.starts_with("All files ·")
+            || self.status.starts_with("Knowledge folder opened")
+            || self.status.starts_with("Knowledge folder initialized")
+            || self.status.starts_with("Indexed ")
+            || self.status.starts_with("Index refresh failed:")
+            || self.status == "Open a folder to begin";
+        let feedback = if self.metadata_saving.is_some() {
+            Some("Saving metadata…")
+        } else if self.busy {
+            Some(self.status.as_str())
+        } else if self.search_lane.running {
+            Some("Searching…")
+        } else if self.preview_lane.running {
+            Some("Loading preview…")
+        } else if !routine {
+            Some(self.status.as_str())
         } else {
-            &self.selected_folder
+            None
         };
-        let detail = self.hover_hint.as_deref().or(self.sidebar_hint.as_deref());
-        let summary = format!("{operation} · Paste / drop target: {destination}");
-        let message = detail
-            .map(|detail| format!("{detail}\n{summary}"))
-            .unwrap_or(summary);
+        if let Some(feedback) = feedback {
+            row = row.child(
+                self.status_badge(
+                    "operation-status",
+                    feedback.into(),
+                    feedback.into(),
+                    self.busy,
+                    cx,
+                )
+                .max_w(px(180.)),
+            );
+        }
+        row = row.child(div().flex_1().min_w_0());
+        let failure = self
+            .index_failure
+            .as_ref()
+            .filter(|(root, _)| self.root.as_ref() == Some(root));
+        let coverage_warning = self.index_warning.as_ref().filter(|(root, _)| {
+            self.root.as_ref() == Some(root)
+                && folder.is_some_and(|folder| folder.root.as_ref() == Some(root))
+        });
+        let retry = failure.is_some();
+        let action = footer_index_action(self.root.as_deref(), folder, retry);
+        let (mut label, mut warning) = if action == FooterIndexAction::Library {
+            match folder.map(|folder| folder.state) {
+                Some(FolderState::Uninitialized) => ("初始化所选目录…".into(), true),
+                Some(FolderState::Missing) => ("所选目录不存在…".into(), true),
+                Some(FolderState::NotDirectory) => ("需要选择文件夹…".into(), true),
+                _ => ("打开所选目录…".into(), true),
+            }
+        } else if let Some(root) = &self.indexing {
+            (
+                format!(
+                    "索引中 · {}",
+                    root.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                false,
+            )
+        } else if failure.is_some() {
+            ("索引失败 · 重试".into(), true)
+        } else {
+            match folder.map(|folder| folder.state) {
+                Some(FolderState::Stale) => ("索引过期 · 刷新".into(), true),
+                Some(FolderState::NeedsIndex) => ("需要建立索引".into(), true),
+                Some(FolderState::Current) if coverage_warning.is_some() => {
+                    ("索引含警告".into(), true)
+                }
+                Some(FolderState::Current) => ("索引未见变化".into(), false),
+                Some(FolderState::Checking) => ("索引检查未完成".into(), true),
+                _ => ("正在检查…".into(), false),
+            }
+        };
+        if coverage_warning.is_some()
+            && self.indexing.is_none()
+            && failure.is_none()
+            && !folder.is_some_and(|folder| folder.state == FolderState::Current)
+        {
+            label.push_str(" · ⚠");
+            warning = true;
+        }
+        let mut detail = folder
+            .map(|folder| format!("{} · {}", folder.requested.display(), folder.detail))
+            .unwrap_or_else(|| "正在检查所选目录；未确认的目录不会启动索引。".into());
+        if action == FooterIndexAction::Library {
+            detail.push_str(" · 点击展开 Library，选择 Open 或 Initialize；当前知识库保持不变。");
+        } else if let Some((_, failure)) = failure {
+            detail.push_str(&format!(" · {failure} · 点击重试索引。"));
+        } else if matches!(action, FooterIndexAction::Index(_)) {
+            detail.push_str(" · 点击直接刷新当前知识库的索引。");
+        } else {
+            detail.push_str(" · 点击重新检查；右侧 Refresh index 显式刷新索引。");
+        }
+        if let Some((_, warning)) = coverage_warning {
+            detail.push_str(&format!(" · {warning}"));
+        }
+        let requested = self.status_target.clone();
+        row = row.child(
+            self.status_badge("folder-status", label, detail, warning, cx)
+                .max_w(px(190.))
+                .flex_shrink_0()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate_footer_index(
+                        action.clone(),
+                        requested.clone(),
+                        retry,
+                        window,
+                        cx,
+                    );
+                })),
+        );
+        let refresh_action = footer_index_action(self.root.as_deref(), folder, true);
+        let enabled =
+            matches!(refresh_action, FooterIndexAction::Index(_)) && self.indexing.is_none();
+        let requested = self.status_target.clone();
+        row = row.child(button("footer-index-refresh", "Refresh index", false).icon(IconName::Redo).flex_shrink_0()
+            .disabled(!enabled)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.hover_hint.update("footer-index-refresh", *hovered,
+                    "Refresh index · 显式刷新当前已打开且已确认的知识库；若修改了 Library 路径，请先 Open。");
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.activate_footer_index(refresh_action.clone(), requested.clone(), true, window, cx);
+            })));
         div()
             .flex()
             .flex_col()
@@ -1861,19 +2082,21 @@ impl LibraryWindow {
             .border_t_1()
             .border_color(rgb(0xd4dfd6))
             .bg(rgb(0xecf2e8))
-            .child(
-                div()
-                    .id("status-details")
-                    .max_h(px(108.))
-                    .overflow_y_scroll()
-                    .px_3()
-                    .py_1()
-                    .text_size(px(11.))
-                    .text_color(rgb(0x526b59))
-                    .whitespace_normal()
-                    .child(message),
-            )
-            .child(footer)
+            .when(self.hover_hint.detail().is_some(), |footer| {
+                footer.child(
+                    div()
+                        .id("status-details")
+                        .max_h(px(108.))
+                        .overflow_y_scroll()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(0x526b59))
+                        .whitespace_normal()
+                        .child(self.hover_hint.detail().unwrap_or_default().to_owned()),
+                )
+            })
+            .child(row)
     }
 
     /// Hand off one allowlisted package to visible Terminal after an explicit native button click.
@@ -1909,7 +2132,7 @@ impl LibraryWindow {
         self.mode_menu_open = false;
         self.mode_popup = None;
         self.file_menu = None;
-        self.hover_hint = None;
+        self.hover_hint.clear();
         self.guide_anchor = None;
         if self.guide_open {
             self.guide_open = false;
@@ -1944,14 +2167,7 @@ impl LibraryWindow {
             .justify_center()
             .text_size(px(16.))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if id.starts_with("tree-") {
-                    this.sidebar_hint = if *hovered { Some(hint.into()) } else { None };
-                }
-                if *hovered {
-                    this.hover_hint = Some(hint.into());
-                } else if this.hover_hint.as_deref() == Some(hint) {
-                    this.hover_hint = None;
-                }
+                this.hover_hint.update(id, *hovered, hint);
                 cx.notify();
             }))
     }
@@ -2009,11 +2225,11 @@ impl LibraryWindow {
                     .w(px(108.))
                     .dropdown_caret(true)
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        this.hover_hint = if *hovered {
-                            Some("Search mode · 选择检索方式".into())
-                        } else {
-                            None
-                        };
+                        this.hover_hint.update(
+                            "mode-selector",
+                            *hovered,
+                            "Search mode · 选择检索方式",
+                        );
                         cx.notify();
                     })),
             )
@@ -2057,11 +2273,8 @@ impl LibraryWindow {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(0xe2ede0)))
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        this.hover_hint = if *hovered {
-                            Some("Home · 返回知识库".into())
-                        } else {
-                            None
-                        };
+                        this.hover_hint
+                            .update("home-logo", *hovered, "Home · 返回知识库");
                         cx.notify();
                     }))
                     .child(
@@ -2957,32 +3170,6 @@ impl LibraryWindow {
                         cx.new(|_| FileDrag(name.clone()))
                     });
                 }
-                let hint = target
-                    .hit_index
-                    .and_then(|index| hits.get(index))
-                    .map(|hit| format!("{} · {}", target.relative, hit.snippet))
-                    .unwrap_or_else(|| {
-                        format!(
-                            "{} · {}",
-                            target.relative,
-                            if target.directory {
-                                "Folder · right-click for actions"
-                            } else {
-                                "File · right-click for actions"
-                            }
-                        )
-                    });
-                let hover_weak = weak.clone();
-                row = row.on_hover(move |hovered, _, cx| {
-                    let _ = hover_weak.update(cx, |this, cx| {
-                        if *hovered {
-                            this.sidebar_hint = Some(hint.clone());
-                        } else if this.sidebar_hint.as_ref() == Some(&hint) {
-                            this.sidebar_hint = None;
-                        }
-                        cx.notify();
-                    });
-                });
                 let click_weak = weak.clone();
                 let start = target
                     .hit_index
@@ -3235,16 +3422,6 @@ impl Render for LibraryWindow {
                             this.embeddings = !this.embeddings;
                             cx.notify();
                         })),
-                    )
-                    .child(
-                        self.action_icon(
-                            "index",
-                            "↻",
-                            "Refresh index · Refresh indexed snapshots",
-                            false,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.index(cx))),
                     ),
             )
             .child(
@@ -3462,6 +3639,12 @@ fn index_message(report: &IndexReport) -> String {
     message
 }
 
+/// Retain coverage warnings for the root that published them, independently of preview feedback.
+/// The full first warning and total count match the existing completion report without parsing text.
+fn index_warning_feedback(root: &Path, report: &IndexReport) -> Option<(PathBuf, String)> {
+    (!report.warnings.is_empty()).then(|| (root.to_path_buf(), index_message(report)))
+}
+
 /// Expand a leading home shortcut without changing other path components.
 fn expand_home(value: &str) -> PathBuf {
     if let Some(relative) = value.strip_prefix("~/")
@@ -3470,16 +3653,6 @@ fn expand_home(value: &str) -> PathBuf {
         return PathBuf::from(home).join(relative);
     }
     PathBuf::from(value)
-}
-
-/// Keep result snippets short without splitting a Unicode character.
-fn truncate(value: &str, limit: usize) -> String {
-    let text: String = value.chars().take(limit).collect();
-    if value.chars().count() > limit {
-        format!("{text}…")
-    } else {
-        text
-    }
 }
 
 /// Escape text inserted into a preview HTML fragment.
@@ -3878,6 +4051,131 @@ mod tests {
 
     /// Deterministic opened-root authority for confined protocol fixtures.
     const TEST_AUTHORITY: &str = "kb-fixture";
+
+    /// Exit clears a dynamically changed diagnostic, but an old control cannot clear newer help.
+    #[test]
+    fn hover_help_uses_control_identity_across_dynamic_updates() {
+        let mut hint = HoverHint::default();
+        hint.update("folder-status", true, "Index is missing");
+        hint.update("folder-status", false, "Index published with warnings");
+        assert!(hint.detail().is_none());
+
+        hint.update("folder-status", true, "Index is missing");
+        hint.update("tools-status", true, "Optional tool is absent");
+        hint.update("folder-status", false, "Index published with warnings");
+        assert_eq!(hint.detail(), Some("Optional tool is absent"));
+        hint.update("tools-status", false, "Optional tool was installed");
+        assert!(hint.detail().is_none());
+
+        hint.update("actual-root", true, "First root path");
+        hint.update("actual-root", true, "Updated root path");
+        assert_eq!(hint.detail(), Some("Updated root path"));
+        hint.clear();
+        assert!(hint.detail().is_none());
+    }
+
+    /// Create a non-I/O folder observation for footer publication decisions.
+    fn observed_folder(root: Option<&Path>, state: FolderState) -> FolderStatus {
+        FolderStatus {
+            requested: root
+                .unwrap_or_else(|| Path::new("/uninitialized"))
+                .to_path_buf(),
+            root: root.map(Path::to_path_buf),
+            state,
+            detail: String::new(),
+            added: 0,
+            modified: 0,
+            removed: 0,
+            metadata_changed: false,
+            indexed_at: None,
+        }
+    }
+
+    /// Index only a confirmed opened root; edited, invalid, or pending folders require another action.
+    #[test]
+    fn footer_publication_actions_require_the_opened_owner() {
+        let opened = Path::new("/library-a");
+        let other = Path::new("/library-b");
+        for state in [FolderState::Stale, FolderState::NeedsIndex] {
+            let folder = observed_folder(Some(opened), state);
+            assert_eq!(
+                footer_index_action(Some(opened), Some(&folder), false),
+                FooterIndexAction::Index(opened.to_path_buf())
+            );
+            let draft = observed_folder(Some(other), state);
+            for explicit in [false, true] {
+                assert_eq!(
+                    footer_index_action(Some(opened), Some(&draft), explicit),
+                    FooterIndexAction::Library
+                );
+            }
+        }
+        let current = observed_folder(Some(opened), FolderState::Current);
+        assert_eq!(
+            footer_index_action(Some(opened), Some(&current), false),
+            FooterIndexAction::Check
+        );
+        assert_eq!(
+            footer_index_action(Some(opened), Some(&current), true),
+            FooterIndexAction::Index(opened.to_path_buf())
+        );
+        for state in [
+            FolderState::Uninitialized,
+            FolderState::Missing,
+            FolderState::NotDirectory,
+            FolderState::NotSelected,
+            FolderState::Unavailable,
+        ] {
+            let folder = observed_folder(None, state);
+            for explicit in [false, true] {
+                assert_eq!(
+                    footer_index_action(Some(opened), Some(&folder), explicit),
+                    FooterIndexAction::Library
+                );
+            }
+        }
+        for explicit in [false, true] {
+            assert_eq!(
+                footer_index_action(Some(opened), None, explicit),
+                FooterIndexAction::Check
+            );
+            assert_eq!(
+                footer_index_action(None, Some(&current), explicit),
+                FooterIndexAction::Library
+            );
+        }
+        let draft_current = observed_folder(Some(other), FolderState::Current);
+        assert_eq!(
+            footer_index_action(Some(opened), Some(&draft_current), true),
+            FooterIndexAction::Library
+        );
+    }
+
+    /// Preserve a successful publication's actual coverage warning while quieting clean completion.
+    #[test]
+    fn index_coverage_warning_uses_the_report_and_retains_its_owner() {
+        let root = Path::new("/library-a");
+        let mut report = IndexReport {
+            files: 2,
+            extracted: 1,
+            metadata_only: 1,
+            vectors: 0,
+            reused: 0,
+            warnings: Vec::new(),
+            generation: "warning-free".into(),
+        };
+        assert!(index_warning_feedback(root, &report).is_none());
+        let warning = format!(
+            "malformed.docx: {}",
+            "full extraction diagnostic ".repeat(30)
+        );
+        report.warnings.push(warning.clone());
+        let (owner, feedback) = index_warning_feedback(root, &report).unwrap();
+        assert_eq!(owner, root);
+        assert!(feedback.contains(&warning));
+        report.warnings.clear();
+        assert!(index_warning_feedback(root, &report).is_none());
+    }
 
     /// Create immutable source evidence for tree tests without opening a library or native window.
     fn tree_hit(path: &str, line: Option<usize>, start_seconds: Option<f64>) -> SearchHit {

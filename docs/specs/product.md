@@ -54,7 +54,9 @@ Keep metadata editing available without reserving a large permanent toolbar row.
 Save editable metadata directly without starting an index build, and show whether the write succeeded.
 Keep preview selection, typing, and metadata inspection responsive while searches or explicit index builds run.
 Read selected-file attributes independently of the complete search index.
-Show contextual hints, transfer destinations, and operation feedback in the bottom status bar.
+Keep the bottom status bar to one compact row during normal browsing.
+Show the transfer destination and actionable operation feedback in that row; omit routine preview-ready and file-row instruction messages.
+Show complete contextual hints only while hovering, and release any temporary hint space when the pointer leaves.
 Remove permanent instructional and destination rows below the file tree and duplicate feedback beside the retrieval controls.
 Keep status-bar diagnostics readable within its layout instead of floating under the native preview.
 Show selected-folder, index, external-tool, and local-model-service status in a compact bottom bar.
@@ -65,7 +67,11 @@ Provide source-file context actions for copying the file, revealing it in Finder
 Right-clicking a tree row must select its actual target and open its menu on the first click, including when another row's menu is open.
 Dismiss that menu when the user clicks outside it, including inside the native preview, or presses Escape.
 Require an explicit file action and confirmation before moving a source to Trash; preserve its authored metadata for recovery.
-Show the current knowledge root's location in the bottom bar and open its folder when selected.
+Group the current knowledge root's name and location in one bottom-bar target that opens its folder.
+Place index freshness beside the index-refresh action at the right end of the bar, separate from library identity.
+Clicking a stale or missing-index state for the opened root must start an explicit index refresh, rather than open documentation.
+If the edited path identifies a different knowledge root or an uninitialized folder, direct the user to open or initialize it before offering indexing.
+Never refresh the previously opened library by mistake.
 Treat search as a clearable filter over the file tree and restore the complete browsing view when the filter is cleared.
 Support explicit file drag-and-drop, copy, and paste within the desktop; preserve metadata and reject overwrite collisions.
 Store derived indexes inside the knowledge folder and keep upgraded indexes usable when the whole library moves.

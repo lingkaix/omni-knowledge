@@ -55,8 +55,9 @@ The description is useful for binary files that have no extractable text.
 ## Workspace
 
 The compact top toolbar keeps search, a mode dropdown, and exact-tag filtering accessible.
-Hover over an action icon, source row, or status badge to read its contextual hint in the bottom status bar.
-The same bar shows operation feedback and the current transfer destination without permanent strips below the tree.
+The bottom status bar normally occupies one row, with the library name and path, transfer destination, environment observations, and index controls.
+Hover over an action icon or status item to show its full hint temporarily; leaving it restores the single-row layout.
+The library name and path share one Finder action, and routine preview-ready and file-row instructions are omitted.
 The **Library** panel contains folder selection and initialization and is collapsed during normal reading.
 The left pane groups files by directory; expand or collapse a folder to control the visible tree.
 Use a file's context menu to open it, reveal it in Finder, copy it, copy its absolute or relative path, inspect metadata, or move it to Trash after confirmation.
@@ -90,8 +91,11 @@ Filesystem and model work runs outside the UI thread.
 Preview selection, search, metadata saving, and explicit indexing use separate background tasks.
 Opening an existing library and selecting files do not load its full search snapshot or start an index build.
 Rapid selections replace pending preview requests; an obsolete completion cannot replace the current selection.
-The bottom bar shows the opened library location and checks the selected folder, index metadata, installed tools, provider identity, and configured ASR files.
-Click the location to open its folder in Finder, or click a problem badge to read repair instructions.
+The bottom bar checks the selected folder, index metadata, installed tools, provider identity, and configured ASR files.
+Click the library name or path to open its folder in Finder.
+At the right end, click a stale or missing-index state to refresh the opened library's index, or use **Refresh index** beside it.
+Dependency badges open the relevant installation or repair instructions.
+If the Library input refers to a different unopened library, the index area directs you to open it first and cannot refresh the previous library by mistake.
 An uninitialized folder remains unchanged until **Initialize** is selected.
 The quick freshness check compares names, sizes, and timestamps; explicit indexing performs content-hash reconciliation.
 If opening a Documents, Desktop, or Downloads folder waits for access, complete the corresponding macOS file-permission prompt.
@@ -141,3 +145,4 @@ The check covered Chinese queries, front matter, Mermaid, code highlighting, nat
 Binary metadata edits were verified through the CLI and exact-tag retrieval.
 See [the first-version record](changes/2026-10-14-first-version.md) for commands, evidence, and remaining limits.
 The [desktop workspace record](changes/2026-10-15-desktop-workspace.md) covers the later input, file management, responsiveness, metadata, status, and signed-bundle checks.
+The [status and menu record](changes/2026-10-15-status-and-menus.md) covers the compact footer, direct index actions, hover transitions, and native menu boundary.

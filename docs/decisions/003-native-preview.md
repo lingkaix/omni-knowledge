@@ -34,7 +34,11 @@ Give each opened library a resource-origin token and bind document bases, media 
 Read selected-file facts from live attributes and authored metadata instead of the full vector manifest.
 Save metadata without starting indexing; this keeps a small authored edit separate from model work and derived publication.
 Update native preview bounds and visibility only when they change.
-Show contextual hints and operation feedback inside the bottom status bar's layout because a native child WebKit view can cover GPUI overlays above it.
+Keep one bottom status row during normal browsing; temporarily show full hover hints within its layout because a native child WebKit view can cover GPUI overlays above it.
+Collapse that temporary hint area on pointer exit and omit routine preview-ready and file-row instruction messages.
+Track hover ownership by stable control identity so changing diagnostics cannot prevent their hints from closing.
+Group the library name and path as one Finder action, and place index state beside explicit index refresh at the right end.
+Bind freshness actions to their observed root so an edited folder cannot redirect indexing to a previously opened library.
 Do not reserve separate instructional or transfer-destination strips under the tree.
 Treat pointer interaction with the native preview as an outside click for file context menus while preserving the preview's own interaction.
 Opening a file menu returns Cocoa focus to GPUI; the existing foreground tick dismisses it when this preview's native view hierarchy receives focus.
