@@ -1,0 +1,64 @@
+[package]
+name = "omni-knowledge"
+version = "0.1.0"
+edition = "2024"
+description = "Local, agent-native knowledge library for every file type"
+license = "Apache-2.0"
+default-run = "omni"
+
+[features]
+default = []
+gui = ["dep:gpui", "dep:gpui-component", "dep:wry"]
+
+[lib]
+name = "omni_knowledge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omni"
+path = "src/main.rs"
+
+[[bin]]
+name = "omni-knowledge-gui"
+path = "src/bin/omni-knowledge-gui.rs"
+required-features = ["gui"]
+
+[dependencies]
+anyhow = "1"
+ammonia = "4"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+hex = "0.4"
+html2text = "0.16"
+mime_guess = "2"
+pdf-extract = "0.12.1"
+pulldown-cmark = "0.13"
+rayon = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tantivy = "0.26.2"
+tempfile = "3"
+time = { version = "0.3", features = ["local-offset"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+gpui = { version = "=0.2.2", optional = true, features = ["runtime_shaders"] }
+gpui-component = { version = "=0.5.1", optional = true, default-features = false }
+wry = { version = "=0.57.0", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+libc = "0.2"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSError", "NSFileManager", "NSObject", "NSString", "NSThread", "NSURL"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+
+[profile.release]
+debug = 0
+strip = "debuginfo"

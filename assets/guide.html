@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src omni://app; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Omni Knowledge · 使用指南与环境</title>
+<style>
+:root{font:15px/1.85 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:#314338;background:#fafbf8;color-scheme:light}body{margin:0;padding:32px 38px 56px}main{max-width:920px;margin:auto}.masthead{display:flex;align-items:center;gap:18px;margin-bottom:24px}.masthead img{width:72px;height:72px}.eyebrow{font-size:11px;letter-spacing:2px;color:#69846f}h1{font-size:30px;line-height:1.35;margin:6px 0 12px;color:#28513a}h2{font-size:21px;color:#315f42;margin-top:38px;padding-top:12px;border-top:1px solid #dbe5da}h3{font-size:16px;color:#3e654a;margin:24px 0 8px}p{margin:10px 0}ul,ol{padding-left:24px}li{margin:7px 0}a{color:#356b48;text-decoration:none}nav{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0}nav a{padding:5px 11px;border:1px solid #d4e1d3;border-radius:20px;font-size:12px;background:#f1f6ee}table{border-collapse:collapse;width:100%;font-size:13px;margin:16px 0}th,td{border:1px solid #d7e3d5;padding:10px 13px;vertical-align:top;text-align:left}th{background:#edf3e9}pre{background:#edf2e9;border:1px solid #d7e3d5;border-radius:9px;padding:14px 18px;overflow:auto;font:12px/1.7 ui-monospace,Menlo,monospace}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}.callout{background:#eaf2e5;border-left:3px solid #90ad84;padding:13px 18px;border-radius:0 8px 8px 0}.subtle{font-size:12px;color:#738273}.steps strong{color:#355f42}.inline-label{font-weight:600;background:#eaf1e5;padding:1px 6px;border-radius:4px}.footer{margin-top:44px;padding-top:16px;border-top:1px solid #dbe5da;font-size:12px;color:#738273}
+</style>
+</head>
+<body><main>
+<div class="masthead"><img src="omni://app/brand/mark.png" alt="Omni Knowledge 标志"><div><div class="eyebrow">OMNI KNOWLEDGE · PERSONAL LIBRARY</div><h1>使用指南与环境</h1><p>把原始文件留在本地，把检索入口放在一起。</p></div></div>
+<div class="callout">左侧显示本机可选工具的检测结果和安装入口；右侧是离线使用指南。点击顶部绿色标志或 <strong>返回知识库</strong>，即可回到原来的检索结果和文件预览。</div>
+<nav aria-label="指南目录"><a href="#start">快速开始</a><a href="#search">怎么检索</a><a href="#files">文件与预览</a><a href="#environment">依赖与模型</a><a href="#agents">AI Agent 与 CLI</a><a href="#storage">目录、备份与嵌套</a><a href="#limits">当前限制</a><a href="#troubleshoot">遇到问题</a></nav>
+
+<h2 id="start">快速开始</h2>
+<ol class="steps">
+<li><strong>准备知识库目录。</strong> 点击顶部 <span class="inline-label">Library</span> 文件夹图标展开位置面板，填写文件夹路径，例如 <code>~/Documents/Omni Knowledge</code>。<span class="inline-label">Initialize</span> 创建模板并建立第一个文字索引；已有知识库使用面板中的 <span class="inline-label">Choose</span> 或 <span class="inline-label">Open</span>。位置面板平时收起，目录树顶部显示当前知识库名称。</li>
+<li><strong>纳入原始文件。</strong> <span class="inline-label">Import</span> 加号按钮把所选文件复制到左下角标明的目标文件夹（未选择文件夹时为知识库 root），保留外部原件，也不会覆盖同名文件。你也可以直接用 Finder 或 AI Agent，把文件放进知识库的任意合适目录。</li>
+<li><strong>添加可检索的说明。</strong> 选中文件后，点击预览栏的 <span class="inline-label">Metadata</span> 按钮展开编辑器。在“Selected file tags”和“Selected file description / notes”中填写标签与描述，再点击 <span class="inline-label">Save metadata</span>。编辑器平时收起，再次点击按钮可收起它；选择另一个文件时也会收起。这对二进制文件、图片和无文字内容的文件尤其有用。</li>
+<li><strong>外部编辑后刷新。</strong> 在 Finder 或编辑器中添加、修改、移动或删除文件后，点击 <span class="inline-label">↻ Refresh index</span> 图标。检索读取最近成功发布的索引；后台会定期检查文件元数据变化，仍需你主动刷新索引。</li>
+<li><strong>检索并查看证据。</strong> 输入查询，在左侧模式下拉菜单选择 BM25、Grep、Semantic、Hybrid 或 Files，按 Enter 或点击 <span class="inline-label">Search</span>。下拉菜单支持方向键、Enter 和 Escape。未搜索时，目录树直接读取磁盘上的文件，包括新文件和空文件夹，展开时按需加载；列表采用虚拟化，没有 1,000 个文件的浏览上限。搜索后显示索引匹配过滤视图；点击 Search 旁的关闭／清除按钮，同时清空查询和标签，立即回到完整浏览。点击三角形展开或折叠目录，点击文件查看预览。搜索结果中的 <code>#数字</code> 保留原检索排名；同一文件的多个匹配按返回顺序列出，保留各自的行号或时间位置。</li>
+</ol>
+<p>模板保留 LLM Wiki 和 Open Knowledge Format 的原始离线文章，并提供链接到原文的参考概念页。软件负责文件管理、索引和检索；知识摘要、交叉链接和 wiki 的持续维护由你使用的 AI Agent 完成。</p>
+<p>图标悬停时会显示用途，工具栏也会显示同样的提示。信息图标打开“说明与环境”。选中文件后，预览栏始终提供 Quick Look、Open original、Finder 和 Metadata 按钮；右键文件也能找到这些操作。折叠文件夹和切换指南不会清除当前预览、查询或编辑内容。文件数与匹配数分别显示，一个文件可能包含多处匹配。</p>
+<p>底部最左侧显示当前已打开知识库的绝对路径，点击可用 Finder 打开该目录。其后的状态检查分别显示所选／输入目录的知识库状态、可选工具是否缺失，以及该目录配置的本地模型服务是否可用。修改 Library 面板的路径后，状态检查会跟随新路径；目录树仍显示上一次打开的知识库，直到你点击 Open。点击状态可前往对应的初始化、依赖安装或故障说明。目录尚未初始化时会提供 Initialize 入口。</p>
+<p>状态每 12 秒在后台检查一次，也可以点击底部的重新检查图标；打开目录、建立索引和保存元数据后会再次检查。索引状态比较文件名、大小与修改时间，以及配置和元数据的修改时间；“索引未见变化”不代表逐字节验证。扫描未完成时会明确说明，外部编辑造成索引过期时仍需主动刷新索引。检查不会替你初始化、安装工具或启动模型。</p>
+
+<h3>文件操作与输入</h3>
+<p>右键文件可复制 macOS 文件对象、复制绝对／相对路径、在 Finder 显示原件，或选择“Move to Trash…”并确认。复制文件对象可在 Finder 或本应用粘贴；复制路径只是文本。选中文件树后，⌘C 复制文件，⌘V 将剪贴板中的原生文件复制到当前目标文件夹。右键普通文件夹可直接粘贴到该目录，也可以展开或折叠全部目录。独立子知识库会显示 child KB，父库不会进入或写入其内部。</p>
+<p>从 Finder 拖入文件会复制原件；在本知识库树内拖动文件到另一个普通文件夹会移动文件。列表下方显示粘贴／拖入的目标；拖到文件行时目标是该文件的父文件夹，拖到树的空白区域时是知识库 root。操作仅处理普通文件，同名冲突会明确报错，不会覆盖或自动改名。移动／复制会保留可编辑标签和描述；旧路径元数据保留，操作后仍需刷新索引。</p>
+<p>所有文本框使用 GPUI Kit 输入组件。双击选词，⌘A 全选；⌘X／⌘C／⌘V 剪切、复制和粘贴文本；Option+Backspace 删除前一个词，⌘Z 撤销。macOS 顶部 Edit 菜单提供同样的入口。中文输入可先组合、选字，再提交检索。</p>
+
+<h2 id="search">选择合适的检索方式</h2>
+<table><thead><tr><th>方式</th><th>适合什么问题</th><th>实际行为</th></tr></thead><tbody>
+<tr><td><strong>精确标签</strong></td><td>“只看研究、硬件相关的文件”</td><td>在“Exact tags”输入逗号分隔的标签。所有标签都必须匹配，区分大小写，不做模糊匹配。标签过滤适用于每种检索方式。</td></tr>
+<tr><td><strong>BM25</strong></td><td>关键词、主题名、中文短语</td><td>使用已建立的文字索引，综合标题、路径、描述和内容排序。多个词按相关性组合；需要严格原文匹配时使用 Grep。</td></tr>
+<tr><td><strong>Grep</strong></td><td>准确词句、代码符号、正则表达式</td><td>在索引中的提取文本上验证 Rust 正则表达式，并提供匹配文本行号（转换文档为提取文本行号）；找不到正文时还会检查路径和描述。它读取索引快照，外部修改后需要刷新。</td></tr>
+<tr><td><strong>Semantic</strong></td><td>换一种说法描述内容，或描述图片／视频画面</td><td>使用兼容的本地多模态模型和已建立的向量。模型不可用或尚未建立向量时，会给出明确错误。</td></tr>
+<tr><td><strong>Hybrid</strong></td><td>同时利用关键词与语义</td><td>合并 BM25 与语义结果，保留可用的时间证据。仍然需要本地模型和向量索引。</td></tr>
+<tr><td><strong>Files</strong></td><td>文件名、路径、描述，或浏览所有资产</td><td>无需模型，包含无法提取正文的文件。空查询也会按当前标签过滤浏览文件。</td></tr>
+</tbody></table>
+<p>“研究”和“研”不是同一个标签；“Rust”和“rust”也不同。Markdown front matter 中的标签与手工元数据标签会合并。“Save metadata”立即保存可编辑标签和描述，不会启动整库索引；保存成功后会明确提示。之后主动点击 Refresh index，检索才会使用新的标签与描述。原文 front matter 保持不变。</p>
+<p>结果是候选内容和来源证据，分数不代表事实可信度。重要结论应通过 <span class="inline-label">Open original</span> 或原文预览复核。</p>
+
+<h2 id="files">文件、预览与转换</h2>
+<table><thead><tr><th>类型</th><th>目前支持</th></tr></thead><tbody>
+<tr><td>Markdown / HTML</td><td>渲染预览、front matter、表格、代码高亮、Mermaid 图。HTML 会清理脚本和危险属性；Markdown 中的原始 HTML 作为文字显示。</td></tr>
+<tr><td>PDF</td><td>嵌入原生 PDF 页面预览，并提取原生文字供检索。展开“Extracted text”可看提取结果；扫描 PDF 需要 OCR，当前不会自动执行 OCR。</td></tr>
+<tr><td>Office</td><td>DOCX、XLSX、PPTX 与部分 OpenDocument 格式的文字提取和简单预览；macOS 的 textutil 处理 DOC / RTF。复杂排版、图表和公式不会完整复现。</td></tr>
+<tr><td>图片</td><td>PNG、JPEG、GIF、WebP 等已知嵌入格式可预览；RAF 等相机 RAW 格式会明确提示使用 Quick Look 或原生应用。所有格式仍可做标签和描述检索；本地模型支持的图像可做语义检索。</td></tr>
+<tr><td>视频</td><td>受 WebKit 支持的本地视频播放；FFmpeg 提供带时间范围的切片，再由多模态模型建立向量。点击有时间证据的结果，从相应位置预览。</td></tr>
+<tr><td>音频</td><td>受支持的音频播放；已有转写或可选 Whisper 语音识别让语音内容参与文字与语义检索。WeMM 不直接编码音频波形。</td></tr>
+<tr><td>EPUB</td><td>按阅读顺序显示章节文字；CLI 可把知识库中的 Markdown 和 HTML 打包为带导航的 EPUB，可选包含引用的本地媒体。</td></tr>
+<tr><td>其他文件 / 二进制</td><td>始终可纳入文件管理与元数据检索。没有成熟正文解析器时，请用标签和描述说明用途与内容；不会把任意二进制字节假装成可读文本。</td></tr>
+</tbody></table>
+<p><span class="inline-label">Quick Look</span> 请求 macOS 快速查看；是否能显示该格式由本机解码器决定。<span class="inline-label">Finder</span> 显示原件所在位置。<span class="inline-label">Metadata</span> 显示实时路径、MIME、大小与修改时间，并提供标签和描述编辑器；查看时不会读取整个索引或计算文件哈希。<span class="inline-label">Open original</span> 用已安装的原生应用打开文件，适合复杂 Office 文档、不支持的媒体编码或需要完整排版的 EPUB。预览不会执行导入文件中的脚本，也不会加载远程图片。</p>
+
+<p>Markdown／HTML 中的章节链接可滚动到当前文档标题；知识库内的相对文件链接在应用中打开，文件夹链接定位到目录树。明确点击 HTTP(S) 链接会交给系统浏览器；它不会在预览中加载远程页面。带凭据、危险协议、越过 root 或指向内部状态的链接会被拒绝。源文件中的脚本仍不能执行。</p>
+
+<h2 id="environment">依赖、语音模型与多模态模型</h2>
+<h3>内置功能无需额外安装</h3>
+<p>文件管理、标签、文字索引、BM25、Grep、Markdown／HTML 渲染、PDF 文字提取和 EPUB 读写均包含在应用中。macOS 提供 PDF、媒体和原生应用查看能力。没有 Homebrew 或本地模型，也能使用这些基础功能。</p>
+<h3 id="tools">左侧的 Homebrew 按钮安装什么</h3>
+<ul>
+<li><strong>FFmpeg</strong>：视频切片、音频格式转换；同时需要 ffprobe 获取媒体信息。</li>
+<li><strong>whisper.cpp</strong>：可选语音识别可执行程序。安装可执行程序之后，仍需准备本地模型文件。</li>
+</ul>
+<p>检测显示可执行文件的位置，不代表模型已经加载或完成了一次推理。应用优先检查 Apple Silicon 常用的 <code>/opt/homebrew/bin</code>，并兼容已有的 Homebrew／PATH 工具位置。</p>
+<p>点击“在终端安装”按钮后，应用把固定的 Homebrew 安装命令交给可见的 macOS 终端窗口。终端显示安装进度、输出、交互输入和结束结果；应用只确认启动请求是否接受，不会把启动成功当作安装完成。安装与应用独立运行，关闭 Omni Knowledge 后仍会继续。完成后回到这里点击“重新检查”，确认工具可用。</p>
+<p>安装会通过 Homebrew 联网下载软件；不会下载 AI 模型、自动启动服务或修改知识库配置。没有 Homebrew 时，先打开左侧官方说明，在终端完成安装，再点击“重新检查”。</p>
+<h3 id="local-model">接入已有的本地 WeMM 服务</h3>
+<p>图像、视频和文字语义检索使用独立的本地 WeMM 服务。当前配置默认连接 <code>http://127.0.0.1:18789</code>，并检查模型身份是否与知识库配置一致。应用不会自行下载或启动这个服务。</p>
+<ol>
+<li>在已有的 <code>embedding-wemm</code> 项目中启动兼容的服务，例如 <code>./scripts/serve.sh gpu</code>。</li>
+<li>确认知识库的 <code>omni-knowledge.json</code> 中 <code>embedding</code> 配置与服务身份一致。用 CLI 的 <code>doctor --embeddings</code> 检查本地连接。</li>
+<li>回到知识库，将 <span class="inline-label">Embeddings: off</span> 切换为 on，再点击 <span class="inline-label">Refresh index</span>。</li>
+<li>索引完成后使用 Semantic 或 Hybrid。外部修改过的文件需要重新建立相应向量。</li>
+</ol>
+<p>模型停止时仍能使用标签、Files、BM25 和 Grep。GUI 中的 Embeddings 开关只决定下一次索引是否生成向量；它不会启动模型服务。</p>
+<h3 id="asr">让音频内容可检索</h3>
+<p>最简单的方式是在音频旁边放置 <code>文件名.transcript.json</code>，例如 <code>interview.m4a.transcript.json</code>：</p>
+<pre>{"segments":[{"start":3.0,"end":8.0,"text":"这一段的转写内容"}]}</pre>
+<p>也可以在知识库配置中填写已存在的 <code>whisper_executable</code> 与 <code>whisper_model</code> 两个绝对路径，然后开启 Embeddings 并刷新。界面安装的 whisper.cpp 只提供前者；模型文件由你单独选择。转写是可出错的观察结果，结果中的时间位置帮助你回到录音复核。</p>
+
+<h2 id="agents">AI Agent、CLI 与 MCP</h2>
+<p>知识库是普通文件夹，AI Agent 可以直接编辑 wiki、标签、描述和索引页。让 Agent 先读知识库里的 <code>AGENTS.md</code> 与 <code>index.md</code>，保留 <code>raw/</code> 原件，修改后调用索引，并为总结保留来源链接。</p>
+<p>CLI 位于应用包的 <code>Contents/MacOS/omni</code>，或源码构建的 <code>target/release/omni</code>。下例的 <code>omni</code> 指这个可执行文件或你自行设置的 PATH 别名：</p>
+<pre>omni --root /path/to/library search "知识检索" --mode bm25 --json
+omni --root /path/to/library search "精确词句" --mode grep --tag 研究 --json
+omni --root /path/to/library metadata raw/firmware.bin --tag 硬件 --description "设备恢复镜像"
+omni --root /path/to/library index
+omni --root /path/to/library index --embeddings
+omni --root /path/to/library convert raw/report.pdf --output /path/to/report.md
+omni --root /path/to/library export-epub /path/to/library.epub --include-media</pre>
+<p>MCP 通过标准输入／输出提供 <code>search</code>、<code>index</code>、<code>list</code>、<code>status</code>、<code>read</code>、<code>metadata</code> 和 <code>import</code>。在支持 MCP 的 Agent 客户端中配置以下入口；替换为你自己的真实路径：</p>
+<pre>{
+  "mcpServers": {
+    "omni-knowledge": {
+      "command": "/path/Omni Knowledge.app/Contents/MacOS/omni",
+      "args": ["--root", "/path/to/library", "serve-mcp"]
+    }
+  }
+}</pre>
+<p>MCP 的 list 仅返回发现文件所需的元数据；read 返回有长度上限的提取文本。软件返回来源证据，不会自动替 Agent 生成答案或接受文件中的指令。</p>
+
+<h2 id="storage">目录、备份与嵌套知识库</h2>
+<pre>knowledge/
+  omni-knowledge.json    Root configuration
+  index.md              Navigation
+  log.md                Change history
+  AGENTS.md             Agent workflow
+  raw/                  Original source files
+  wiki/                 Authored concepts and source references
+  .omni/metadata/       Editable tags and descriptions
+  .omni/indexes/        Rebuildable search generations</pre>
+<p>请备份原始文件、wiki、配置和 <code>.omni/metadata/</code>。索引和临时媒体切片是派生数据，可重建；恢复备份后运行索引即可重新生成缺失的派生目录。</p>
+<p>每个文件由最近的知识库 root 管理。父库操作不会自动吞并子库；CLI 的 <code>search --recursive</code> 和 <code>index --recursive</code> 可跨嵌套库操作，结果保留各自的 root 身份。</p>
+<p>通过本应用复制或移动普通文件时，可编辑标签和描述会迁移到目标路径，旧 sidecar 保留。外部工具移动、编辑或重命名后，请刷新索引并检查元数据；索引属于知识库内部的派生状态，整个知识库移动后仍可打开并刷新。</p>
+
+<h2 id="limits">当前版本的边界</h2>
+<ul>
+<li>面向 Apple Silicon macOS；M5 Pro 上已有实际运行检查，另一台 M3 Mac 仍需自己的运行验证。</li>
+<li>文字提取有 8 MiB 源文件／输出上限；过大或无法解析的文件仍可按文件名、标签和描述检索。扫描 PDF 的 OCR 为后续可选能力。</li>
+<li>Office 预览为文字预览；EPUB 预览不复现出版样式、固定版式或交互内容。</li>
+<li>本地媒体是否可播放取决于 WebKit 支持的编码。单次预览资源读取上限 32 MiB；支持范围请求的媒体可分段加载，更大的非分段资源请用原生应用。</li>
+<li>GUI 浏览按需读取目录且没有任意文件数量截断；GUI／CLI 单次索引查询最多返回 10,000 条匹配，全部保留原排名和行号／时间证据。GUI 暂未提供图片查询选择和 EPUB 导出按钮，这两项可使用 CLI。</li>
+<li>精确向量检索与 JSON 快照优先保证结果透明；大规模个人文件库的速度和召回率仍需用你的真实数据测试。</li>
+<li>没有内置自动 wiki 合成、文件夹事件实时监控、云同步或自动模型下载。定期元数据检查只提示可能需要刷新；索引完成与检索命中不能替代原文核实。</li>
+</ul>
+
+<h2 id="troubleshoot">遇到问题时</h2>
+<table><thead><tr><th>现象</th><th>下一步</th></tr></thead><tbody>
+<tr><td>没有检索结果</td><td>先点击 Search 旁的清除按钮，回到完整实时文件树确认原件存在。新文件尚未索引时不会出现在索引搜索中；清空标签过滤，再刷新索引。Grep 检查严格原文，BM25 适合关键词相关性。</td></tr>
+<tr><td>显示“no index”或索引目录缺失</td><td>打开正确的知识库 root，点击 Refresh index。配置文件和原件应保留，派生索引可以重建。</td></tr>
+<tr><td>一直显示“Opening knowledge folder…”</td><td>检查 macOS 是否正在等待访问“文稿”“桌面”或“下载”目录的权限确认；对你选择的知识库允许访问，或使用 Library 面板的 Choose 选择目录。应用重新签名后可能再次请求授权；不要绕过系统权限。</td></tr>
+<tr><td>Semantic / Hybrid 报错</td><td>确认本地服务运行且身份匹配，再开启 Embeddings 并刷新。使用 CLI doctor --embeddings 获取检查结果。</td></tr>
+<tr><td>视频或语音索引缺少覆盖</td><td>左侧重新检查 FFmpeg / ffprobe；音频还需转写 sidecar，或同时配置 whisper-cli 与本地模型。</td></tr>
+<tr><td>终端未打开或安装失败</td><td>启动请求失败或未确认时，先看左侧交接记录，再确认终端是否已经打开；安装中的错误与结束结果在终端查看。缺少 Homebrew 时先按官方说明配置；联网、磁盘、权限或编译问题需要在本机解决，完成后重新检查依赖。</td></tr>
+<tr><td>无法完整预览文档</td><td>尝试 Quick Look 或 Open original 查看原始文件。提取状态和警告说明当前检索覆盖，不会宣称未读到的内容已经被索引。</td></tr>
+<tr><td>提示另一个写入者正在工作</td><td>等待另一个索引或元数据写入完成，再重试。让外部 Agent 完成文件编辑后再统一刷新。</td></tr>
+</tbody></table>
+<div class="footer">这份指南随应用离线提供。依赖检查和安装使用左侧原生控件；指南和原文件预览都没有执行任意命令或修改知识库的脚本接口。Omni Knowledge 的原创代码采用 Apache License 2.0；第三方工具和组件保留各自的许可证。</div>
+</main></body></html>

@@ -17,3 +17,17 @@ This map locates engineering owners and project guidance. It is a navigation aid
 | How do we set up and run checks? | [Toolchain](toolchain.md) |
 
 Read only the owners needed for the task. Add a product contract or local guide when the project has that responsibility.
+
+## Product And Implementation
+
+| Question | Read |
+| --- | --- |
+| What did the engineer request? | [Product requirements](specs/product.md) |
+| Which files own durable knowledge? | [Storage and recovery](specs/storage.md) |
+| What do search modes and scores mean? | [Retrieval semantics](specs/search.md) |
+| Why these design choices? | [Product decisions](decisions/README.md) |
+| How do I use the desktop app? | [GUI guide](gui.md) |
+| How do agents use the tools? | [Agent operations](agents.md) |
+| How does local multimodal processing run? | [Multimodal guide](multimodal.md) |
+| Which dependencies were chosen? | [Dependency decisions](dependencies.md) |
+| What was directly verified? | [First-version record](changes/2026-10-14-first-version.md), [desktop workspace](changes/2026-10-15-desktop-workspace.md) |

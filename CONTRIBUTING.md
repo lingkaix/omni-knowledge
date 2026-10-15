@@ -1,4 +1,4 @@
-# Contributing To Omni Grep
+# Contributing To Omni Knowledge
 
 This guide owns contribution and commit procedure. Start with [AGENTS.md](AGENTS.md) and use the [documentation map](docs/README.md) to find the relevant owner.
 
