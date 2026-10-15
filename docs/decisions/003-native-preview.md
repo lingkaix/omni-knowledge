@@ -34,7 +34,12 @@ Give each opened library a resource-origin token and bind document bases, media 
 Read selected-file facts from live attributes and authored metadata instead of the full vector manifest.
 Save metadata without starting indexing; this keeps a small authored edit separate from model work and derived publication.
 Update native preview bounds and visibility only when they change.
-Keep sidebar hints inside the sidebar because a native child WebKit view can cover GPUI overlays outside that pane.
+Show contextual hints and operation feedback inside the bottom status bar's layout because a native child WebKit view can cover GPUI overlays above it.
+Do not reserve separate instructional or transfer-destination strips under the tree.
+Treat pointer interaction with the native preview as an outside click for file context menus while preserving the preview's own interaction.
+Opening a file menu returns Cocoa focus to GPUI; the existing foreground tick dismisses it when this preview's native view hierarchy receives focus.
+Identify each menu session so delayed dismissal from a replaced menu cannot close the new target's menu.
+This bridge uses AppKit view identity and adds no document script or source-content privilege.
 Use a virtualized tree with live directory contents so empty folders and unindexed files remain manageable.
 Keep search as a clearable filter over this browsing tree.
 Offer native Quick Look and default-application actions for formats such as RAF that the embedded image renderer does not support.

@@ -28,11 +28,10 @@ use gpui_component::{
     list::ListItem,
     menu::{PopupMenu, PopupMenuItem},
     popover::Popover,
-    tooltip::Tooltip,
     tree::{TreeItem, TreeState, tree},
 };
 use wry::{
-    WebView, WebViewBuilder,
+    WebView, WebViewBuilder, WebViewExtMacOS,
     dpi::{LogicalPosition, LogicalSize},
     http::{Request, Response},
 };
@@ -244,12 +243,53 @@ struct SourceTarget {
 }
 
 /// A tree node keeps its filesystem identity and optional ranked occurrence.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct TreeTarget {
     relative: String,
     directory: bool,
     nested: bool,
     hit_index: Option<usize>,
+}
+
+/// Keep dismissal events attached to the menu that issued them after a right-click retarget.
+#[derive(Default)]
+struct MenuSession {
+    revision: u64,
+    active: Option<u64>,
+}
+
+impl MenuSession {
+    /// Replace the current menu and return its callback identity.
+    fn open(&mut self) -> u64 {
+        self.revision += 1;
+        self.active = Some(self.revision);
+        self.revision
+    }
+
+    /// Accept an outside-click or Escape only for the menu that is still displayed.
+    fn dismiss(&mut self, revision: u64) -> bool {
+        if self.active != Some(revision) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+}
+
+/// Observe this preview's native view hierarchy without changing focus or reading source content.
+/// Foreground-only AppKit access also covers WebKit-owned PDF/media descendants; an unmounted view is inert.
+fn preview_has_native_focus(preview: &WebView) -> bool {
+    let webview = preview.webview();
+    let Some(window) = webview.window() else {
+        return false;
+    };
+    let Some(responder) = window.firstResponder() else {
+        return false;
+    };
+    let preview_view: &objc2_app_kit::NSView = &webview;
+    responder
+        .downcast_ref::<objc2_app_kit::NSView>()
+        .is_some_and(|view| std::ptr::eq(view, preview_view) || view.isDescendantOf(preview_view))
 }
 
 /// Read-side navigation accepted from a trusted renderer click.
@@ -405,6 +445,18 @@ fn restored_tree_selection(items: &[TreeItem], selected: Option<&str>) -> Option
         None
     }
     selected.and_then(|selected| locate(items, selected, &mut 0))
+}
+
+/// Select the exact right-clicked occurrence, including a duplicate match in the same file.
+fn context_tree_selection(
+    items: &[TreeItem],
+    targets: &BTreeMap<String, TreeTarget>,
+    target: &TreeTarget,
+) -> Option<usize> {
+    let selected = targets
+        .iter()
+        .find_map(|(identity, item)| (item == target).then_some(identity.as_str()));
+    restored_tree_selection(items, selected)
 }
 
 /// A lightweight native drag image with no filesystem side effect.
@@ -645,6 +697,7 @@ struct LibraryWindow {
     search_revision: u64,
     file_focus: FocusHandle,
     file_menu: Option<Entity<PopupMenu>>,
+    file_menu_session: MenuSession,
     selected_folder: String,
     inspector: String,
     link_events: Arc<Mutex<VecDeque<LinkEvent>>>,
@@ -866,6 +919,7 @@ impl LibraryWindow {
             search_revision: 0,
             file_focus: cx.focus_handle().tab_stop(true),
             file_menu: None,
+            file_menu_session: MenuSession::default(),
             selected_folder: String::new(),
             inspector: String::new(),
             link_events,
@@ -884,7 +938,7 @@ impl LibraryWindow {
         })
     }
 
-    /// Return Cocoa keyboard ownership to the GPUI parent for an explicit native input focus.
+    /// Return Cocoa keyboard ownership to the GPUI parent for explicit input, file, or menu focus.
     /// Runs only on the main thread after focus or pointer interaction; API errors remain visible.
     fn focus_native_input(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.preview.focus_parent() {
@@ -1587,7 +1641,7 @@ impl LibraryWindow {
         cx.notify();
     }
 
-    /// Render a clickable observation and expose its diagnostic through native and inline hints.
+    /// Render a clickable observation whose full diagnostic appears inside the bottom bar.
     fn status_badge(
         &self,
         id: &'static str,
@@ -1597,7 +1651,6 @@ impl LibraryWindow {
         anchor: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let tooltip = detail.clone();
         div()
             .id(id)
             .px_2()
@@ -1608,7 +1661,6 @@ impl LibraryWindow {
             .text_size(px(11.))
             .text_color(rgb(if warning { 0x8a6a39 } else { 0x477458 }))
             .hover(|style| style.bg(rgb(0xe2ebdf)))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.hover_hint = Some(detail.clone());
@@ -1621,7 +1673,7 @@ impl LibraryWindow {
             .child(div().text_ellipsis().whitespace_nowrap().child(label))
     }
 
-    /// Show periodic folder, optional tool, and local service checks below the native preview.
+    /// Keep contextual help, operation feedback, and folder observations inside one native footer.
     fn status_footer(&self, cx: &mut Context<Self>) -> gpui::Div {
         let report = self.status_report.as_ref().filter(|report| {
             status_target_matches(&report.folder.requested, self.status_target.as_deref())
@@ -1633,11 +1685,9 @@ impl LibraryWindow {
             .h(px(30.))
             .flex_shrink_0()
             .px_2()
-            .border_t_1()
-            .border_color(rgb(0xd4dfd6))
             .bg(rgb(0xecf2e8));
         if let Some(root) = self.root.clone() {
-            let tooltip = root.display().to_string();
+            let detail = format!("Open current knowledge root in Finder: {}", root.display());
             let target = SourceTarget {
                 root: root.clone(),
                 relative: String::new(),
@@ -1650,10 +1700,14 @@ impl LibraryWindow {
                     .text_ellipsis()
                     .text_size(px(11.))
                     .cursor_pointer()
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(format!("Open current knowledge root: {tooltip}"))
-                            .build(window, cx)
-                    })
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.hover_hint = Some(detail.clone());
+                        } else if this.hover_hint.as_deref() == Some(detail.as_str()) {
+                            this.hover_hint = None;
+                        }
+                        cx.notify();
+                    }))
                     .child(root.display().to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.source_action(target.clone(), "open-root", cx)
@@ -1761,7 +1815,7 @@ impl LibraryWindow {
                 cx,
             ));
         }
-        footer.child(div().flex_1()).child(
+        footer = footer.child(div().flex_1()).child(
             self.action_icon(
                 "status-refresh",
                 if self.status_probe_running {
@@ -1774,7 +1828,52 @@ impl LibraryWindow {
                 cx,
             )
             .on_click(cx.listener(|this, _, _, cx| this.refresh_status(cx))),
-        )
+        );
+        let mut operation = self
+            .indexing
+            .as_ref()
+            .map(|root| format!("Indexing {} · ", root.display()))
+            .unwrap_or_else(|| {
+                if self.busy {
+                    "●  ".into()
+                } else {
+                    String::new()
+                }
+            });
+        if self.metadata_saving.is_some() {
+            operation.push_str("Saving metadata · ");
+        }
+        operation.push_str(&self.status);
+        let destination = if self.selected_folder.is_empty() {
+            "knowledge root"
+        } else {
+            &self.selected_folder
+        };
+        let detail = self.hover_hint.as_deref().or(self.sidebar_hint.as_deref());
+        let summary = format!("{operation} · Paste / drop target: {destination}");
+        let message = detail
+            .map(|detail| format!("{detail}\n{summary}"))
+            .unwrap_or(summary);
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(rgb(0xd4dfd6))
+            .bg(rgb(0xecf2e8))
+            .child(
+                div()
+                    .id("status-details")
+                    .max_h(px(108.))
+                    .overflow_y_scroll()
+                    .px_3()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(0x526b59))
+                    .whitespace_normal()
+                    .child(message),
+            )
+            .child(footer)
     }
 
     /// Hand off one allowlisted package to visible Terminal after an explicit native button click.
@@ -1844,7 +1943,6 @@ impl LibraryWindow {
             .items_center()
             .justify_center()
             .text_size(px(16.))
-            .when(!id.starts_with("tree-"), |button| button.tooltip(hint))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if id.starts_with("tree-") {
                     this.sidebar_hint = if *hovered { Some(hint.into()) } else { None };
@@ -1910,7 +2008,14 @@ impl LibraryWindow {
                 button("mode-selector", label, false)
                     .w(px(108.))
                     .dropdown_caret(true)
-                    .tooltip("Search mode · 选择检索方式"),
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.hover_hint = if *hovered {
+                            Some("Search mode · 选择检索方式".into())
+                        } else {
+                            None
+                        };
+                        cx.notify();
+                    })),
             )
             .on_open_change(cx.listener(|this, open: &bool, window, cx| {
                 this.mode_menu_open = *open;
@@ -1951,7 +2056,6 @@ impl LibraryWindow {
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(0xe2ede0)))
-                    .tooltip(|window, cx| Tooltip::new("Home · 返回知识库").build(window, cx))
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                         this.hover_hint = if *hovered {
                             Some("Home · 返回知识库".into())
@@ -2145,6 +2249,11 @@ impl LibraryWindow {
 
     /// Drain trusted read-side clicks; stale document identities cannot redirect a later preview.
     fn receive_links(&mut self, cx: &mut Context<Self>) {
+        if self.file_menu.is_some() && preview_has_native_focus(&self.preview) {
+            self.file_menu = None;
+            self.file_menu_session.active = None;
+            cx.notify();
+        }
         let events = self
             .link_events
             .lock()
@@ -2472,6 +2581,18 @@ impl LibraryWindow {
         } else {
             parent_folder(&target.relative)
         };
+        let selected = context_tree_selection(&self.tree_items, &self.tree_targets, &target);
+        self.tree_state
+            .update(cx, |state, cx| state.set_selected_index(selected, cx));
+        if !target.directory {
+            let start = target
+                .hit_index
+                .and_then(|index| self.hits.get(index))
+                .and_then(|hit| hit.start_seconds);
+            self.select(target.relative.clone(), start, cx);
+        }
+        self.focus_native_input(cx);
+        let revision = self.file_menu_session.open();
         let weak = cx.weak_entity();
         let source = SourceTarget {
             root,
@@ -2540,9 +2661,11 @@ impl LibraryWindow {
             }
             menu
         });
-        cx.subscribe(&menu, |this, _, _: &gpui::DismissEvent, cx| {
-            this.file_menu = None;
-            cx.notify();
+        cx.subscribe(&menu, move |this, _, _: &gpui::DismissEvent, cx| {
+            if this.file_menu_session.dismiss(revision) {
+                this.file_menu = None;
+                cx.notify();
+            }
         })
         .detach();
         menu.focus_handle(cx).focus(window);
@@ -2921,7 +3044,6 @@ impl LibraryWindow {
                     .child(div().mt_5().font_weight(gpui::FontWeight::SEMIBOLD).child("依赖检查与安装交接"))
                     .child(div().mt_2().text_size(px(11.)).text_color(rgb(0x52665a)).child(self.runtime_log.clone())))
                 .child(canvas(|_, _, _| (), move |bounds, _, _, _| {let _=update_preview_bounds(&webview,&surface,bounds);}).flex_1().h_full()))
-            .child(div().px_3().py_1().text_size(px(12.)).text_color(rgb(0x586f60)).child(self.hover_hint.clone().unwrap_or_else(|| format!("{}{}",self.indexing.as_ref().map(|root|format!("Indexing {} · ",root.file_name().unwrap_or_default().to_string_lossy())).unwrap_or_else(||if self.busy{"●  ".into()}else{String::new()}),self.status))))
             .child(self.status_footer(cx))
     }
 }
@@ -2956,6 +3078,7 @@ impl Render for LibraryWindow {
                 .count()
         };
         let popup = self.file_menu.clone();
+        let menu_revision = self.file_menu_session.active;
         let drop_root = self.root.clone();
         let move_root = drop_root.clone();
         let sidebar = div()
@@ -2980,7 +3103,10 @@ impl Render for LibraryWindow {
             .on_action(cx.listener(|this, _: &FileOpen, _, cx| this.file_key(0, cx)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, _| this.file_focus.focus(window)),
+                cx.listener(|this, _, window, cx| {
+                    this.focus_native_input(cx);
+                    this.file_focus.focus(window);
+                }),
             )
             .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                 if let Some(root) = &drop_root {
@@ -3040,24 +3166,6 @@ impl Render for LibraryWindow {
                     ),
             )
             .child(div().flex_1().min_h_0().child(self.source_tree(cx)))
-            .child(div().h(px(40.)).flex_shrink_0().px_2().overflow_hidden().text_size(px(11.)).text_color(rgb(0x526b59)).bg(rgb(0xecf2e8)).child(truncate(self.sidebar_hint.as_deref().unwrap_or("Hover a file to read its path and matching evidence. Right-click for actions."),180)))
-            .child(
-                div()
-                    .h(px(26.))
-                    .flex_shrink_0()
-                    .px_2()
-                    .text_size(px(10.))
-                    .text_color(rgb(0x6a7f6d))
-                    .text_ellipsis().whitespace_nowrap().overflow_hidden()
-                    .child(format!(
-                        "Paste / drop target: {}",
-                        if self.selected_folder.is_empty() {
-                            "knowledge root"
-                        } else {
-                            &self.selected_folder
-                        }
-                    )),
-            )
             .when(popup.is_some(), |sidebar| {
                 sidebar.child(
                     div()
@@ -3067,9 +3175,13 @@ impl Render for LibraryWindow {
                         .left(px(6.))
                         .w(px(260.))
                         .children(popup)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.file_menu = None;
-                            cx.notify();
+                        .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                            if menu_revision
+                                .is_some_and(|revision| this.file_menu_session.dismiss(revision))
+                            {
+                                this.file_menu = None;
+                                cx.notify();
+                            }
                         })),
                 )
             });
@@ -3133,31 +3245,6 @@ impl Render for LibraryWindow {
                             cx,
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.index(cx))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_ellipsis()
-                            .text_size(px(11.))
-                            .text_color(rgb(if self.busy { 0x8b6734 } else { 0x586f60 }))
-                            .child(self.hover_hint.clone().unwrap_or_else(|| {
-                                format!(
-                                    "{}{}",
-                                    self.indexing
-                                        .as_ref()
-                                        .map(|root| format!(
-                                            "Indexing {} · ",
-                                            root.file_name().unwrap_or_default().to_string_lossy()
-                                        ))
-                                        .unwrap_or_else(|| if self.busy {
-                                            "●  ".into()
-                                        } else {
-                                            String::new()
-                                        }),
-                                    self.status
-                                )
-                            })),
                     ),
             )
             .child(
@@ -4003,6 +4090,48 @@ mod tests {
         assert_eq!(restored_tree_selection(&items, Some("other")), Some(1));
         assert_eq!(restored_tree_selection(&items, Some("removed-file")), None);
         assert_eq!(restored_tree_selection(&items, None), None);
+    }
+
+    /// Keep a replacement menu open when the prior menu emits a delayed outside-click dismissal.
+    #[test]
+    fn right_click_retarget_rejects_obsolete_dismissals() {
+        let mut session = MenuSession::default();
+        let first = session.open();
+        let second = session.open();
+        assert!(!session.dismiss(first));
+        assert_eq!(session.active, Some(second));
+        assert!(session.dismiss(second));
+        assert_eq!(session.active, None);
+        assert!(!session.dismiss(second));
+    }
+
+    /// Right-click another file or another occurrence selects its exact visible tree row.
+    #[test]
+    fn context_selection_tracks_the_clicked_source_and_evidence() {
+        let hits = vec![
+            tree_hit("docs/a.md", Some(3), None),
+            tree_hit("docs/b.md", Some(7), None),
+            tree_hit("docs/b.md", Some(11), None),
+        ];
+        let mut targets = BTreeMap::new();
+        let items = match_items(&hits, &BTreeSet::new(), &mut targets);
+        assert_eq!(
+            context_tree_selection(&items, &targets, &targets["match:0:docs/a.md"]),
+            Some(1)
+        );
+        assert_eq!(
+            context_tree_selection(&items, &targets, &targets["match:1:docs/b.md"]),
+            Some(2)
+        );
+        assert_eq!(
+            context_tree_selection(&items, &targets, &targets["match:2:docs/b.md"]),
+            Some(3)
+        );
+        items[0].clone().expanded(false);
+        assert_eq!(
+            context_tree_selection(&items, &targets, &targets["match:2:docs/b.md"]),
+            None
+        );
     }
 
     /// Keep every ranked line and time occurrence in the actual component adapter.

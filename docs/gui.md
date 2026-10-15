@@ -55,10 +55,12 @@ The description is useful for binary files that have no extractable text.
 ## Workspace
 
 The compact top toolbar keeps search, a mode dropdown, and exact-tag filtering accessible.
-Hover over an action icon to read its hint; sidebar hints stay within the file pane.
+Hover over an action icon, source row, or status badge to read its contextual hint in the bottom status bar.
+The same bar shows operation feedback and the current transfer destination without permanent strips below the tree.
 The **Library** panel contains folder selection and initialization and is collapsed during normal reading.
 The left pane groups files by directory; expand or collapse a folder to control the visible tree.
 Use a file's context menu to open it, reveal it in Finder, copy it, copy its absolute or relative path, inspect metadata, or move it to Trash after confirmation.
+Right-click selects the menu's target directly; clicking the preview or elsewhere outside the menu dismisses it, as does Escape.
 Paste copied files into a folder, drop external files to copy them, or drag an owned file to move it within the library.
 Transfers reject destination collisions and retain authored metadata; they do not silently refresh the search index.
 File selections keep their source path and available line or media-time evidence.

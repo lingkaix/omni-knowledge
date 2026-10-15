@@ -54,12 +54,16 @@ Keep metadata editing available without reserving a large permanent toolbar row.
 Save editable metadata directly without starting an index build, and show whether the write succeeded.
 Keep preview selection, typing, and metadata inspection responsive while searches or explicit index builds run.
 Read selected-file attributes independently of the complete search index.
-Keep sidebar action hints visible within the sidebar when the native preview is present.
+Show contextual hints, transfer destinations, and operation feedback in the bottom status bar.
+Remove permanent instructional and destination rows below the file tree and duplicate feedback beside the retrieval controls.
+Keep status-bar diagnostics readable within its layout instead of floating under the native preview.
 Show selected-folder, index, external-tool, and local-model-service status in a compact bottom bar.
 Link dependency problems to their installation or repair instructions.
 Distinguish uninitialized folders, invalid selections, missing indexes, and source changes that need reindexing.
 Check these states in the background without automatically initializing, indexing, installing, or starting a service.
 Provide source-file context actions for copying the file, revealing it in Finder, copying absolute or relative paths, and moving it to the macOS Trash.
+Right-clicking a tree row must select its actual target and open its menu on the first click, including when another row's menu is open.
+Dismiss that menu when the user clicks outside it, including inside the native preview, or presses Escape.
 Require an explicit file action and confirmation before moving a source to Trash; preserve its authored metadata for recovery.
 Show the current knowledge root's location in the bottom bar and open its folder when selected.
 Treat search as a clearable filter over the file tree and restore the complete browsing view when the filter is cleared.

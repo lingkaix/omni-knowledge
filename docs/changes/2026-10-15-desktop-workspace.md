@@ -5,7 +5,7 @@ The accepted [product requirements](../specs/product.md) own behavior; [storage]
 
 ## Result
 
-The local artifact is version 0.1.0, build 7, at `dist/Omni Knowledge.app` with both GUI and CLI executables.
+This change produced version 0.1.0, build 7, at `dist/Omni Knowledge.app` with both GUI and CLI executables.
 Fresh bundle assembly, nested signing, and strict verification correct the reported invalid-signature launch failure and preserve the previous app.
 The app uses the supplied green mark, an optically centered icon, an offline Chinese guide, and explicit Homebrew setup for external media tools.
 Compact GPUI Kit controls, aligned 28-pixel inputs, a collapsible live file tree, clearable search, contextual metadata, and a bottom status bar preserve reading space.
@@ -20,7 +20,7 @@ WebKit resource reads run in the background, native geometry updates are cached,
 Each opened library has a scoped resource origin, so delayed requests cannot read the next library's same-named source.
 Metadata saving writes only the authored sidecar, preserves newer drafts, reports success or failure, and leaves indexing explicit.
 Status checks are coalesced independently and refresh after publication or metadata changes.
-Sidebar hints stay inside the sidebar beside the native preview.
+The initial sidebar-local hint approach was superseded by the [status and menu correction](2026-10-15-status-and-menus.md) after further native-window reports.
 
 ## Verification
 
