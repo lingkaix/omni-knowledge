@@ -48,3 +48,5 @@ That is a compile error in this spike, not an NSH messaging, build, or IME failu
 The following commit binds `OUT_DIR` for the life of the script. It does not claim that the corrected package succeeds.
 
 Run `41894360411` at `2c9b61a` reached the shell library and stopped with `E0425`: `input` is not in `nsh_core::prelude`. The constructor is `nsh_core::element::input`. No window ran. The import fix does not claim a CI result.
+
+Run `41896584847` at `3c8b321` packaged a Linux x86_64 ELF and a macOS ARM64 ad-hoc app. Each Linux observe mode then stopped with `Trace/breakpoint trap`, and the binary log was not in the job log. The following commit prints that log from the ephemeral observer, starts a private session bus there, and sets `WEBKIT_DISABLE_COMPOSITING_MODE=1` only in that observer. It does not claim a messaging, IME, drop, or dialog result.

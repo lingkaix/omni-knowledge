@@ -42,12 +42,28 @@ cleanup() {
   if [[ -n "${ibus_pid:-}" ]]; then
     kill -TERM "$ibus_pid" 2>/dev/null || true
   fi
+  if [[ -n "${dbus_pid:-}" ]]; then
+    kill -TERM "$dbus_pid" 2>/dev/null || true
+  fi
   if [[ -n "${xvfb_pid:-}" ]]; then
     kill -TERM "$xvfb_pid" 2>/dev/null || true
   fi
   rm -rf "$work"
 }
-trap cleanup EXIT
+on_exit() {
+  echo "----- ${mode} observer -----"
+  cat "$note" 2>/dev/null || true
+  echo "----- ${mode} binary log -----"
+  cat "$log" 2>/dev/null || true
+  echo "----- ${mode} xvfb -----"
+  tail -n 40 "$out_dir/$mode.xvfb.log" 2>/dev/null || true
+  echo "----- ${mode} ibus -----"
+  tail -n 40 "$out_dir/$mode.ibus.log" 2>/dev/null || true
+  echo "----- ${mode} dbus -----"
+  tail -n 40 "$out_dir/$mode.dbus.log" 2>/dev/null || true
+  cleanup
+}
+trap on_exit EXIT
 
 export HOME="$work/home"
 export XDG_CONFIG_HOME="$work/config"
@@ -60,6 +76,7 @@ export GDK_BACKEND=x11
 export GSK_RENDERER=cairo
 export LIBGL_ALWAYS_SOFTWARE=1
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
 export GTK_IM_MODULE=ibus
 export QT_IM_MODULE=ibus
 export XMODIFIERS=@im=ibus
@@ -74,6 +91,16 @@ Xvfb :99 -screen 0 1280x800x24 >"$out_dir/$mode.xvfb.log" 2>&1 &
 xvfb_pid=$!
 sleep 1
 echo "display=$DISPLAY xvfb_pid=$xvfb_pid" >>"$note"
+
+if command -v dbus-daemon >/dev/null; then
+  dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --nofork --nopidfile --nosyslog >>"$out_dir/$mode.dbus.log" 2>&1 &
+  dbus_pid=$!
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  sleep 0.5
+  echo "dbus_pid=$dbus_pid address=$DBUS_SESSION_BUS_ADDRESS" >>"$note"
+else
+  echo "prerequisite missing: dbus-daemon" >>"$note"
+fi
 
 if command -v ibus-daemon >/dev/null; then
   ibus-daemon -drx --panel disable >"$out_dir/$mode.ibus.log" 2>&1 &
