@@ -73,7 +73,7 @@ fn completed_operation_releases_writer_before_unrelated_child_exec() {
         .unwrap();
     let spawning = std::thread::spawn(move || {
         let fd = child_gate.as_raw_fd();
-        let mut command = Command::new("/bin/true");
+        let mut command = Command::new("/usr/bin/true");
         // SAFETY: after fork, only POSIX read/write and allocation-free error construction run.
         // The inherited socket has a finite timeout; no Rust locks, destructors, or allocator run.
         unsafe {

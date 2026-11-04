@@ -186,3 +186,14 @@ The byte-exact kernel literal interface and escaped case-insensitive desktop lit
 For M8, retain the actual selected inventory, disjoint batch membership, code identities, ignored/opt-in cases, and all terminal outcomes.
 A failed or interrupted target is not removed from the denominator.
 Mac CI and real-device observations remain separate from the Linux results in this record.
+
+## macOS CI Fixture Path Correction
+
+Run 41818809085 at 63392a6 passed the Linux job but failed the macOS headless suite before the writer-release fixture child could execute.
+Its actual error is ENOENT at child spawn: the fixture selected Linux /bin/true instead of macOS /usr/bin/true.
+This is setup-only, not a changed storage oracle or evidence that the writer correction failed.
+Use /usr/bin/true, which is the same no-effect successful child program available on both supported Unix hosts.
+The pre-exec barrier, provider failure, active-writer exclusion, completed-writer release, post-child write, deadlines, cleanup and every deciding assertion remain unchanged.
+No test is skipped, serialized, retired, weakened or given a new expected result.
+The historical raw Mac failure remains retained; actual macOS proof on the correction is still required.
+The original Linux OLD probe and its failures remain unchanged historical artifacts.
