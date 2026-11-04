@@ -27,6 +27,12 @@ Read only the owners needed for the task. Add a product contract or local guide 
 | What did the engineer request? | [Product requirements](specs/product.md) |
 | Which files own durable knowledge? | [Storage and recovery](specs/storage.md) |
 | What do search modes and scores mean? | [Retrieval semantics](specs/search.md) |
+| How do text commits, signing, proposals, and remotes work? | [Text history](specs/history.md) |
+| How are representations and model inputs bounded? | [Processing](specs/processing.md) |
+| What do frozen packages, backups, and restore preserve? | [Packages](specs/package.md) |
+| Which wire DTOs and exposure rules do all faces share? | [Service contract](specs/service.md) |
+| What full-version requirements changed, and how are they verified? | [Full-version record](changes/2026-11-04-full-version.md) |
+| How is the pinned kernel built and audited? | [Downstream proof](../tools/kernel-probe/README.md), [vendor provenance](../vendor/retrieval-kernel/VENDOR.md) |
 | Why these design choices? | [Product decisions](decisions/README.md) |
 | How do I use the desktop app? | [GUI guide](gui.md) |
 | How do agents use the tools? | [Agent operations](agents.md) |

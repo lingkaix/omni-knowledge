@@ -5,7 +5,8 @@ They do not join the application workspace and do not install a second productio
 `git/` retains historical proof of the exact public revision; `path/` proves the selected vendored dependency.
 Each workspace retains its actual Cargo-generated dependency lock.
 The standalone vendor lock records its Rust unit/process test resolution.
-The application's future root lock remains the workspace owner's responsibility.
+The application workspace now includes the vendor and retains its actual combined resolution in the root Cargo.lock.
+That lock is separate from the historical probe and standalone vendor locks.
 
 ## Run
 
@@ -46,7 +47,7 @@ This is feasibility/characterization evidence, not the independent M4 conformanc
 
 ## Root Workspace And CI Dictionary Supply
 
-After the workspace owner admits the vendor and generates the actual root Cargo.lock, use the same verified supplier before any root build.
+Use the verified supplier before every root build that can compile the admitted vendor member.
 Keep the two probe workspaces isolated; the application must use only the path dependency.
 Use explicit root workspace exclusions for `tools/kernel-probe/git` and `tools/kernel-probe/path` if a broader member glob would otherwise select them.
 
@@ -68,13 +69,20 @@ The supplier installs the verified archive at `$LINDERA_BUILD_DICTIONARY_CACHE_D
 Lindera 5.3.0 reuses those bytes and builds its embedded target dictionary locally.
 The root lock must retain the proved lindera-ipadic/lindera-dictionary 5.3.0 resolution for this cache recipe; a dictionary dependency change needs a new verified supply recipe before building.
 Do not run with an unset/different cache environment or assume `cargo --offline` alone constrains build-script HTTP.
-These root commands describe the handoff recipe, not an M0 claim that application integration has already run.
+The workspace integration record reports exact root checks; these commands alone are not execution evidence.
 
 ## Vendor Checks
 
-The application workspace does not yet admit the vendor as a member or explicitly exclude it.
-Path dependency builds work, but Cargo refuses direct vendor-manifest tests in that parent workspace.
-Until the workspace owner resolves membership, test an exact committed-source snapshot without the unrelated parent workspace manifest:
+The vendor is an application workspace member.
+Direct workspace checks use the actual root lock and need the verified dictionary environment above:
+
+```sh
+cargo test --workspace --locked --offline
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+cargo fmt --all -- --check
+```
+
+To reproduce the historical standalone lock separately, test an exact committed-source snapshot without its parent workspace manifest:
 
 ```sh
 (
@@ -88,10 +96,9 @@ Until the workspace owner resolves membership, test an exact committed-source sn
 cargo build --locked --manifest-path tools/kernel-probe/path/Cargo.toml
 ```
 
-This gate uses the exact final HEAD source, manifest and retained lock with no test/source edits.
-It does not establish application workspace integration.
-When the workspace owner includes `vendor/retrieval-kernel` as a member or explicitly excludes it, direct manifest checks can replace the snapshot route.
-Recompute the gate from that actual workspace; do not try to test a nonmember dependency through the probe's `-p retrieval-kernel` selection.
+The snapshot gate uses exact committed source and the retained standalone lock with no test/source edits.
+It proves that historical standalone resolution, not the combined application workspace resolution.
+Use the root workspace checks for application integration; the isolated probe dependency is not another test workspace member.
 Do not silently replace the upstream lock evidence with a generated application lock.
 The [vendor guide](../../vendor/retrieval-kernel/VENDOR.md) explains provenance, the minimal patches, unimplemented seams, and the required actual consuming-lock compatibility binding.
 

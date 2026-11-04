@@ -10,7 +10,20 @@ Before adopting a dependency, identify its owner, purpose, license, and maintena
 
 ## Checks And Packaging
 
-Use `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --release`, and `cargo fmt --all -- --check` for the complete headless integration gate on Linux and macOS. On macOS also run the test and Clippy commands with `--features gui` and build the GUI bundle. Native platform observations remain separate from compilation. For a focused landing, run changed tests and directly related tests in affected Cargo packages. The workspace initially contains the existing `omni-knowledge` package; shared and service packages join when their first owned behavior lands. Use `cargo test --package omni-knowledge --features gui <test-filter>` for an existing native check with an actual test filter, or select the affected shared package without GUI features. Do not treat a filtered run as a complete suite. Account for all selected tests when batching a complete gate, and retain exact code identities and outcomes.
+Before a root Cargo build, choose a private build dictionary cache and seed the exact retained IPADIC archive:
+
+```sh
+export LINDERA_BUILD_DICTIONARY_CACHE_DIR="$PWD/temp/build-dictionary"
+python3 tools/kernel-probe/prepare-dictionary.py --cache "$LINDERA_BUILD_DICTIONARY_CACHE_DIR"
+```
+
+The supplier requires Python 3.11 or newer and refuses damaged archive/cache bytes.
+Keep this environment for all Cargo commands in that build; Cargo offline mode alone does not stop build-script downloads.
+Cargo's locked dependency provisioning can use public registries; deterministic checks can then use `--locked --offline` with the verified dictionary supply.
+The [kernel probe guide](../tools/kernel-probe/README.md) owns exact historical downstream reproduction and dictionary identity; no model download is required.
+This build cache is development state, not a product library or runtime cache location.
+
+Use `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --release`, and `cargo fmt --all -- --check` for the complete headless integration gate on Linux and macOS. On macOS also run the test and Clippy commands with `--features gui` and build the GUI bundle. Native platform observations remain separate from compilation. For a focused landing, run changed tests and directly related tests in affected Cargo packages. The workspace contains the retained `omni-knowledge` package and vendored `retrieval-kernel`; shared and service packages join when their first owned behavior lands. Use `cargo test --package omni-knowledge --features gui <test-filter>` for an existing native check with an actual test filter, or select the affected shared package without GUI features. Do not treat a filtered run as a complete suite. Account for all selected tests when batching a complete gate, and retain exact code identities and outcomes.
 
 For a documentation-only change, record the reviewed base after integration and run `git diff --check <reviewed-base>..HEAD` over the committed candidate. Use the actual reviewed baseline, not a permanently copied commit ID. Separately check staged changes with `git diff --cached --check` and unstaged changes with `git diff --check`; an empty working diff does not check committed edits. Resolve local Markdown links and anchors, and inspect retained criteria and owner consistency. Also run `cargo fmt --all -- --check` as the repository-wide format check. Content-only changes do not require Cargo compilation, Clippy, product tests, or packaging unless they alter executable examples or another accepted boundary requires them. Record omitted checks as not run, not passing. Run these applicable checks on the final integrated or rebased HEAD before pushing. The repository has no separate documentation linter or generated documentation-index command. Do not add a permanent validator merely for this sync; a bounded temporary link probe is sufficient.
 
