@@ -1,0 +1,20 @@
+[package]
+name = "kernel-git-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep the historical Git proof separate from the production dependency graph.
+[workspace]
+
+[dependencies]
+retrieval-kernel = { git = "https://github.com/lingkaix/openkit", rev = "b67cd0f2c07fba11f189a8850b9f5e5cf0a703f1" }
+tempfile = "3"
+
+[lib]
+name = "kernel_probe"
+path = "../src/lib.rs"
+
+[[bin]]
+name = "kernel-git-probe"
+path = "../src/main.rs"

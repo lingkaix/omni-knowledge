@@ -1,0 +1,25 @@
+--- a/src/digest_window.rs
++++ b/src/digest_window.rs
+@@ -240,7 +240,7 @@
+         return Err(error("invalid-request", "invalid comparison digest"));
+     }
+     let mut bytes = [0u8; 32];
+-    for (i, pair) in value.as_bytes().chunks_exact(2).enumerate() {
++    for (i, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+         let digit = |b: u8| if b <= b'9' { b - b'0' } else { b - b'a' + 10 };
+         bytes[i] = digit(pair[0]) * 16 + digit(pair[1]);
+     }
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -11,8 +11,10 @@
+ use tantivy::{Index, TantivyDocument};
+
+ /// Output-changing machinery is part of every derived generation identity.
++/// The retained upstream lock is provenance, not the downstream dependency lock.
++/// See VENDOR.md for the required consuming-generation identity binding.
+ pub(crate) fn machinery() -> String {
+-    digest(format!("schema=5;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../../Cargo.lock"))).as_bytes())
++    digest(format!("schema=5;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../upstream/openkit-b67cd0f2.Cargo.lock"))).as_bytes())
+ }
+ /// Identity-only phase-1 processor; changes require fresh representations.
+ pub(crate) const PROCESSOR: &str = "identity-markdown-v1";

@@ -1,0 +1,266 @@
+{
+  "repository": "https://github.com/lingkaix/openkit",
+  "revision": "b67cd0f2c07fba11f189a8850b9f5e5cf0a703f1",
+  "crate_path": "packages/retrieval-kernel",
+  "upstream_lock": {
+    "path": "../upstream/openkit-b67cd0f2.Cargo.lock",
+    "sha256": "88be6b21f6430d1aa5bf3b730822905e37ed7514a2378a49b454265797a0947a"
+  },
+  "license": {
+    "upstream_path": "LICENSE",
+    "path": "LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "files": [
+    {
+      "path": "Cargo.toml",
+      "upstream_sha256": "d04a4ba566f11591761cbdbfb6b1098c532b16aff64fe88ee18f57e2d1def5a7",
+      "vendored_sha256": "d04a4ba566f11591761cbdbfb6b1098c532b16aff64fe88ee18f57e2d1def5a7"
+    },
+    {
+      "path": "README.md",
+      "upstream_sha256": "efb74107f7d92fd939400ad85f5698abe399b03b660262d198d4a4a0d7f109ec",
+      "vendored_sha256": "efb74107f7d92fd939400ad85f5698abe399b03b660262d198d4a4a0d7f109ec"
+    },
+    {
+      "path": "mise.toml",
+      "upstream_sha256": "daa2b60bf13dbbb8e3302064eff550ce3f116339d2185acbe85bb5fa4445c8d6",
+      "vendored_sha256": "daa2b60bf13dbbb8e3302064eff550ce3f116339d2185acbe85bb5fa4445c8d6"
+    },
+    {
+      "path": "notices/ELECTIONS.json",
+      "upstream_sha256": "493bfe382283e4692d645e90f491b57930b0d0f18da9fc021ca41f77799d66be",
+      "vendored_sha256": "493bfe382283e4692d645e90f491b57930b0d0f18da9fc021ca41f77799d66be"
+    },
+    {
+      "path": "notices/GAPS.json",
+      "upstream_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "vendored_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "path": "notices/README.md",
+      "upstream_sha256": "5c1e463464b779ddbf1744b61aadf2420a7a40d6dd4cd34bd507f639853aa780",
+      "vendored_sha256": "5c1e463464b779ddbf1744b61aadf2420a7a40d6dd4cd34bd507f639853aa780"
+    },
+    {
+      "path": "notices/UPSTREAM.json",
+      "upstream_sha256": "458b4b7e3572d56b847da72a094658ca398d51901f6671a3346c8292f4c7923a",
+      "vendored_sha256": "458b4b7e3572d56b847da72a094658ca398d51901f6671a3346c8292f4c7923a"
+    },
+    {
+      "path": "notices/datasketches-0.2.0/LICENSE",
+      "upstream_sha256": "2a93522cc3e0d15510a70e0e7aaf33dc6a1588c39ca4a5c60c4b0121ed25eaf4",
+      "vendored_sha256": "2a93522cc3e0d15510a70e0e7aaf33dc6a1588c39ca4a5c60c4b0121ed25eaf4"
+    },
+    {
+      "path": "notices/datasketches-0.2.0/NOTICE",
+      "upstream_sha256": "624b424b930d7ce49f8856323c6aa5ffbcaa71a474d60bf8f60852f8aa20bcfa",
+      "vendored_sha256": "624b424b930d7ce49f8856323c6aa5ffbcaa71a474d60bf8f60852f8aa20bcfa"
+    },
+    {
+      "path": "notices/htmlescape-0.3.1/LICENSE-APACHE-2.0",
+      "upstream_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "vendored_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "notices/include-flate-codegen-0.3.4/LICENSE",
+      "upstream_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "vendored_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "notices/include-flate-compress-0.3.4/LICENSE",
+      "upstream_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "vendored_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "notices/jieba-macros-0.11.0/LICENSE",
+      "upstream_sha256": "92257c8d1c7a059fa02720b34fce017574a990bed14cee8f565597f4fbfb1f13",
+      "vendored_sha256": "92257c8d1c7a059fa02720b34fce017574a990bed14cee8f565597f4fbfb1f13"
+    },
+    {
+      "path": "notices/jieba-rs-0.11.0/LICENSE",
+      "upstream_sha256": "92257c8d1c7a059fa02720b34fce017574a990bed14cee8f565597f4fbfb1f13",
+      "vendored_sha256": "92257c8d1c7a059fa02720b34fce017574a990bed14cee8f565597f4fbfb1f13"
+    },
+    {
+      "path": "notices/lindera-5.0.1/LICENSE",
+      "upstream_sha256": "d37249886de3136db31717f15f6ade215a36fbed1c782381e38b2bf6047e8ec4",
+      "vendored_sha256": "d37249886de3136db31717f15f6ade215a36fbed1c782381e38b2bf6047e8ec4"
+    },
+    {
+      "path": "notices/lindera-dictionary-5.3.0/LICENSE",
+      "upstream_sha256": "d37249886de3136db31717f15f6ade215a36fbed1c782381e38b2bf6047e8ec4",
+      "vendored_sha256": "d37249886de3136db31717f15f6ade215a36fbed1c782381e38b2bf6047e8ec4"
+    },
+    {
+      "path": "notices/ownedbytes-0.9.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/ownedbytes-0.9.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/r-efi-6.0.0/AUTHORS",
+      "upstream_sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+      "vendored_sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111"
+    },
+    {
+      "path": "notices/tantivy-bitpacker-0.10.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-bitpacker-0.10.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-columnar-0.7.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-columnar-0.7.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-common-0.11.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-common-0.11.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-query-grammar-0.26.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-query-grammar-0.26.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-sstable-0.7.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-sstable-0.7.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-stacker-0.7.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-stacker-0.7.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "notices/tantivy-tokenizer-api-0.7.0/AUTHORS",
+      "upstream_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d",
+      "vendored_sha256": "141e25490cf9e0d3a05374171cb0a42c91a0cf0fb2041ba4c010f466e89b596d"
+    },
+    {
+      "path": "notices/tantivy-tokenizer-api-0.7.0/LICENSE",
+      "upstream_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a",
+      "vendored_sha256": "acacd14bebbffdb30d62443c282fb4da3e81915a9f69c63d5d745a029f44de8a"
+    },
+    {
+      "path": "package.json",
+      "upstream_sha256": "a102ed61d73b5cdbff24d5ea88d09022f8722f7282447ed51d075b894ec75ed3",
+      "vendored_sha256": "a102ed61d73b5cdbff24d5ea88d09022f8722f7282447ed51d075b894ec75ed3"
+    },
+    {
+      "path": "src/digest_window.rs",
+      "upstream_sha256": "6722d9ec88a51acbc488de7f5771194e04d4290f3f984707d94446e8ca735d76",
+      "vendored_sha256": "f493427dc1f65240cfae8ff7c7735730b3202889c8340174e56df42f7b6511e4"
+    },
+    {
+      "path": "src/directory.rs",
+      "upstream_sha256": "29cadb3d79bd9f7e169c5e296a00772ad6547e1aa446e407e7f4d3b9830d9563",
+      "vendored_sha256": "29cadb3d79bd9f7e169c5e296a00772ad6547e1aa446e407e7f4d3b9830d9563"
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream_sha256": "c525feb0644dd781813ce14622a407c89835bd414262e35029180e2e5bf6c12a",
+      "vendored_sha256": "c525feb0644dd781813ce14622a407c89835bd414262e35029180e2e5bf6c12a"
+    },
+    {
+      "path": "src/main.rs",
+      "upstream_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892",
+      "vendored_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892"
+    },
+    {
+      "path": "src/model.rs",
+      "upstream_sha256": "fb61c9c00ccc1fdc4c4b6c782741d34c609a0bf3d455d46d88f3c6f3f7a3d9ea",
+      "vendored_sha256": "fb61c9c00ccc1fdc4c4b6c782741d34c609a0bf3d455d46d88f3c6f3f7a3d9ea"
+    },
+    {
+      "path": "src/query.rs",
+      "upstream_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c",
+      "vendored_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c"
+    },
+    {
+      "path": "src/store.rs",
+      "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
+      "vendored_sha256": "ae97069b44039bf7421546adce7ee5873e83e3cff351603c6450c27c569c766e"
+    },
+    {
+      "path": "src/tests.rs",
+      "upstream_sha256": "874aa9b42ad6b6d0fd6b4b733e9c2278dcf9cce8a717912fcb175e6e5ca1f88a",
+      "vendored_sha256": "874aa9b42ad6b6d0fd6b4b733e9c2278dcf9cce8a717912fcb175e6e5ca1f88a"
+    },
+    {
+      "path": "src/text.rs",
+      "upstream_sha256": "e3c705464091cc0caf030c48a54bbe7b8aa1e5f91de4dbc2c0c308ad2b5ee9e0",
+      "vendored_sha256": "e3c705464091cc0caf030c48a54bbe7b8aa1e5f91de4dbc2c0c308ad2b5ee9e0"
+    },
+    {
+      "path": "tests/faces.rs",
+      "upstream_sha256": "8162feebba22f033ece5ac8362bda5f5b55e4e686c4bf6766f7649758feaf112",
+      "vendored_sha256": "8162feebba22f033ece5ac8362bda5f5b55e4e686c4bf6766f7649758feaf112"
+    },
+    {
+      "path": "tests/image_notices_test.py",
+      "upstream_sha256": "d9599a39931613074de67ce96776f650d3f8dd07b8ce0ea8bf611d798e09ae35",
+      "vendored_sha256": "d9599a39931613074de67ce96776f650d3f8dd07b8ce0ea8bf611d798e09ae35"
+    },
+    {
+      "path": "tests/notices_test.py",
+      "upstream_sha256": "54984b5a8ab7a88dac6039ebfb7fde58599feca9c890ebb782c3cdd76229cf85",
+      "vendored_sha256": "54984b5a8ab7a88dac6039ebfb7fde58599feca9c890ebb782c3cdd76229cf85"
+    },
+    {
+      "path": "vendor/IPADIC-COPYING",
+      "upstream_sha256": "fca02d9adb601d101eccdf3131119abfff2d9c825ef5c759d7a89ebbaa972099",
+      "vendored_sha256": "fca02d9adb601d101eccdf3131119abfff2d9c825ef5c759d7a89ebbaa972099"
+    },
+    {
+      "path": "vendor/README.md",
+      "upstream_sha256": "247833aa8a4ca62cff2fe28fc31085b599c47f55297c4c7719569f0b1c9df7a9",
+      "vendored_sha256": "247833aa8a4ca62cff2fe28fc31085b599c47f55297c4c7719569f0b1c9df7a9"
+    },
+    {
+      "path": "vendor/mecab-ipadic-2.7.0-20250920.tar.gz",
+      "upstream_sha256": "a7ba9f645ffe7094e56ae1c4a81d100df8fbb1e28bbe1792622e9728e162db3d",
+      "vendored_sha256": "a7ba9f645ffe7094e56ae1c4a81d100df8fbb1e28bbe1792622e9728e162db3d"
+    },
+    {
+      "path": "verify-image-notices.py",
+      "upstream_sha256": "293e9109410598a0eb952e39a63c6ccb31f870b631040d441854ba176826df60",
+      "vendored_sha256": "293e9109410598a0eb952e39a63c6ccb31f870b631040d441854ba176826df60"
+    }
+  ]
+}
