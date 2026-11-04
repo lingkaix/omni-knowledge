@@ -4,6 +4,9 @@ The desktop interface uses GPUI 0.2.2 for native controls and Metal rendering.
 GPUI Kit 0.5.1 provides controls, native text inputs, menus, and the virtualized tree on the same GPUI version.
 It embeds a WKWebView through Wry 0.57.0 for document previews.
 The shared Rust library owns initialization, indexing, import, metadata, and retrieval behavior.
+The 2026-11-04 headless-first amendment defers full-version GUI feature work.
+This guide documents the retained application, which keeps building and adapts only where a service DTO change requires compatibility.
+See [the headless-first amendment record](changes/2026-11-04-headless-delivery.md) for the current delivery priority.
 
 ## Run
 
