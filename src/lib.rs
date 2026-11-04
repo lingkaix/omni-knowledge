@@ -297,6 +297,22 @@ pub struct SearchHit {
     pub tags: Vec<String>,
 }
 
+/// Owns the cooperative writer lock for exactly one library operation.
+/// Explicit unlock prevents unrelated fork-before-exec children from extending its lifetime.
+struct WriterGuard {
+    /// Locked open file description; no child process is an intended owner.
+    file: File,
+}
+
+impl Drop for WriterGuard {
+    /// Releases operation ownership before closing a possibly inherited file description.
+    fn drop(&mut self) {
+        // Closing alone retains flock ownership while an unrelated child still has a copy.
+        // A close remains the fallback if the OS rejects explicit unlock.
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 /// Open library handle; source reads and writes remain beneath its root.
 #[derive(Clone, Debug)]
 pub struct KnowledgeBase {
@@ -812,7 +828,7 @@ impl KnowledgeBase {
     }
 
     /// Acquires the sole mutation lock and recreates missing managed directories after restoration.
-    fn writer_lock(&self) -> Result<File> {
+    fn writer_lock(&self) -> Result<WriterGuard> {
         for path in [".omni", ".omni/metadata", ".omni/indexes"] {
             storage::check_components(&self.root, Path::new(path), false)?;
             fs::create_dir_all(self.root.join(path))?;
@@ -826,6 +842,7 @@ impl KnowledgeBase {
             .open(self.root.join(".omni/write.lock"))?;
         file.try_lock_exclusive()
             .context("another library writer is active; retry after it finishes")?;
+        let writer = WriterGuard { file };
         storage::check_components(&self.root, Path::new(".omni/read.lock"), false)?;
         OpenOptions::new()
             .create(true)
@@ -833,7 +850,7 @@ impl KnowledgeBase {
             .read(true)
             .write(true)
             .open(self.root.join(".omni/read.lock"))?;
-        Ok(file)
+        Ok(writer)
     }
 
     /// Returns the authored sidecar location for an already validated canonical root-relative source identity.
