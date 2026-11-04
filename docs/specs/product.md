@@ -78,7 +78,8 @@ Save editable metadata through the service without starting a synchronous index 
 Report pending retrieval reconciliation separately from the saved authored values.
 Present file details with labelled type, readable size, local creation and modification dates, and explicit path-copy actions.
 Show an unavailable date honestly instead of substituting another timestamp.
-Label editable tags and notes separately from source properties and explain that they are saved with the knowledge library without changing the source.
+Label editable tags and notes separately from source properties.
+Explain that asset annotations are saved with the library without changing original asset bytes; authored page annotations belong to that page's frontmatter.
 Identify the saved record's location, make it inspectable, and reload the saved values when the file is selected again.
 Explain when reconciliation makes saved tags and notes available to search, and retain an explicit refresh action.
 Automatic bounded tracking supplements explicit refresh; it must not imply that every expensive media job starts immediately.
@@ -149,7 +150,7 @@ These accepted requirements do not claim that the legacy implementation already 
 | Exposure | Selected libraries and exclusions checked before delivery and writes; MCP read-only by default; owner-only administration, sensitive-library restrictions, no model root widening, and no account/OAuth stack. |
 | Desktop | Preserve the detailed workspace, preview, file action, guide, environment, input, and accessibility behavior above; all data operations use the same service as CLI/MCP. |
 
-Storage, history, processing, retrieval, and package specifications refine these responsibilities without reducing their scope.
+[Storage](storage.md), [history](history.md), [processing](processing.md), [retrieval](search.md), and [package](package.md) specifications refine these responsibilities without reducing their scope.
 S3 and cloud delta APIs are later adapter extensions, not required implementations in this delivery.
 OCR, scene-change segmentation, and native Lance FTS replacement remain optional experiments.
 The time-boxed LanceDB vector experiment is inside retrieval work and never blocks feature completeness; retain exact vectors if it loses.

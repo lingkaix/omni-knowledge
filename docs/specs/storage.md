@@ -1,89 +1,213 @@
 # Library Storage And Recovery
 
-Status: Implemented v1 specification under the accepted [product requirements](product.md).
-This document owns the v1 representation and lifecycle; [the first storage decision](../decisions/001-files-and-derived-indexes.md) records its rationale.
+Status: Accepted full-version contract, 2026-11-04; implementation status is separate.
+This document owns mutable layout, mount/asset identity, observations, tracking, safe writes, and external cache lifecycle.
+[Product](product.md) owns scope; [service](service.md) owns wire DTOs and exposure.
+[History](history.md) owns text Git and remote effects; [packages](package.md) owns frozen interchange.
+This replaces the legacy version-1 required-marker, hidden-sidecar, in-home-index, manual-only tracking contract.
 
-## Authority
+## Visible Authority And Layout
 
-`omni-knowledge.json` declares a root, display name, schema version, stable library identity, and optional local embedding and speech settings.
-The only supported configuration version is `1`; unknown versions fail explicitly.
-Original regular files remain the content authority.
-Every child marker entry is an ownership boundary, including malformed files and dangling links; repair the child before opening it.
-Captured desktop jobs require the exact opened root and fail if its marker disappears instead of redirecting to an ancestor.
-Editable `.omni/metadata/<SHA256(relative-path)>.json` records exact tags and a description for a root-relative path.
-The metadata schema contains `version`, `path`, `tags`, and `description`; source hashes do not silently merge file identities.
-Front matter and sidecar tags combine without case folding; every required query tag must be present.
-A metadata sidecar with a different path or unsupported version stops indexing instead of being ignored.
-An external rename changes path identity; external rename tracking is not implemented.
-An explicit desktop transfer copies editable tags and description to the new path and retains the old sidecar for recovery.
-File and authored-sidecar collisions never overwrite an existing destination.
-Transfers stage a destination sidecar before a no-clobber file operation; a failed file operation removes only its own unchanged staged sidecar.
-An interrupted transfer can leave a reserved sidecar; a retry reports the collision for inspection rather than guessing recovery.
+Original files, authored text, manifest data, annotations, and corrected transcripts are authoritative.
+Derived extraction, generated ASR, embeddings, previews, and indexes are rebuildable and never own annotations.
+Opening an ordinary unmarked folder is permitted without creating files; persistence actions create the manifest with normal defaults.
+A read-only folder can be a reference mount under a different writable home.
+No account, OpenKit scope/schema/Policy, or hand-written configuration is required.
 
-The concept layer uses the core Open Knowledge Format 0.2 conventions.
-Original raw documents can have arbitrary formats and need not be OKF concepts.
-Initialization preserves the two requested original source snapshots and their provenance separately from synthesized reference pages.
+```text
+home/
+  omni-knowledge.json
+  pages/                    # or the selected existing wiki/, never two authored trees
+    index.md
+    log.md                  # authored knowledge log, not runtime progress
+  sources/<source-id>.md
+  AGENTS.md
+  schema.yaml
+  journal/<writer-id>.jsonl
+```
 
-## Mutations
+New libraries choose `pages/`; an existing `wiki/` can remain the mapped text root.
+Unknown files remain visible; ambiguous roots or colliding destinations require a user choice.
+Root `AGENTS.md` and `schema.yaml` are inert editing/content conventions, not executable instructions or service grants.
+Keep foundational original snapshots, reference concepts, and provenance without claiming third-party content is relicensed.
+`raw/<mount-name>/<relative-path>` is a logical address, not a required physical raw tree or symlink forest.
+An optional app-managed source directory may be `raw/managed/`; external mount directory structure stays unchanged.
+Attaching even a multi-TB mount never implies copying, flattening, or symlinking its originals into the home.
+A readable mount name is unique within the library; renaming it records an alias map and does not change source IDs.
+Home-relative files, including legacy raw assets, use a null mount ID and retain their home-relative logical path.
+Mounted originals use their stable non-null mount ID and logical `raw/<mount-name>/<relative-path>` address.
 
-Initialization checks all template destinations before writes, refuses collisions, and writes the root marker last.
-A filesystem failure during initialization can leave unmarked partial template files; inspect them before retrying.
-Import copies a regular source to `raw/` through an atomic no-clobber temporary file.
-The reserved marker basename is assigned the destination `omni-knowledge.asset.json`.
-Import never deletes the source or replaces an existing destination.
-A parent cannot import into a `raw/` directory owned by a nested root.
-Metadata replacement uses an atomic JSON write in the same directory.
-Desktop metadata saving changes only the authored sidecar; the user explicitly refreshes the index to update retrieval.
-The selected-file inspector reads live attributes and authored metadata without loading a snapshot or hashing source contents.
-An explicit confirmed desktop action can move an owned regular source to macOS Trash.
-This action rejects markers, internal state, symlinks, and child-owned sources and preserves authored metadata for recovery.
-It does not permanently delete the source or automatically publish a new index; the status check reports the removal until reconciliation.
+The mutable manifest has `version: 2`, `library_id`, `name`, `text_root`, `mounts`, `exposure`, and `convention_version`.
+`text_root` is `pages` or `wiki`; library/source/mount IDs are stable data identities, not permissions.
+Each mount declaration contains `mount_id`, `name`, `backend`, `location`, and the intended read/write and reconciliation settings.
+Manifest exposure describes intended mode, sensitivity, exclusions, and allowed transports; local service approval remains the upper bound.
+Provider settings, model weights, credentials, tokens, signing keys, backend authorization, and OpenKit owner scopes do not belong in this data manifest.
+Unknown optional authored extension fields survive round trips; unknown required versions/semantics refuse mutation.
+A moved library retains its ID and can reuse compatible external cache facts after explicit root validation; identical names never prove identity.
+A copied library with the same lineage cannot bypass local root selection or exposure approval.
 
-A process holds an exclusive `.omni/write.lock` for indexing and metadata mutations.
-A second writer fails with a retry message instead of writing concurrently.
-External agents should finish their file edits before requesting reconciliation.
-The indexer cannot promise an atomic snapshot of files modified outside this cooperative writer boundary.
+## Pages And Source Pointers
 
-## Index Publication
+Pages use core Open Knowledge Format 0.2 conventions without governed host requirements.
+Page frontmatter owns page annotations; `sources/<source-id>.md` owns asset annotations and its Markdown body is the authored summary.
+The source ID comes from the pointer filename, not a content hash.
+Pointer frontmatter contains `mount_id`, `path`, `digest_state`, `digest`, `size_bytes`, `media_type`, `file_id`, `availability`, `title`, `description`, and `tags`.
+It may preserve optional origin/capture facts and authored extensions when known, but never fabricates them.
+A verified `digest` is lowercase SHA-256; an unverified pointer uses `digest_state: unverified` and `digest: null`.
+Digest-required operations hash first or return missing coverage; neither size nor a placeholder supplies a digest.
+Backend-qualified file ID evidence may be null and is never content version identity.
+Raw frontmatter and authored extension fields survive annotation updates; rewrite only the requested recognized fields.
+Preserve exact tag spelling; retrieval can compare whole tags case-insensitively without changing the authored values.
+Legacy frontmatter and sidecar tags preserve their effective union and all descriptions during migration.
+Cheap discovery does not require a pointer file for every unannotated NAS object.
+Durable annotations create/update a pointer; journal/inventory mappings support unannotated discovery without a second authored annotation registry.
+Deleted/unavailable assets retain their pointers and annotations as tombstones, not garbage-collectable cache.
+User-supplied or corrected timed transcripts are visible authored companion files with their own digest and recording link.
+Generated ASR remains derived cache data until the user explicitly adopts/corrects it.
 
-Each derived generation contains a JSON manifest, a Tantivy index, and a generated-path ownership inventory.
-The manifest records its root, file evidence, extraction status, warnings, timed transcripts, vectors, and model identity.
-New roots have a stable `library_id`; their manifests use that identity so the whole folder and its index can move together.
-Opening and checking a legacy root do not change its configuration.
-A legacy root obtains its identity during an explicit index build; until that upgrade its existing index remains bound to its original path.
-A distinct initialized root cannot use another root's index merely because their display names match.
-Hash changes invalidate content reuse; transcript and ASR identities also invalidate media reuse.
-Build a complete generation before atomically replacing `.omni/current.json`.
-A provider preflight, response identity, transport, or invalid-vector failure aborts publication and preserves the prior pointer.
-Optional local parsing or media preparation failures are reported as missing coverage while filenames and metadata remain searchable.
-Lexical reconciliation drops stale vectors for changed sources until a requested embedding build refreshes them.
+## Mount Backend And Identity
 
-Readers hold a shared `.omni/read.lock` through one search.
-Process-local search caches may retain validated immutable data, but each query must recheck its current owner and generation under a fresh reader lease.
-Changed manifest identity or configuration must prevent reuse of incompatible cached state.
-An idle cache must not prevent publication or retirement.
-Publication takes this gate exclusively for the pointer switch and retirement, after the expensive build completes.
-Retain the newly published generation and the actual previous pointer target.
-Retire only recognized older generated state inside the selected root, using its complete file and directory inventory.
-Older generations without an inventory remain retained with a warning.
-Unexpected data or symlinks in old state are preserved with a cleanup warning.
-This protocol covers cooperating processes and atomic local filesystem operations; it does not claim resilience to storage loss or arbitrary concurrent filesystem replacement.
+One `MountBackend` boundary exposes `capabilities`, bounded `list(cursor,budget)`, `stat`, `open_range(expected_version,range)`, and optional `watch`/conditional writes.
+These are backend operations, not a provider plugin registry.
+Return typed `available`, `offline`, `denied`, `placeholder`, `unknown`, `changed`, `unsupported`, or `deleted` observations.
+Offline/denied/incomplete enumeration must not become a successful empty directory.
+A cursor is backend observation state, not durable source identity or access permission.
 
-## Recovery
+| Backend | Required capability and limitation |
+| --- | --- |
+| Local directory | Confined regular-file list/stat/range reads, stable file IDs when available, safe create/rename primitives, FSEvents on macOS and inotify on Linux. |
+| NAS/SMB/NFS | Use an existing user-selected OS mount; bounded list/stat/range reads and qualified stable server IDs where reliable. Watch reliability defaults false and writes default off. No share authentication or OS mounting. |
+| Cloud-synced folder | OS-folder reads plus tested provider residency/conflict-copy metadata. Events are hints; placeholders and unknown cloud residency are metadata-only without selected-file read/hydration authorization. No mandatory cloud account/API. |
+| Git remote | Explicit system-Git clone/sync into a visible local working copy, then ordinary local content access. The history owner governs network consent and Git state. |
+| S3 | Reserved later capability variation only; no S3 implementation, delta API, or storage-plugin registry in this delivery. |
 
-Back up originals, authored wiki pages, the root configuration, and `.omni/metadata/`.
-Derived indexes and temporary clips can be rebuilt.
-Run `omni index` to reconcile additions, modifications, and deletions.
-Use `--embeddings` with the compatible local service to rebuild vectors.
-A corrupt or foreign manifest is never used for search; an explicit index build can replace invalid derived state while preserving source metadata.
-Inspect retained cleanup warnings rather than deleting unknown data automatically.
-Nested libraries must be independently indexed; recursive search reports each source root.
+Never follow an undeclared escaping symlink or admit special files as source bytes.
+Non-UTF-8 filenames fail explicitly; regular unknown binary formats remain metadata-searchable.
+Recognized or explicitly selected child libraries are boundaries; arbitrary unmarked subfolders remain ordinary folders.
+A malformed recognized marker still requires repair/explicit resolution rather than silent parent ownership.
+Parent operations exclude child-owned paths; recursive search returns distinct labelled libraries.
+Captured work binds the opened root and library identity; root replacement/removal must not redirect work to an ancestor.
 
-## Background Status
+Content digest identifies a byte version; source ID identifies an asset; file ID is move/rename evidence.
+Qualify file IDs with mount/backend and available volume, generation, or birth-time facts to guard against inode reuse.
+Within a backend, reliable continuity plus current observations preserves annotations through moves/renames.
+Across mounts, preserve source identity only for an explicit transfer or confirmed association.
+Equal digests prove equal bytes, not that two duplicate files are the same asset.
+If IDs are unstable/unavailable, retain distinct paths and offer association; never infer a rename from names alone.
+Stat snapshots retain size, high-resolution modification/change times, file-ID evidence, provider version, and residency facts.
+A same-name new file must not revive a deleted asset's annotations without identity evidence.
 
-The desktop compares owned source paths, sizes, and modification times with a lightweight published-manifest projection.
-It checks editable-metadata and configuration timestamps and the presence of lexical index metadata and referenced segment files.
-This observation does not verify every source hash or every index byte.
-An equal-size edit with its original timestamp restored needs explicit indexing for hash reconciliation.
-An incomplete or bounded scan never reports unchanged source metadata as a completed result.
-Status checks do not initialize folders, publish indexes, install tools, or start services.
+## Observation Journal And Rebuildable State
+
+Append one visible JSONL stream per writer at `journal/<writer-id>.jsonl`.
+Every record contains `writer_id`, `sequence`, `observation_id`, `operation_id` when applicable, `source_id`, old/new digest and path, `availability`, `evidence_kind`, and `observed_at`.
+Digest fields are null for unverified observations; a digest timeline is not retention of historical media bytes.
+Operation records also bind intent/affected digests and final outcome/commit where applicable.
+Use writer-local monotonic sequence numbers; there is no global ordering, causal clock, consensus, or vector-clock protocol.
+Per-writer streams avoid concurrent append races in synced folders.
+A truncated final record is recoverable, but retain/report malformed bytes and never silently discard observations.
+Do not journal source bodies, query text, raw tool arguments, private keys, or credentials.
+Journal append traffic is not an automatic text-commit trigger.
+SQLite projections of inventory, event cursors, jobs, and lookup are rebuildable from visible files/journal plus scans.
+They are not a hidden annotation authority, and cache eviction cannot delete visible journal history.
+
+## Four Tracking Layers
+
+All four layers are required together.
+
+| Layer | Required behavior |
+| --- | --- |
+| Verify on read | Before delivering hits or bytes, check current mount availability and source stat/version. Rehash changed/uncertain candidates, withhold stale hits, and recheck after reads for detected concurrent drift. Cached vectors do not make changed originals current. |
+| Reliable events | Debounce FSEvents/inotify hints, wait for a quiet period and stable before/after observations, then process. Start/resume catches up or scans when continuity is lost. |
+| Reconciliation | Stat-first bounded enumeration and known-descendant inspection; hash new/changed/uncertain candidates or explicit verification requests. Local startup/periodic catch-up; NAS defaults nightly/manual with visible schedule and last-complete time. |
+| Cost tiers | Eager metadata, prioritized text extraction, lazy/budgeted idle-time or selected media/ASR/embedding work; pinned/project-priority sources first. Show pending, unsupported, failed, and partial work independently of matches. |
+
+FSEvents persists event IDs with volume/root identity only after the corresponding inventory transaction is durable.
+Dropped/coalesced/must-scan/root-change events require affected-tree reconciliation; changed volumes invalidate old cursors.
+Inotify has no durable replay; startup, overflow, and watch-limit exhaustion require reconciliation even after a previously healthy watch.
+Directory mtime is not proof that descendant content is unchanged.
+Prune a subtree only with trustworthy event/delta continuity; otherwise inspect known descendant metadata and perform bounded enumeration.
+Coarse timestamps, unreliable IDs, and forced verification enter the hash-candidate set.
+Offer full hash verification because restored-stat unobserved edits can defeat cheap freshness checks.
+Do not claim stat-only detection of a stat-preserved edit.
+
+Only a complete successful relevant enumeration establishes absence and emits deletion tombstones.
+An incomplete, denied, offline, or cancelled scan cannot infer deletion.
+Reconnect reconciles tombstones with current identity, not just path names.
+Growing files and renamed temporary files remain `writing` until quiet/stable; retry a new version instead of indexing half a file.
+Cloud conflict copies are separate assets with an explicit conflict relation; do not auto-merge/delete them or transplant annotations.
+Never sniff, hash, or open a cloud-only placeholder merely to identify its type or complete a scan.
+Use tested public residency APIs where available; unknown residency on cloud mounts remains metadata-only until explicit authorization.
+Selected download/available-offline actions are permitted; recursive mass hydration is never the default.
+
+## Bounded Jobs And Cache
+
+Use one small bounded queue with per-mount concurrency, cancellation, priority, and resource reservations.
+A job key binds source digest, recipe, and input dependencies; duplicate delivery is idempotent and newer versions supersede obsolete work.
+Use finite classified retries/backoff; offline waits for reconnect, invalid models need intervention, and capacity failures must not spin.
+Publish only complete derived generations; interruption preserves the previous generation and truthful coverage.
+Interactive exact/regex scans use admitted text/representations, not BM25 candidates, and never synchronously extract a whole NAS.
+
+Resolve an app-owned OS cache root outside every home, mount, cloud-sync folder, and external history store.
+If the OS cache root is synced/network-hosted, require an explicit local alternative.
+Revalidate overlap when mounts/locations change, rather than trusting only initial configuration.
+All extracted text, generated transcripts, clips/keyframes, embeddings, thumbnails/previews, indexes, and private processor temporary output stay there.
+Use per-library namespaces, restrictive OS permissions, and visible bounded disk/RAM settings and usage.
+Sensitive libraries never share cache namespaces with exposed libraries.
+Cache keys are `(content_digest, effective_processor_identity)` with hashed fan-out paths and atomic complete-object installation.
+Processor identity includes code/version/options/model/package/space/dimensions/preprocessing and input dependencies.
+Corrected transcript digests and embedding-relevant annotations invalidate dependent objects.
+A caller accesses an object through its current admitted library/source mapping, never a naked cache hash.
+Readers/jobs pin objects; garbage collection deletes only unpinned recognized derived objects and updates coverage after eviction.
+Unknown files or symlinks in retired generations remain with cleanup warnings; never broaden cleanup to authored data.
+An exhausted budget stops dependent work without deleting originals, annotations, history, or pinned data.
+The actual previous complete generation survives failed publication; retirement must respect every active reader pin.
+
+## Safe Writes And Recovery
+
+`apply_text_change(expected,candidate,operation_id)` returns saved, conflict, or indeterminate domain outcomes, mapped by service DTOs.
+Expected state includes verified digest and stat/file identity, not mtime alone; compare current bytes before changing existing files.
+Serialize omni writers for one home; acquire a fresh admitted owner/generation context for each operation.
+Create new files exclusively with no-clobber; import copies and never deletes its source.
+Preserve reserved marker-name handling, child ownership, and destination annotation collisions during explicit transfers.
+An explicit transfer preserves annotations; failure removes only its own provably unchanged staged data.
+Interrupted staged reservations are inspectable recovery conflicts, never permission to guess and overwrite.
+A selected-file inspector reads live properties and authored annotations without loading a full index or hashing source content.
+Metadata saving does not synchronously build an index; it reports saved values and pending reconciliation separately.
+
+A cooperative lock plus stat plus unconditional rename is not compare-and-swap against unrelated editors.
+Use real conditional-write support where available.
+On local filesystems, preserve the displaced target through a no-clobber same-filesystem recovery step before exclusive candidate installation.
+Validate the displaced version and final outcome; retain both versions if the displaced bytes differ or another writer creates the destination.
+Never overwrite a competitor to simulate rollback, and never retire recovery copies while an external writer may still change them.
+For insufficient backend primitives, create an inspectable proposal/conflict file and refuse in-place replacement.
+Raw originals are read-only by default.
+Unresolved recovery files are visible conflict material, not hidden authored cache.
+Record intent and affected digests before multi-file effects; do not claim atomic visibility across files, Git refs, cloud upload, or NAS.
+After interruption, inspect actual files, journal, and refs; complete the same operation only when provable, otherwise expose recovery.
+Do not blindly replay uncertain writes or create duplicate commits.
+
+Confirmed macOS Trash is not permanent deletion.
+It rejects manifests, internal state, symlinks, and child-owned sources, preserves annotations, and reports pending reconciliation.
+Library detach removes only the declaration, never the attached originals.
+
+## Legacy Migration And Acceptance
+
+Version 1 remains readable for inventory/preview, not as a reason to dual-write hidden sidecars indefinitely.
+Inventory every `.omni/metadata/` record, including deleted/renamed-source annotations and malformed/conflicting records.
+Map asset metadata into visible pointers and page annotations; preserve orphan records as unavailable pointers.
+Map existing authored roots explicitly; new libraries use pages, but existing wiki need not be duplicated or silently renamed.
+Legacy root navigation/log and wiki reference concepts retain their content through a full user-visible destination map.
+Check every destination and parsed reference mapping before installation; collisions/ambiguous roots require choices.
+Rewrite only parsed link destinations and recognized reference fields; preserve prose, code, line endings, raw frontmatter, and original bytes.
+The GUI/CLI exposes migration preview, conflicts, progress, and recovery results.
+Install the incompatible version-2 manifest only after no-clobber validation; old clients must reject it.
+Keep old authored files/sidecars until verification succeeds; separate them from disposable `.omni/` indexes instead of deleting that directory wholesale.
+Move legacy provider/tool settings into explicit local settings without treating them as portable permission or losing user choices.
+Do not silently run imported hooks, activate mounts, or fetch remote/provider content during migration.
+
+Primary acceptance uses public operations with real disposable files and observable outcomes.
+Prove offline is not deletion, rename differs from duplicate content, placeholders remain unopened, and external writer races retain both versions.
+Prove cache/history never overlap sync roots, inotify overflow/startup scans reconcile, budget/cancelled work does not publish half a generation, and restart preserves operation identity.
+Mac FSEvents, actual cloud residency, and NAS continuity require their own platform observations under product qualification.
+No storage-format or documentation gate alone proves those runtime effects.

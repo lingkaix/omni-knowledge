@@ -3,7 +3,7 @@
 Status: Accepted full-version boundary, 2026-11-04; not an implementation report.
 This document owns the version-1 JSON DTOs, operations, transport behavior, exposure, and human-confirmation boundary.
 [Product](product.md) owns scope and platform qualification.
-Domain owners govern storage, search, history, processing, and packages; no transport can relax their safety rules.
+[Storage](storage.md), [search](search.md), [history](history.md), [processing](processing.md), and [packages](package.md) govern domain lifecycle; no transport can relax their safety rules.
 The declarative types below are the admitted public schema, not candidate implementation pseudocode.
 Rust mirrors use the stated PascalCase type names and snake_case serialized names.
 
@@ -18,13 +18,16 @@ IDs are opaque nonempty strings, not authority, paths, hashes, or caller-selecte
 `Digest` is lowercase hexadecimal SHA-256, exactly 64 characters.
 `U64` is a canonical unsigned decimal string, including `"0"`, with no leading zeroes, bounded by 18446744073709551615.
 This avoids JSON integer loss for large offsets, lengths, and sequence values.
-Other integers are JSON safe integers; timestamps are UTC RFC 3339 strings and never ordering authority.
+Other integers are JSON safe integers; counts, offsets, ranks, and limits cannot be negative.
+Timestamps are UTC RFC 3339 strings and never ordering authority.
 `RelativePath` uses normalized `/` separators with no absolute root, empty segment, dot segment, NUL, or traversal.
+`RootRelativePath` is either a `RelativePath` or the empty string, which denotes the selected library/mount root for browsing only.
 Paths identify data only inside an already admitted library/mount; a request cannot introduce a new root through a path field.
 Non-UTF-8 filenames return `unsupported` with explicit coverage, not lossy aliases.
 Strings, arrays, query results, byte ranges, and frames are bounded; exceeding a limit returns `budget_exhausted`, not truncation disguised as completion.
 A control frame is at most 1 MiB; `read_range` returns at most 512 KiB of bytes per call, base64 encoded.
 Larger bodies use repeated bounded ranges or admitted local handles inside the service, never an unbounded media JSON frame.
+Control-frame limits also bound text edits/import control data; oversized inline edits fail explicitly and are never silently truncated.
 
 ```typescript
 type Id = string;
@@ -32,6 +35,7 @@ type Digest = string;
 type U64 = string;
 type Time = string;
 type RelativePath = string;
+type RootRelativePath = string;
 type Availability = "available" | "offline" | "denied" | "placeholder" | "unknown" | "changed" | "unsupported" | "deleted";
 type Request = { wire_version: 1; request_id: Id; command: Command };
 type Response = { wire_version: 1; request_id: Id; result: Result };
@@ -60,11 +64,13 @@ type Exposure = {
   mode: "off" | "read_only" | "read_write"; sensitive: boolean; excluded_paths: RelativePath[];
   transports: ("owner_ipc" | "owner_stdio" | "http")[]; revision: Id; pending_expansion: boolean;
 };
+type SyncSchedule = { enabled: boolean; interval_minutes: number; allow_push: boolean; next_run_at: Time | null };
 type Library = {
   library_id: Id; name: string; home_path: string; text_root: "pages" | "wiki";
   manifest_version: number | null; state: "unmarked" | "ready" | "migration_required" | "recovery_required" | "frozen";
   history_mode: "signed" | "unsigned_explicit" | "not_initialized";
-  exposure: Exposure; mounts: Mount[];
+  exposure: Exposure; mounts: Mount[]; sync_schedule: SyncSchedule;
+  remote_url: string | null; remote_access: "none" | "read_only" | "read_write";
 };
 type Mount = {
   mount_id: Id; name: string; backend: "local" | "nas" | "cloud_folder" | "git";
@@ -86,6 +92,10 @@ Line, page, and slide numbers are 1-based and inclusive; byte ranges are zero-ba
 Time ranges are milliseconds in the original recording, never a reset clip clock.
 Zero-to-zero imported transcript timing means no known interval, not proof that speech occurs at zero.
 `modified_ns` and `changed_ns` are canonical signed decimal timestamps when available; file IDs are backend-qualified evidence.
+A null `mount_id` selects home-relative files/root; non-null IDs select an admitted mount and its own relative paths.
+`Source.logical_path` is the home-relative path or `raw/<mount-name>/<relative-path>` for a mounted original, never a filesystem permission.
+Opening an unmarked folder assigns an in-memory library handle/ID without writing a manifest; the first persistence operation retains that chosen data ID.
+It is not a portable saved identity until persisted, and a later reopen without saved data may assign another ID.
 An unverified source has `digest: null` and `version: null`; it cannot satisfy a digest-required mutation or match claim.
 An observed stat snapshot is not a substitute for a verified digest.
 `Coverage` counters describe admitted, currently visible sources; excluded content contributes no names, counts, or snippets to an unprivileged caller.
@@ -141,7 +151,7 @@ Cheap unverified filename/tag discovery is labelled `metadata_observation`, neve
 
 ```typescript
 type Job = {
-  job_id: Id; operation_id: Id; library_id: Id; kind: "reconcile" | "process" | "snapshot" | "restore" | "migrate";
+  job_id: Id; operation_id: Id; library_id: Id; kind: "reconcile" | "process" | "hydrate" | "epub_export" | "snapshot" | "restore" | "migrate";
   state: "queued" | "running" | "waiting_offline" | "completed" | "partial" | "failed" | "cancelled" | "superseded";
   priority: "normal" | "pinned"; coverage: Coverage; error: ServiceError | null;
 };
@@ -158,6 +168,7 @@ type Proposal = {
 type HistoryEntry = {
   commit_id: string; parent_ids: string[]; operation_id: Id | null; observed_at: Time;
   origin: "human" | "agent" | "external_unknown" | "remote"; author: string; committer: string;
+  agent: string | null; tool: string | null; session_id: Id | null;
   signature: "valid_known" | "valid_unknown" | "invalid" | "unsigned";
   affected_paths: RelativePath[];
 };
@@ -170,9 +181,10 @@ type PackageSelection = {
   originals: "references" | "selected_bytes"; include_indexes: boolean; include_history: boolean;
   include_journal: boolean; require_complete: boolean;
 };
+type EpubSelection = { page_paths: RelativePath[]; media_source_ids: Id[] };
 type PackagePlan = {
-  plan_id: Id; library_id: Id; format: "native_zip" | "openkit_v1"; action: "export" | "restore";
-  selection: PackageSelection; estimated_bytes: U64;
+  plan_id: Id; library_id: Id; format: "native_zip" | "openkit_v1" | "epub"; action: "export" | "restore";
+  selection: PackageSelection | EpubSelection; estimated_bytes: U64;
   external_reference_count: U64; uncovered_count: U64; coverage: Coverage;
   destination: string | null; conflicts: RelativePath[]; warnings: string[];
 };
@@ -197,6 +209,9 @@ type Status = {
 };
 ```
 
+`browse` and `history_list` limits are 1 through 1,000; range/diff lengths are 1 through 524,288 bytes.
+`read_representation.max_lines` is 1 through 20,000 and output is additionally bounded by the control-frame limit.
+Invalid bounds fail before work; output truncation must include truthful continuation rather than imply full enumeration.
 `operation_id` is required for effectful commands and is scoped to the library, or service for creation.
 Reusing it with the same normalized command returns the existing outcome/job; different arguments return `operation_mismatch`.
 A disconnected or timed-out client must inspect `operation_status` before retrying an uncertain effect.
@@ -227,11 +242,12 @@ type Command =
   | { op: "library_list" }
   | { op: "library_open"; path: string }
   | { op: "library_create"; path: string; name: string; history_mode: "signed" | "unsigned_explicit"; operation_id: Id }
+  | { op: "library_clone"; remote_url: string; destination: string; name: string; history_mode: "signed" | "unsigned_explicit"; operation_id: Id }
   | { op: "library_status"; library_id: Id }
-  | { op: "mount_attach"; library_id: Id; name: string; backend: "local" | "nas" | "cloud_folder" | "git"; location: string; operation_id: Id }
+  | { op: "mount_attach"; library_id: Id; name: string; backend: "local" | "nas" | "cloud_folder" | "git"; location: string; destination: string | null; operation_id: Id }
   | { op: "mount_detach"; library_id: Id; mount_id: Id; operation_id: Id }
   | { op: "mount_list"; library_id: Id }
-  | { op: "browse"; library_id: Id; mount_id: Id | null; path: RelativePath; cursor: string | null; limit: number }
+  | { op: "browse"; library_id: Id; mount_id: Id | null; path: RootRelativePath; cursor: string | null; limit: number }
   | { op: "source_details"; source: SourceRef }
   | { op: "read_range"; source: SourceRef; expected: ExpectedVersion; offset: U64; length: number }
   | { op: "read_representation"; source: SourceRef; representation_digest: Digest; start_line: number; max_lines: number }
@@ -255,6 +271,8 @@ type Command =
   | { op: "confirm_merge"; library_id: Id; proposal_id: Id; base_commit_id: string; diff_digest: Digest; operation_id: Id }
   | { op: "sync"; library_id: Id; action: "fetch" | "integrate" | "push"; operation_id: Id }
   | { op: "sync_schedule"; library_id: Id; enabled: boolean; interval_minutes: number; allow_push: boolean; operation_id: Id }
+  | { op: "epub_plan"; library_id: Id; page_paths: RelativePath[]; media_source_ids: Id[]; destination: string; budget: Budget }
+  | { op: "epub_export"; library_id: Id; plan_id: Id; operation_id: Id }
   | { op: "snapshot_plan"; library_id: Id; selection: PackageSelection; destination: string }
   | { op: "snapshot_create"; library_id: Id; plan_id: Id; operation_id: Id }
   | { op: "package_inspect"; path: string; verification: "manifest" | "all_entries" }
@@ -275,7 +293,22 @@ An `expected: null` text edit means exclusive new-file creation, not blind repla
 `transfer` preserves annotations and rejects destination collisions; a cross-mount move is an explicit operation, not digest-based identity guessing.
 Empty source selections never mean recursive hydration or whole-corpus copying.
 `refresh` with no mounts selects currently admitted library mounts, not newly discovered roots.
+`library_clone` establishes the library's credential-free `remote_url`, actual read/write capability, and external Git directory.
+For `mount_attach` with backend `git`, `location` is the credential-free remote URL and `destination` is the user-selected local working-copy path.
+For other backends, `location` is the selected OS-folder path and `destination` is null.
+Successful mount DTOs report the local working-copy location, not a URL masquerading as a filesystem root.
+`sync` and `sync_schedule` operate on the library's selected text-history remote; unsupported/no remote is an explicit refusal.
+`sync_schedule` returns the updated `Library.sync_schedule`, also visible in `Status.library`.
+Enabled schedules have a positive `interval_minutes`; a disabled schedule retains its configured interval and has `next_run_at: null`.
+New libraries default to disabled scheduling and `allow_push: false`; setting a schedule is owner-only remote-effect consent.
 Plans bind their selection, destination, captured versions, and conflicts; applying a stale plan refuses without overwriting.
+For `format: "epub"`, `selection` is exactly `EpubSelection`; native/v1 plans use `PackageSelection`.
+EPUB export requires nonempty selected Markdown/HTML pages and includes only explicitly selected admitted contained media.
+The plan binds the budget and page/media order; export streams to private output, validates EPUB3 navigation/entries, and installs without overwrite.
+An empty media list includes no media bytes and never recursively gathers library or network resources.
+The terminal `PackageResult` for EPUB has no native `snapshot_id`, uses `signature: "unsigned"`, and reports output-entry integrity rather than native manifest trust.
+`epub_export` accepts only an EPUB plan; `snapshot_create` accepts native ZIP/v1 export plans, and restore commands accept only restore plans.
+EPUB is the retained publication format, not a fourth preset of the native ZIP snapshot format.
 `host_context_id` refers to genuine context already supplied by an authorized host adapter; it is not user-invented governance JSON.
 The v1 export plan returns `compatibility_refused` when genuine required context is absent.
 Successful foreign import/export materialization uses `restore_apply`/`snapshot_create` with the returned plan ID; the plan retains its format.
@@ -283,7 +316,7 @@ There is no general branch-management command or model-supplied author, root ove
 
 | Commands | Success result `type` | Admission/effect boundary |
 | --- | --- | --- |
-| `library_list`, `library_open`, `library_create` | `libraries`, `library`, `library` | List only admitted libraries; open/create is owner-only. Creation changes visible files and history, with no-clobber. |
+| `library_list`, `library_open`, `library_create`, `library_clone` | `libraries`, `library`, `library`, `library` | List only admitted libraries; open/create/clone is owner-only. Creation is no-clobber; clone needs exact remote/destination consent. |
 | `library_status`, `mount_list` | `status`, `mounts` | Visible library facts only; no background hydration or model start. |
 | `mount_attach`, `mount_detach` | `library` | Owner-only; attach persists data facts, Git clone requires remote consent, detach never deletes originals. |
 | `browse`, `source_details` | `listing`, `source` | Read admission; cursor binds library/mount/current observation, never permission. |
@@ -296,6 +329,7 @@ There is no general branch-management command or model-supplied author, root ove
 | `history_list`, `history_diff`, `proposal_list`, `proposal_diff` | `history`, `diff`, `proposals`, `diff` | Read admission; excluded paths and bodies stay excluded, including history. |
 | `confirm_merge` | `write` | Owner-only exact proposal/base/diff confirmation; changed base or bytes refuses. |
 | `sync`, `sync_schedule` | `sync`, `library` | Owner-only initial remote/schedule consent; subsequent permitted sync stays within that exact remote/effect. |
+| `epub_plan`, `epub_export` | `package_plan`, `job` | Owner-only selected pages/media and destination approval; bounded EPUB3 output, no-clobber installation, no implicit remote resources. |
 | `snapshot_plan`, `snapshot_create` | `package_plan`, `job` | Owner-only selection/destination approval; sensitive export and large copy require explicit effect selection. |
 | `package_inspect`, `open_frozen` | `package`, `library` | Owner-only explicit archive selection; no declared-root contact; frozen is read-only. |
 | `restore_plan`, `restore_apply` | `package_plan`, `job` | Owner-only; verify first, default new home, explicit mount remap, preserve conflicts. |
@@ -373,6 +407,7 @@ Tool results carry the `Response` as structured content and equivalent JSON text
 MCP protocol errors concern framing/lifecycle; domain failures use `ServiceError` rather than fabricated successful empty content.
 MCP negotiates protocol revision `2025-11-25`; unsupported revisions and transport semantics are refused explicitly.
 Legacy `serve-mcp` can remain an alias for selected-root stdio, but cannot preserve root override, self-confirmation, or unrestricted write behavior.
+Legacy CLI mode/tag spellings map to the current shared request; compatibility preserves their intent, not an unversioned old JSON response or unsafe catalog.
 Local HTTP is opt-in and loopback-only by default; `POST /v1/command` carries the same envelopes and `/mcp` offers Streamable-HTTP MCP.
 HTTP returns 200 for an admitted domain response including typed failure; malformed framing is 400, invalid host/origin is 403, oversized frames are 413, and unsupported wire versions are 400.
 Host and Origin checks use literal configured allowlists; reject cross-origin browser requests, redirects, and ambient proxy-driven provider routing.
@@ -391,6 +426,22 @@ Service-side local approvals bound roots/transports/effects independently of por
 Keep query history off by default; journals and logs contain no source bodies, query text, credentials, keys, or raw command arguments.
 
 ## Wire Examples
+
+Root browsing uses the empty sentinel only for a selected root; child paths stay nonempty and traversal is invalid:
+
+```json
+{"wire_version":1,"request_id":"browse-root","command":{"op":"browse","library_id":"library-1","mount_id":null,"path":"","cursor":null,"limit":50}}
+```
+
+```json
+{"wire_version":1,"request_id":"browse-child","command":{"op":"browse","library_id":"library-1","mount_id":null,"path":"pages","cursor":null,"limit":50}}
+```
+
+An EPUB plan selects pages and contained media without an arbitrary input path:
+
+```json
+{"wire_version":1,"request_id":"epub-plan","command":{"op":"epub_plan","library_id":"library-1","page_paths":["pages/index.md"],"media_source_ids":[],"destination":"/selected/output/book.epub","budget":{"max_files":100,"max_bytes":"8388608","max_millis":30000,"max_memory_bytes":"67108864"}}}
+```
 
 A list request has no library-path override:
 
