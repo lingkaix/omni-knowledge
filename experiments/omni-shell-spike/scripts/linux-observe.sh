@@ -59,6 +59,8 @@ on_exit() {
   tail -n 40 "$out_dir/$mode.xvfb.log" 2>/dev/null || true
   echo "----- ${mode} ibus -----"
   tail -n 40 "$out_dir/$mode.ibus.log" 2>/dev/null || true
+  echo "----- ${mode} engines -----"
+  cat "$out_dir/$mode.engines.txt" 2>/dev/null || true
   echo "----- ${mode} dbus -----"
   tail -n 40 "$out_dir/$mode.dbus.log" 2>/dev/null || true
   cleanup
@@ -77,6 +79,10 @@ export GSK_RENDERER=cairo
 export LIBGL_ALWAYS_SOFTWARE=1
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
 export WEBKIT_DISABLE_COMPOSITING_MODE=1
+# The runner refuses bwrap's uid map. WebKit then aborts with
+# "Failed to fully launch dbus-proxy". Observer process only.
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+export GTK_A11Y=none
 export GTK_IM_MODULE=ibus
 export QT_IM_MODULE=ibus
 export XMODIFIERS=@im=ibus
@@ -136,14 +142,24 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
+window_id=""
 focus_window() {
   local id
   id="$(xdotool search --name "Omni Shell Spike" 2>/dev/null | head -n 1 || true)"
+  window_id="$id"
   if [[ -n "$id" ]]; then
+    xdotool windowfocus --sync "$id" >>"$note" 2>&1 || true
     xdotool windowactivate --sync "$id" >>"$note" 2>&1 || true
     echo "window=$id" >>"$note"
   else
     echo "window not found" >>"$note"
+  fi
+}
+key_to_window() {
+  if [[ -n "$window_id" ]]; then
+    xdotool key --window "$window_id" "$@" >>"$note" 2>&1 || echo "key failed: $*" >>"$note"
+  else
+    echo "no window for key: $*" >>"$note"
   fi
 }
 
@@ -154,16 +170,16 @@ else
   focus_window
   case "$mode" in
     probe)
-      xdotool key ctrl+shift+m >>"$note" 2>&1 || echo "menu key failed" >>"$note"
+      key_to_window ctrl+shift+m
       ;;
     ime)
       xdotool mousemove 440 80 click 1 >>"$note" 2>&1 || true
       sleep 0.4
-      xdotool key n i h a o space >>"$note" 2>&1 || true
+      key_to_window n i h a o space
       sleep 2
       xdotool mousemove 120 680 click 1 >>"$note" 2>&1 || true
       sleep 0.4
-      xdotool key n i space >>"$note" 2>&1 || true
+      key_to_window n i space
       ;;
     drop)
       drop_file="$work/spike-drop.txt"
@@ -188,7 +204,7 @@ else
       ;;
     dialog)
       sleep 2
-      xdotool key Escape >>"$note" 2>&1 || echo "escape failed" >>"$note"
+      key_to_window Escape
       ;;
   esac
 fi
