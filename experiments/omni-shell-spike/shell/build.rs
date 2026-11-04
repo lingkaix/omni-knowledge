@@ -15,7 +15,8 @@ fn main() {
             dist.display()
         );
     }
-    let out_dir = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let out_dir_owned = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let out_dir = Path::new(&out_dir_owned);
     let mut assets = String::from("pub static ASSETS: &[(&str, &[u8], &str)] = &[\n");
     push_tree(&mut assets, &dist, &dist);
     push_file(

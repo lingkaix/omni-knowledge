@@ -38,3 +38,11 @@ These observations do not include a native window, a CI runner, or a pass/fail m
 - crates.io serves `nsh-core`, `nsh-base`, `nsh-platform-linux`, `nsh-platform-macos`, and `nsh-platform-windows` at version 0.4.0.
 - This host has no WebKitGTK 6.0. The NSH shell was not compiled here. That is a missing host prerequisite, not an NSH result.
 - Remote Linux x86_64 and macOS ARM64 builds, messaging, IME, drag-drop, dialogs, and artifact hashes are not observed in this record.
+
+## First Remote Package Attempt
+
+Push `87a622d5f54a2582b1d0e65621c19990ada10180` started run `41892376378`.
+The Linux x86_64 job failed while compiling this experiment's build script, before WebKit linked and before any window ran.
+`rustc` reported `E0716` at `experiments/omni-shell-spike/shell/build.rs`: `OUT_DIR` was borrowed from a temporary `String`.
+That is a compile error in this spike, not an NSH messaging, build, or IME failure, and not a reason to switch to Tauri.
+The following commit binds `OUT_DIR` for the life of the script. It does not claim that the corrected package succeeds.
