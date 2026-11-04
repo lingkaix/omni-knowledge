@@ -1,5 +1,8 @@
 # Ordinary Local Mount Observations
 
+The classifications in "Pinned Results That Stay Red" and the symlink sentence in "Observer" are the historical e428 claims.
+`2026-11-05-local-mount-test-corrections.md` supersedes them: those four reds are test-side, and the two reads were fixture `fs::read` calls inside the observed closure.
+
 This record owns independent tests of the committed ordinary local mount adapter.
 It does not change the adapter, and it does not authorize a repair of the four red cases below.
 The lease is `crates/knowledge-local/tests/local_mount.rs` and this record.

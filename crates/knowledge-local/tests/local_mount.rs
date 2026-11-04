@@ -7,23 +7,34 @@
 //! The caller supplies locality and exclusion. This suite does not claim NAS,
 //! cloud, account, or service authorization, and it does not claim that the
 //! adapter discovers child libraries or inner mounts.
+//!
+//! A foreign library or mount is `InvalidRequest`. An offset equal to the
+//! verified end is empty EOF; only a larger offset is past the end. Memory
+//! reservations include live metadata and the initial listing frame. The
+//! content observer admits only the x86-64 Linux syscall ABI.
 
 #![cfg(target_os = "linux")]
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, Permissions};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+const _: () = assert!(
+    cfg!(target_arch = "x86_64"),
+    "content observer syscall numbers are the x86-64 ABI"
+);
 
 use knowledge_core::backend::{
     Availability, BackendError, BackendIdentity, Budget, ByteRange, Capabilities, Cursor,
@@ -41,6 +52,94 @@ const MOUNT: &str = "mount-1";
 const HARNESS_BOUND: Duration = Duration::from_secs(10);
 
 static FIXTURES: AtomicU64 = AtomicU64::new(0);
+static MEASURING: AtomicBool = AtomicBool::new(false);
+static MEASURE_TID: AtomicU64 = AtomicU64::new(0);
+static LARGE_COUNT: AtomicU64 = AtomicU64::new(0);
+static LARGE_MAX: AtomicU64 = AtomicU64::new(0);
+static MEASURE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Counts allocations on the measuring thread only.
+///
+/// Caller-owned strings are built before the window. A size under 8192 is
+/// ignored so the 8192-byte library id is the counted copy.
+struct CountingAlloc;
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        note_large(layout.size());
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let next = unsafe { System.realloc(ptr, layout, new_size) };
+        note_large(new_size);
+        next
+    }
+}
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+fn note_large(size: usize) {
+    if size < 8_192 || !MEASURING.load(Ordering::SeqCst) {
+        return;
+    }
+    let tid = unsafe { syscall(186) } as u64;
+    if tid != MEASURE_TID.load(Ordering::SeqCst) {
+        return;
+    }
+    LARGE_COUNT.fetch_add(1, Ordering::SeqCst);
+    let size = size as u64;
+    let mut current = LARGE_MAX.load(Ordering::SeqCst);
+    while size > current {
+        match LARGE_MAX.compare_exchange_weak(current, size, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+struct AllocNote {
+    count: u64,
+    max: u64,
+}
+
+struct MeasureStop;
+
+impl Drop for MeasureStop {
+    fn drop(&mut self) {
+        MEASURING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn measure<T>(body: impl FnOnce() -> T) -> (T, AllocNote) {
+    let _guard = MEASURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    LARGE_COUNT.store(0, Ordering::SeqCst);
+    LARGE_MAX.store(0, Ordering::SeqCst);
+    MEASURE_TID.store(current_tid(), Ordering::SeqCst);
+    MEASURING.store(true, Ordering::SeqCst);
+    let _stop = MeasureStop;
+    let value = body();
+    drop(_stop);
+    (
+        value,
+        AllocNote {
+            count: LARGE_COUNT.load(Ordering::SeqCst),
+            max: LARGE_MAX.load(Ordering::SeqCst),
+        },
+    )
+}
+
+fn current_tid() -> u64 {
+    unsafe { syscall(186) as u64 }
+}
 
 /// Published SHA-256 vectors used to admit the locked `sha2` 0.10.9 primitive.
 ///
@@ -199,8 +298,8 @@ fn stat_matches_independent_metadata_without_a_content_read() {
     let report = observe(&[&path], move || mount.stat(&rel("note.txt"), room()));
     assert!(
         report.admitted,
-        "content observer was not admitted; seen syscalls {:?}",
-        report.seen
+        "content observer was not admitted; {}",
+        report.admit_reason()
     );
     assert!(
         report.content.is_empty(),
@@ -332,7 +431,11 @@ fn exclusions_honor_path_boundaries_and_do_not_reveal_existence() {
     let report = observe(&[&secret], move || {
         mount.stat(&rel("hidden/note.txt"), room())
     });
-    assert!(report.admitted, "observer missed the warm-cache control");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(
         report.content.is_empty(),
         "excluded stat read the child: {:?}",
@@ -384,12 +487,13 @@ fn child_marker_stays_visible_until_the_caller_excludes_it() {
     );
 }
 
-/// A symlink is not followed, and a non-UTF-8 name stops the listing.
+/// A symlink is not followed and its range read does not read the target.
 ///
-/// Storage forbids an undeclared escaping symlink and requires an explicit
-/// non-UTF-8 failure. The outside file is watched for content syscalls.
+/// The expected version is built before the product window. `Unsupported`
+/// with zero content calls on the outside file is the requirement. Hits are
+/// not subtracted and `read` stays in the filter.
 #[test]
-fn symlink_escape_and_non_utf8_names_are_unsupported() {
+fn symlink_is_unsupported_and_does_not_read_the_target() {
     let fixture = Fixture::new();
     let outside = fixture.path().join("outside.txt");
     fs::write(&outside, b"outside-bytes").unwrap();
@@ -411,15 +515,16 @@ fn symlink_escape_and_non_utf8_names_are_unsupported() {
         Availability::Unavailable(Unavailable::Unsupported)
     );
     let mount = bind(&root, Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])));
-    let watched = outside.clone();
-    let report = observe(&[&watched], move || {
-        mount.open_range(
-            &version_for(&outside, "escape", Some(MOUNT)),
-            ByteRange::new(0, 1).unwrap(),
-            room(),
-        )
+    let version = version_for(&outside, "escape", Some(MOUNT));
+    let range = ByteRange::new(0, 1).unwrap();
+    let report = observe(&[&outside], move || {
+        mount.open_range(&version, range, room())
     });
-    assert!(report.admitted, "observer missed the outside-file control");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(
         report.content.is_empty(),
         "symlink range read the outside file: {:?} value {:?}",
@@ -430,12 +535,18 @@ fn symlink_escape_and_non_utf8_names_are_unsupported() {
         report.value.err(),
         Some(BackendError::Unavailable(Unavailable::Unsupported))
     );
+}
 
-    let odd = fixture.path().join("odd");
-    fs::create_dir(&odd).unwrap();
-    let raw = odd.join(OsStr::from_bytes(b"bad\xffname"));
+/// A non-UTF-8 name stops the listing before any entry is accepted.
+#[test]
+fn non_utf8_name_stops_the_listing() {
+    let fixture = Fixture::new();
+    let raw = fixture.path().join(OsStr::from_bytes(b"bad\xffname"));
     fs::write(&raw, b"x").unwrap();
-    let mount = bind(&odd, Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])));
+    let mount = bind(
+        fixture.path(),
+        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
+    );
     assert_partial(
         mount.list(None, room()).expect("non-utf8 list"),
         EnumerationStop::Unsupported,
@@ -607,7 +718,11 @@ fn unestablished_denied_and_cancelled_premises_are_not_grants() {
         })),
     );
     let report = observe(&[&path], move || mount.list(None, room()));
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     assert_eq!(
         report.value.err(),
@@ -616,7 +731,11 @@ fn unestablished_denied_and_cancelled_premises_are_not_grants() {
 
     let mount = bind(fixture.path(), Caller::new(ReadDecision::Unestablished));
     let report = observe(&[&path], move || mount.stat(&rel("body.txt"), room()));
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     assert_eq!(
         report.value.err(),
@@ -625,7 +744,11 @@ fn unestablished_denied_and_cancelled_premises_are_not_grants() {
 
     let mount = bind(fixture.path(), Caller::new(ReadDecision::Deny));
     let report = observe(&[&path], move || mount.list(None, room()));
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     assert_eq!(
         report.value.err(),
@@ -672,8 +795,9 @@ fn unestablished_denied_and_cancelled_premises_are_not_grants() {
 /// A cursor, a digest, and a mismatched admission are not read permission.
 ///
 /// This adapter issues no cursor. A presented cursor is `InvalidRequest`.
-/// A correct digest under `Deny`, or an `Admit` for another library or mount,
-/// does not return bytes.
+/// Policy `Deny` is `Unavailable::Denied` and delivers nothing. A foreign
+/// library or mount is also a refusal and non-delivery, and its frozen error
+/// is `InvalidRequest`, not `Denied`.
 #[test]
 fn cursor_digest_and_mismatched_admission_are_not_permission() {
     let fixture = Fixture::new();
@@ -706,7 +830,11 @@ fn cursor_digest_and_mismatched_admission_are_not_permission() {
             room(),
         )
     });
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     assert_eq!(
         report.value.err(),
@@ -725,12 +853,12 @@ fn cursor_digest_and_mismatched_admission_are_not_permission() {
     let other_mount = mount.stat(&rel("body.txt"), room());
     assert_eq!(
         other_library.as_ref().err(),
-        Some(&BackendError::Unavailable(Unavailable::Denied)),
+        Some(&BackendError::InvalidRequest),
         "other library {other_library:?}; other mount {other_mount:?}"
     );
     assert_eq!(
         other_mount.as_ref().err(),
-        Some(&BackendError::Unavailable(Unavailable::Denied)),
+        Some(&BackendError::InvalidRequest),
         "other mount {other_mount:?}"
     );
 }
@@ -759,7 +887,11 @@ fn mode_zero_file_denies_the_range_without_claiming_absence() {
     let report = observe(&[&control, &path], move || {
         mount.stat(&rel("locked.txt"), room())
     });
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     let obs = ok_product(report.value);
     assert_eq!(obs.availability, Availability::Available);
@@ -781,7 +913,11 @@ fn mode_zero_file_denies_the_range_without_claiming_absence() {
             room(),
         )
     });
-    assert!(report.admitted, "observer missed the control read");
+    assert!(
+        report.admitted,
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
+    );
     assert!(report.content.is_empty(), "{:?}", report.content);
     assert_eq!(
         report.value.err(),
@@ -820,8 +956,8 @@ fn range_read_returns_the_independent_slice_after_full_sha256() {
     });
     assert!(
         report.admitted,
-        "observer missed the control read; seen {:?}",
-        report.seen
+        "observer missed read and pread or was unresolved: {}",
+        report.admit_reason()
     );
     assert!(
         !report.content.is_empty(),
@@ -898,10 +1034,10 @@ fn bytes_outside_the_range_fail_the_old_digest() {
     );
 }
 
-/// An offset past EOF is `InvalidRequest` only while the full digest matches.
+/// Equal EOF is an empty read. An offset past that end is `InvalidRequest`.
 ///
-/// Drift wins over that classification. The past-end call uses the current
-/// independent metadata and the digest from before the edit.
+/// Drift wins at both positions. The size-equal call is not the past-end case.
+/// Charged progress is not pinned as a physical I/O count.
 #[test]
 fn offset_past_eof_is_invalid_only_while_the_digest_matches() {
     let fixture = Fixture::new();
@@ -912,50 +1048,88 @@ fn offset_past_eof_is_invalid_only_while_the_digest_matches() {
         fixture.path(),
         Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
     );
-    let snapshot = current_snapshot(&mount, "body.txt", &facts, Some(MOUNT));
-    let matching = mount.open_range(
+    let equal = mount.open_range(
         &ExpectedVersion {
             digest: digest(&facts.digest),
-            snapshot,
+            snapshot: current_snapshot(&mount, "body.txt", &facts, Some(MOUNT)),
         },
         ByteRange::new(facts.size, 1).unwrap(),
         room(),
+    );
+    let equal = equal.expect("offset equal to the verified end");
+    assert!(equal.bytes.is_empty(), "{equal:?}");
+    assert!(equal.end_of_file, "{equal:?}");
+    assert_eq!(equal.version.digest.as_str(), facts.digest);
+
+    let mount = bind(
+        fixture.path(),
+        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
+    );
+    let past = mount.open_range(
+        &ExpectedVersion {
+            digest: digest(&facts.digest),
+            snapshot: current_snapshot(&mount, "body.txt", &facts, Some(MOUNT)),
+        },
+        ByteRange::new(facts.size + 1, 1).unwrap(),
+        room(),
+    );
+    assert_eq!(
+        past.as_ref().map(|_| ()).err(),
+        Some(&BackendError::InvalidRequest),
+        "strictly past end {past:?}"
     );
 
     let mut edited = facts.bytes.clone();
     edited[0] = b'Z';
     fs::write(&path, &edited).unwrap();
     let after = facts_of(&path);
+    assert_eq!(
+        after.size, facts.size,
+        "the edit keeps both offsets defined"
+    );
     let mount = bind(
         fixture.path(),
         Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
     );
-    let snapshot = current_snapshot(&mount, "body.txt", &after, Some(MOUNT));
-    let drifted = mount.open_range(
+    let drifted_equal = mount.open_range(
         &ExpectedVersion {
             digest: digest(&facts.digest),
-            snapshot,
+            snapshot: current_snapshot(&mount, "body.txt", &after, Some(MOUNT)),
         },
         ByteRange::new(after.size, 1).unwrap(),
         room(),
     );
-    assert_eq!(
-        matching.as_ref().map(|_| ()).err(),
-        Some(&BackendError::InvalidRequest),
-        "matching past-end {matching:?}; drifted {drifted:?}"
+    let mount = bind(
+        fixture.path(),
+        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
+    );
+    let drifted_past = mount.open_range(
+        &ExpectedVersion {
+            digest: digest(&facts.digest),
+            snapshot: current_snapshot(&mount, "body.txt", &after, Some(MOUNT)),
+        },
+        ByteRange::new(after.size + 1, 1).unwrap(),
+        room(),
     );
     assert_eq!(
-        drifted.as_ref().map(|_| ()).err(),
+        drifted_equal.as_ref().map(|_| ()).err(),
         Some(&BackendError::Unavailable(Unavailable::Changed)),
-        "drifted past-end {drifted:?}"
+        "drift at EOF {drifted_equal:?}"
+    );
+    assert_eq!(
+        drifted_past.as_ref().map(|_| ()).err(),
+        Some(&BackendError::Unavailable(Unavailable::Changed)),
+        "drift past EOF {drifted_past:?}"
     );
 }
 
-/// Range budgets charge the whole source and one byte beyond the retained request.
+/// Whole-source, metadata, and retained-range budgets are separate premises.
 ///
-/// A short memory or byte ceiling fails before a content read. The successful
-/// ceiling is the request length plus one hash byte, with `max_bytes` covering
-/// the whole file. These are caller ceilings, not RSS or a syscall deadline.
+/// `max_bytes` equal to the source ignores the path spelling. Seventeen memory
+/// bytes are the request plus one hash byte and do not include metadata, so
+/// they are a refusal while metadata, the retained range, and the hash buffer
+/// are live together. The passing `room` range read is the positive control.
+/// These ceilings are reservations, not RSS or a syscall deadline.
 #[test]
 fn range_budgets_charge_the_whole_source_and_one_hash_byte() {
     let fixture = Fixture::new();
@@ -964,24 +1138,79 @@ fn range_budgets_charge_the_whole_source_and_one_hash_byte() {
     fs::write(&path, &bytes).unwrap();
     warm(&path);
     let facts = facts_of(&path);
-    for budget in [
-        Budget {
-            max_bytes: 63,
-            ..room()
-        },
-        Budget {
-            max_memory_bytes: 16,
-            ..room()
-        },
-        Budget {
-            max_memory_bytes: 0,
-            ..room()
-        },
-        Budget {
-            max_files: 0,
-            ..room()
-        },
-    ] {
+    let spell_len = u64::try_from(rel("body.txt").as_str().len()).unwrap();
+    assert_eq!(facts.size, 64, "source length precondition");
+    assert_eq!(spell_len, 8, "body.txt path spelling precondition");
+    let source = facts.size;
+    let source_and_path = source + spell_len;
+    let cases: [(&str, Budget, u64); 8] = [
+        (
+            "byte ceiling below the source; memory is the passing room budget",
+            Budget {
+                max_bytes: source - 1,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "byte ceiling equals the source and ignores the path; memory is room",
+            Budget {
+                max_bytes: source,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "byte ceiling is one below source plus path; memory is room",
+            Budget {
+                max_bytes: source_and_path - 1,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "memory is the request plus one hash byte and omits live metadata",
+            Budget {
+                max_bytes: source_and_path,
+                max_memory_bytes: 17,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "memory is below the request plus one hash byte",
+            Budget {
+                max_memory_bytes: 16,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "zero memory ceiling",
+            Budget {
+                max_memory_bytes: 0,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "zero file ceiling",
+            Budget {
+                max_files: 0,
+                ..room()
+            },
+            16,
+        ),
+        (
+            "requested length exceeds a byte ceiling that already covers source plus path",
+            Budget {
+                max_bytes: source_and_path,
+                ..room()
+            },
+            80,
+        ),
+    ];
+    for (reason, budget, length) in cases {
         let mount = bind(
             fixture.path(),
             Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
@@ -992,15 +1221,19 @@ fn range_budgets_charge_the_whole_source_and_one_hash_byte() {
             snapshot,
         };
         let report = observe(&[&path], move || {
-            mount.open_range(&expected, ByteRange::new(0, 16).unwrap(), budget)
+            mount.open_range(&expected, ByteRange::new(0, length).unwrap(), budget)
         });
-        assert!(report.admitted, "observer missed the control read");
+        assert!(report.admitted, "{reason}: {}", report.admit_reason());
         assert!(
             report.content.is_empty(),
-            "budget refusal still read the file under {budget:?}: {:?}",
+            "{reason}: refusal still read the file: {:?}",
             report.content
         );
-        assert_eq!(report.value.err(), Some(BackendError::BudgetExhausted));
+        assert_eq!(
+            report.value.as_ref().err(),
+            Some(&BackendError::BudgetExhausted),
+            "{reason}"
+        );
     }
 
     let mount = bind(
@@ -1008,40 +1241,238 @@ fn range_budgets_charge_the_whole_source_and_one_hash_byte() {
         Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
     );
     let snapshot = current_snapshot(&mount, "body.txt", &facts, Some(MOUNT));
-    let oversize = mount.open_range(
-        &ExpectedVersion {
-            digest: digest(&facts.digest),
-            snapshot,
-        },
-        ByteRange::new(0, 80).unwrap(),
-        Budget {
-            max_bytes: 64,
-            max_memory_bytes: 81,
-            ..room()
-        },
-    );
-    assert_eq!(oversize.err(), Some(BackendError::BudgetExhausted));
-
-    let mount = bind(
-        fixture.path(),
-        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
-    );
-    let snapshot = current_snapshot(&mount, "body.txt", &facts, Some(MOUNT));
-    let read = mount
-        .open_range(
+    let report = observe(&[&path], move || {
+        mount.open_range(
             &ExpectedVersion {
                 digest: digest(&facts.digest),
                 snapshot,
             },
             ByteRange::new(0, 16).unwrap(),
             Budget {
-                max_bytes: 64,
-                max_memory_bytes: 17,
+                max_bytes: source_and_path,
                 ..room()
             },
         )
-        .expect("request plus one hash byte");
+    });
+    assert!(
+        report.admitted,
+        "source-plus-path success: {}",
+        report.admit_reason()
+    );
+    assert!(
+        !report.content.is_empty(),
+        "source-plus-path range read was invisible: {}",
+        report.admit_reason()
+    );
+    let read = ok_product(report.value);
     assert_eq!(read.bytes, &bytes[..16]);
+}
+
+/// Room memory still returns the caller-created library id, and the probe sees the copy.
+///
+/// The id is not an identity-format quota. Policy values are moved from storage
+/// allocated before the measured `stat`.
+#[test]
+fn large_library_id_is_visible_when_memory_can_hold_it() {
+    let fixture = Fixture::new();
+    let path = fixture.path().join("n");
+    fs::write(&path, b"z").unwrap();
+    let big = "a".repeat(8_192);
+    let policy = StoredAdmit::new(&big, Some(MOUNT), 1, 32);
+    let mount = LocalMount::open(fixture.path(), &big, Some(MOUNT.to_string()), &policy)
+        .expect("large library id binds");
+    assert_eq!(policy.calls(), 0, "open consulted policy");
+    let (result, note) = measure(|| mount.stat(&rel("n"), room()));
+    let obs = result.expect("room memory admits the 8192-byte library id");
+    assert_eq!(obs.availability, Availability::Available);
+    let snapshot = obs.snapshot.expect("snapshot");
+    assert_eq!(snapshot.backend.library_id, big);
+    assert!(
+        note.count >= 1,
+        "probe gap: room stat did not allocate the 8192-byte library id; count={} max={}",
+        note.count,
+        note.max
+    );
+}
+
+/// A 512-byte memory budget must refuse the 8192-byte library id before copying it.
+#[test]
+fn large_library_id_under_512_bytes_refuses_before_the_copy() {
+    let fixture = Fixture::new();
+    let path = fixture.path().join("n");
+    fs::write(&path, b"z").unwrap();
+    let big = "a".repeat(8_192);
+    let policy = StoredAdmit::new(&big, Some(MOUNT), 1, 32);
+    let mount = LocalMount::open(fixture.path(), &big, Some(MOUNT.to_string()), &policy)
+        .expect("large library id binds");
+    assert_eq!(policy.calls(), 0, "open consulted policy");
+    let budget = Budget {
+        max_memory_bytes: 512,
+        max_files: 64,
+        max_bytes: 1 << 20,
+        max_millis: 5_000,
+    };
+    let (result, note) = measure(|| mount.stat(&rel("n"), budget));
+    let shape = match &result {
+        Ok(obs) => format!(
+            "Ok {:?} id_len={}",
+            obs.availability,
+            obs.snapshot
+                .as_ref()
+                .map(|snap| snap.backend.library_id.len())
+                .unwrap_or(0)
+        ),
+        Err(err) => format!("Err {err:?}"),
+    };
+    assert!(
+        matches!(result, Err(BackendError::BudgetExhausted)) && note.count == 0,
+        "512-byte budget must refuse before copying the 8192-byte library id; {shape}; large={} max={}",
+        note.count,
+        note.max
+    );
+}
+
+/// One positive memory byte is not an empty complete listing.
+///
+/// The room-budget listing of the same empty directory is the fixture control.
+/// A zero ceiling is a separate case.
+#[test]
+fn empty_list_with_one_byte_of_memory_is_not_complete() {
+    let fixture = Fixture::new();
+    let mount = bind(
+        fixture.path(),
+        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
+    );
+    assert_complete_names(mount.list(None, room()).expect("room list"), &[]);
+    let listed = mount.list(
+        None,
+        Budget {
+            max_memory_bytes: 1,
+            ..room()
+        },
+    );
+    match listed {
+        Ok(Enumeration::Complete { .. }) => {
+            panic!("room control was complete and one positive memory byte also returned Complete");
+        }
+        Ok(Enumeration::Partial {
+            entries,
+            stopped,
+            next_cursor,
+            ..
+        }) => {
+            assert!(entries.is_empty(), "{entries:?}");
+            assert_eq!(stopped, EnumerationStop::BudgetExhausted);
+            assert!(next_cursor.is_none());
+        }
+        Err(BackendError::BudgetExhausted) => {}
+        other => panic!("expected a budget refusal, got {other:?}"),
+    }
+}
+
+/// A descriptor that cannot be resolved is not a quiet miss.
+#[test]
+fn unresolved_descriptor_is_not_a_quiet_miss() {
+    let fixture = Fixture::new();
+    let path = fixture.path().join("body");
+    fs::write(&path, b"id").unwrap();
+    let watched = [watch_id(&path)];
+    let tid = u32::try_from(current_tid()).unwrap();
+    assert_eq!(classify_fd(tid, 1_000_000, &watched), FdClass::Unresolved);
+    assert_eq!(classify_fd(tid, -1, &watched), FdClass::Anonymous);
+    let file = File::open(&path).unwrap();
+    assert_eq!(classify_fd(tid, file.as_raw_fd(), &watched), FdClass::Hit);
+    let other = fixture.path().join("other");
+    fs::write(&other, b"no").unwrap();
+    let other_file = File::open(&other).unwrap();
+    assert_eq!(
+        classify_fd(tid, other_file.as_raw_fd(), &watched),
+        FdClass::Other
+    );
+}
+
+#[test]
+fn observer_normal_completion_is_quiet() {
+    if observer_child_entered("normal") {
+        return;
+    }
+    let outcome = spawn_observer_child("observer_normal_completion_is_quiet", "normal", None);
+    assert_child_exit(&outcome, Some(0));
+    assert!(outcome.marker.contains("mode=normal"), "{}", outcome.marker);
+    assert!(!outcome.marker.contains("OBSERVER_SETTLED"));
+    assert_no_late_work(&outcome);
+}
+
+#[test]
+fn observer_deliberate_content_read_is_visible() {
+    if observer_child_entered("content") {
+        return;
+    }
+    let outcome = spawn_observer_child(
+        "observer_deliberate_content_read_is_visible",
+        "content",
+        None,
+    );
+    assert_child_exit(&outcome, Some(0));
+    assert!(
+        outcome.marker.contains("mode=content"),
+        "{}",
+        outcome.marker
+    );
+    assert!(!outcome.marker.contains("OBSERVER_SETTLED"));
+    assert_no_late_work(&outcome);
+}
+
+#[test]
+fn observer_action_panic_settles_before_unwind() {
+    if observer_child_entered("panic") {
+        return;
+    }
+    let outcome =
+        spawn_observer_child("observer_action_panic_settles_before_unwind", "panic", None);
+    assert!(
+        outcome.status.code().is_some() && !outcome.status.success(),
+        "panic child status {}",
+        outcome.status
+    );
+    assert!(
+        outcome.marker.contains("OBSERVER_SETTLED"),
+        "{}",
+        outcome.marker
+    );
+    assert_no_late_work(&outcome);
+}
+
+#[test]
+fn observer_timeout_exits_without_closing_the_listener() {
+    if observer_child_entered("timeout") {
+        return;
+    }
+    let outcome = spawn_observer_child(
+        "observer_timeout_exits_without_closing_the_listener",
+        "timeout",
+        Some(800),
+    );
+    assert_eq!(outcome.status.code(), Some(97), "{}", outcome.status);
+    assert!(
+        outcome.marker.contains("mode=timeout"),
+        "{}",
+        outcome.marker
+    );
+    assert!(
+        !outcome.marker.contains("OBSERVER_SETTLED"),
+        "timeout joined in userspace: {}",
+        outcome.marker
+    );
+    let fixture = child_fixture(&outcome);
+    assert!(
+        fixture.exists(),
+        "timeout child ran destructors at {}",
+        fixture.display()
+    );
+    assert!(fixture.join("ready").is_file(), "ready marker missing");
+    assert!(!fixture.join("late").exists(), "late fixture work");
+    let _ = fs::remove_dir_all(&fixture);
 }
 
 fn fifo_worker() {
@@ -1381,6 +1812,53 @@ impl LocalReadPolicy for &Caller {
     }
 }
 
+/// Admissions allocated before a measured call. `decide` moves one and does not copy it.
+struct StoredAdmit {
+    decisions: Mutex<Vec<ReadDecision>>,
+    calls: AtomicUsize,
+}
+
+impl StoredAdmit {
+    fn new(library: &str, mount: Option<&str>, revision: u64, copies: usize) -> Self {
+        let decisions = (0..copies)
+            .map(|_| grant(library, mount, revision, &[]))
+            .collect();
+        let stored = Self {
+            decisions: Mutex::new(decisions),
+            calls: AtomicUsize::new(0),
+        };
+        let held = stored.decisions.lock().expect("policy");
+        assert_eq!(held.len(), copies);
+        drop(held);
+        stored
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn take(&self) -> ReadDecision {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.decisions
+            .lock()
+            .expect("policy")
+            .pop()
+            .expect("prebuilt admission")
+    }
+}
+
+impl LocalReadPolicy for StoredAdmit {
+    fn decide(&self) -> ReadDecision {
+        self.take()
+    }
+}
+
+impl LocalReadPolicy for &StoredAdmit {
+    fn decide(&self) -> ReadDecision {
+        self.take()
+    }
+}
+
 struct Flip {
     base: CurrentAdmission,
     calls: AtomicUsize,
@@ -1481,6 +1959,18 @@ struct Report<T> {
     admitted: bool,
     content: Vec<ContentHit>,
     seen: Vec<i32>,
+    unresolved: bool,
+    before: Vec<ContentHit>,
+    after: Vec<ContentHit>,
+}
+
+impl<T> Report<T> {
+    fn admit_reason(&self) -> String {
+        format!(
+            "unresolved={} before={:?} after={:?} product={:?} seen={:?}",
+            self.unresolved, self.before, self.after, self.content, self.seen
+        )
+    }
 }
 
 struct HitLog {
@@ -1517,36 +2007,47 @@ impl HitLog {
     }
 }
 
-/// Run `action` on a thread whose content syscalls are observed.
+/// Run `action` on one worker thread whose content syscalls are observed.
 ///
-/// Coverage is `read`, `pread64`, `readv`, `preadv`, `preadv2`, `mmap` of a
-/// file descriptor, `sendfile`, `splice`, and `copy_file_range` on that thread.
-/// `openat` is continued and is not itself a content hit. Stat metadata calls
-/// are outside this coverage. The observer always continues the syscall.
-/// A warm-cache `read` and `pread64` of the watched file must be visible before
-/// a quiet result is evidence. This is not `/proc/self/io` physical-byte accounting.
+/// Coverage is the x86-64 `read`, `pread64`, `readv`, `preadv`, `preadv2`,
+/// file `mmap`, `sendfile`, `splice`, and `copy_file_range` calls of that
+/// thread. `openat` is continued and is not a content hit. Stat metadata,
+/// `io_uring`, other threads, and descendants are outside this coverage.
+/// Every trapped call is continued. Before and after controls must both
+/// `read` and `pread64` one byte. An unresolved identity is not a quiet pass.
+/// This is not `/proc/self/io` physical-byte accounting.
 fn observe<T: Send + 'static>(
     watched: &[&Path],
     action: impl FnOnce() -> T + Send + 'static,
 ) -> Report<T> {
-    let watched: Vec<Vec<u8>> = watched
-        .iter()
-        .map(|path| path.as_os_str().as_bytes().to_vec())
-        .collect();
-    let primary = PathBuf::from(OsStr::from_bytes(&watched[0]));
+    let ids: Vec<WatchId> = watched.iter().copied().map(watch_id).collect();
+    let primary = watched[0].to_path_buf();
     warm(&primary);
-    let admission = run_filtered(&watched, move || admit_read(&primary));
-    let product = run_filtered(&watched, action);
-    let primary = PathBuf::from(OsStr::from_bytes(&watched[0]));
-    let again = run_filtered(&watched, move || admit_read(&primary));
+    let admission = run_filtered(&ids, {
+        let primary = primary.clone();
+        move || admit_read(&primary)
+    });
+    let product = run_filtered(&ids, action);
+    let again = run_filtered(&ids, move || admit_read(&primary));
+    let unresolved = admission.unresolved || product.unresolved || again.unresolved;
     let admitted =
-        !admission.0.is_empty() && !again.0.is_empty() && !admission.2 && !again.2 && !product.2;
+        control_ok(&admission) && control_ok(&again) && !product.overflow && !product.unresolved;
     Report {
-        value: product.1,
+        value: product.value,
         admitted,
-        content: product.0,
-        seen: product.3,
+        content: product.hits,
+        seen: product.seen,
+        unresolved,
+        before: admission.hits,
+        after: again.hits,
     }
+}
+
+fn control_ok<T>(window: &Window<T>) -> bool {
+    !window.overflow
+        && !window.unresolved
+        && window.hits.iter().any(|hit| hit.nr == 0)
+        && window.hits.iter().any(|hit| hit.nr == 17)
 }
 
 fn admit_read(path: &Path) {
@@ -1562,123 +2063,227 @@ fn admit_read(path: &Path) {
             0i64,
         )
     };
-    assert!(rc >= 0, "admission pread failed");
+    assert_eq!(rc, 1, "admission pread");
+}
+
+struct Window<T> {
+    hits: Vec<ContentHit>,
+    value: T,
+    overflow: bool,
+    seen: Vec<i32>,
+    unresolved: bool,
+}
+
+fn observer_bound() -> Duration {
+    std::env::var("OMNI_OBSERVER_BOUND_MS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(HARNESS_BOUND)
 }
 
 fn run_filtered<T: Send + 'static>(
-    watched: &[Vec<u8>],
+    watched: &[WatchId],
     action: impl FnOnce() -> T + Send + 'static,
-) -> (Vec<ContentHit>, T, bool, Vec<i32>) {
+) -> Window<T> {
     let log = Arc::new(HitLog::new());
-    let fd_slot = Arc::new(AtomicI32::new(-1));
-    let ready = Arc::new(AtomicBool::new(false));
-    let go = Arc::new(AtomicBool::new(false));
+    let unresolved = Arc::new(AtomicBool::new(false));
+    let (fd_tx, fd_rx) = std::sync::mpsc::sync_channel::<(OwnedFd, u64)>(1);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (go_tx, go_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let (value_tx, value_rx) = std::sync::mpsc::sync_channel(1);
+    let (done_read, done_write) = pipe_cloexec();
     let watched = watched.to_vec();
     let observer_log = Arc::clone(&log);
-    let observer_fd = Arc::clone(&fd_slot);
-    let observer_ready = Arc::clone(&ready);
+    let observer_unresolved = Arc::clone(&unresolved);
     let observer = thread::spawn(move || {
-        let fd = wait_fd(&observer_fd);
-        observer_ready.store(true, Ordering::SeqCst);
-        observe_loop(fd, &watched, &observer_log);
-    });
-    let worker_fd = Arc::clone(&fd_slot);
-    let worker_go = Arc::clone(&go);
-    let worker = thread::spawn(move || {
-        let fd = match install_listener() {
-            Ok(fd) => fd,
-            Err(_) => {
-                worker_fd.store(-2, Ordering::SeqCst);
-                return;
-            }
+        let Ok((listener, tid)) = fd_rx.recv() else {
+            return;
         };
-        worker_fd.store(fd, Ordering::SeqCst);
-        while !worker_go.load(Ordering::SeqCst) {
-            thread::yield_now();
+        let _ = ready_tx.send(());
+        observe_loop(
+            listener,
+            done_read,
+            tid,
+            &watched,
+            &observer_log,
+            &observer_unresolved,
+        );
+    });
+    let worker = thread::spawn(move || {
+        let raw = match install_listener() {
+            Ok(fd) => fd,
+            Err(_) => return,
+        };
+        let listener = unsafe { OwnedFd::from_raw_fd(raw) };
+        let tid = current_tid();
+        if fd_tx.send((listener, tid)).is_err() {
+            return;
+        }
+        if go_rx.recv().is_err() {
+            return;
         }
         let outcome = panic::catch_unwind(AssertUnwindSafe(action));
         let _ = value_tx.send(outcome);
-        unsafe { close(fd) };
+        drop(done_write);
     });
-    let start = Instant::now();
-    loop {
-        if fd_slot.load(Ordering::SeqCst) == -2 {
-            panic!("seccomp listener was not installed");
-        }
-        if ready.load(Ordering::SeqCst) {
-            break;
-        }
-        if start.elapsed() > HARNESS_BOUND {
-            panic!("content observer did not become ready");
-        }
-        thread::yield_now();
+    if ready_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        drop(go_tx);
+        let _ = worker.join();
+        let _ = observer.join();
+        panic!("seccomp listener was not installed");
     }
-    go.store(true, Ordering::SeqCst);
-    let outcome = value_rx.recv_timeout(HARNESS_BOUND).unwrap_or_else(|_| {
-        let fd = fd_slot.load(Ordering::SeqCst);
-        if fd >= 0 {
-            unsafe { close(fd) };
-        }
-        panic!("observed call exceeded the harness bound");
-    });
-    let value = match outcome {
-        Ok(value) => value,
-        Err(payload) => panic::resume_unwind(payload),
+    if go_tx.send(()).is_err() {
+        let _ = worker.join();
+        let _ = observer.join();
+        panic!("worker exited before the observed action");
+    }
+    let outcome = match value_rx.recv_timeout(observer_bound()) {
+        Ok(outcome) => outcome,
+        Err(_) => exit_group(97),
     };
-    worker.join().expect("worker");
-    observer.join().expect("observer");
-    let hits = std::mem::take(&mut *log.hits.lock().expect("hits"));
-    let seen = std::mem::take(&mut *log.seen.lock().expect("seen"));
-    let overflow = log.overflow.load(Ordering::SeqCst);
-    (hits, value, overflow, seen)
-}
-
-fn wait_fd(slot: &AtomicI32) -> i32 {
-    let start = Instant::now();
-    loop {
-        match slot.load(Ordering::SeqCst) {
-            -1 => {
-                if start.elapsed() > HARNESS_BOUND {
-                    panic!("filtered thread did not publish a listener");
-                }
-                thread::yield_now();
-            }
-            -2 => panic!("seccomp listener was not installed"),
-            fd => return fd,
+    let worker_result = worker.join();
+    let observer_result = observer.join();
+    let value = match outcome {
+        Ok(value) => {
+            worker_result.expect("worker");
+            observer_result.expect("observer");
+            value
         }
+        Err(payload) => {
+            let _ = worker_result;
+            let _ = observer_result;
+            note_settled();
+            panic::resume_unwind(payload);
+        }
+    };
+    Window {
+        hits: std::mem::take(&mut *log.hits.lock().expect("hits")),
+        value,
+        overflow: log.overflow.load(Ordering::SeqCst),
+        seen: std::mem::take(&mut *log.seen.lock().expect("seen")),
+        unresolved: unresolved.load(Ordering::SeqCst),
     }
 }
 
-fn observe_loop(fd: i32, watched: &[Vec<u8>], log: &HitLog) {
+const POLLIN: i16 = 1;
+const POLLERR: i16 = 8;
+const POLLHUP: i16 = 0x10;
+
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+fn observe_loop(
+    listener: OwnedFd,
+    done: OwnedFd,
+    worker_tid: u64,
+    watched: &[WatchId],
+    log: &HitLog,
+    unresolved: &AtomicBool,
+) {
     loop {
-        let mut note = std::mem::MaybeUninit::<SeccompNotif>::zeroed();
-        let rc = unsafe { ioctl(fd, 0xc050_2100, note.as_mut_ptr()) };
+        let mut polls = [
+            PollFd {
+                fd: listener.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            },
+            PollFd {
+                fd: done.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
+        let rc = unsafe { syscall(7, polls.as_mut_ptr(), 2i64, 250i64) };
         if rc < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(4) {
+                continue;
+            }
+            unresolved.store(true, Ordering::SeqCst);
             break;
         }
-        let note = unsafe { note.assume_init() };
-        log.push_seen(note.data.nr);
-        if let Some(kind) = content_kind(note.data.nr) {
-            let file_fd = file_descriptor(note.data.nr, &note.data.args);
-            if file_fd >= 0 && fd_matches(note.pid, file_fd, watched) {
-                log.push_hit(ContentHit {
-                    nr: note.data.nr,
-                    kind,
-                });
-            }
+        if polls[0].revents & POLLIN != 0
+            && !recv_one(listener.as_raw_fd(), worker_tid, watched, log, unresolved)
+        {
+            unresolved.store(true, Ordering::SeqCst);
+            break;
         }
-        let response = SeccompResp {
-            id: note.id,
-            val: 0,
-            error: 0,
-            flags: 1,
-        };
-        let sent = unsafe { ioctl(fd, 0xc018_2101, &response) };
-        if sent < 0 {
+        if polls[1].revents & (POLLIN | POLLERR | POLLHUP) != 0 {
+            drain_listener(listener.as_raw_fd(), worker_tid, watched, log, unresolved);
             break;
         }
     }
+}
+
+fn drain_listener(
+    listener: i32,
+    worker_tid: u64,
+    watched: &[WatchId],
+    log: &HitLog,
+    unresolved: &AtomicBool,
+) {
+    loop {
+        let mut polls = [PollFd {
+            fd: listener,
+            events: POLLIN,
+            revents: 0,
+        }];
+        let rc = unsafe { syscall(7, polls.as_mut_ptr(), 1i64, 0i64) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(4) {
+                continue;
+            }
+            unresolved.store(true, Ordering::SeqCst);
+            break;
+        }
+        if rc == 0 || polls[0].revents & POLLIN == 0 {
+            break;
+        }
+        if !recv_one(listener, worker_tid, watched, log, unresolved) {
+            unresolved.store(true, Ordering::SeqCst);
+            break;
+        }
+    }
+}
+
+fn recv_one(
+    listener: i32,
+    worker_tid: u64,
+    watched: &[WatchId],
+    log: &HitLog,
+    unresolved: &AtomicBool,
+) -> bool {
+    let mut note = std::mem::MaybeUninit::<SeccompNotif>::zeroed();
+    let rc = unsafe { ioctl(listener, 0xc050_2100, note.as_mut_ptr()) };
+    if rc < 0 {
+        return false;
+    }
+    let note = unsafe { note.assume_init() };
+    log.push_seen(note.data.nr);
+    if u64::from(note.pid) != worker_tid {
+        unresolved.store(true, Ordering::SeqCst);
+    } else if let Some(kind) = content_kind(note.data.nr) {
+        let file_fd = file_descriptor(note.data.nr, &note.data.args);
+        match classify_fd(note.pid, file_fd, watched) {
+            FdClass::Hit => log.push_hit(ContentHit {
+                nr: note.data.nr,
+                kind,
+            }),
+            FdClass::Other | FdClass::Anonymous => {}
+            FdClass::Unresolved => unresolved.store(true, Ordering::SeqCst),
+        }
+    }
+    let response = SeccompResp {
+        id: note.id,
+        val: 0,
+        error: 0,
+        flags: 1,
+    };
+    unsafe { ioctl(listener, 0xc018_2101, &response) >= 0 }
 }
 
 fn content_kind(nr: i32) -> Option<&'static str> {
@@ -1699,25 +2304,49 @@ fn file_descriptor(nr: i32, args: &[u64; 6]) -> i32 {
     raw as i32
 }
 
-fn fd_matches(pid: u32, fd: i32, watched: &[Vec<u8>]) -> bool {
-    let mut path = [0u8; 64];
-    let Some(path_len) = write_proc_fd(&mut path, pid, fd) else {
-        return false;
-    };
-    let mut target = [0u8; 4096];
-    let n = unsafe {
-        readlink(
-            path.as_ptr() as *const i8,
-            target.as_mut_ptr() as *mut i8,
-            target.len(),
-        )
-    };
-    if n < 0 {
-        return false;
+#[derive(Clone, Copy)]
+struct WatchId {
+    dev: u64,
+    ino: u64,
+}
+
+fn watch_id(path: &Path) -> WatchId {
+    let meta = fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("watch identity {}: {error}", path.display()));
+    WatchId {
+        dev: meta.dev(),
+        ino: meta.ino(),
     }
-    let _ = path_len;
-    let got = &target[..n as usize];
-    watched.iter().any(|wanted| got == wanted.as_slice())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FdClass {
+    Hit,
+    Other,
+    Unresolved,
+    Anonymous,
+}
+
+fn classify_fd(tid: u32, fd: i32, watched: &[WatchId]) -> FdClass {
+    if fd < 0 {
+        return FdClass::Anonymous;
+    }
+    let mut buf = [0u8; 64];
+    let Some(len) = write_proc_fd(&mut buf, tid, fd) else {
+        return FdClass::Unresolved;
+    };
+    match fs::metadata(OsStr::from_bytes(&buf[..len])) {
+        Ok(meta) => {
+            let dev = meta.dev();
+            let ino = meta.ino();
+            if watched.iter().any(|id| id.dev == dev && id.ino == ino) {
+                FdClass::Hit
+            } else {
+                FdClass::Other
+            }
+        }
+        Err(_) => FdClass::Unresolved,
+    }
 }
 
 fn write_proc_fd(buf: &mut [u8], pid: u32, fd: i32) -> Option<usize> {
@@ -1771,7 +2400,12 @@ fn install_listener() -> std::io::Result<i32> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(fd as i32)
+    let owned = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let cloexec = unsafe { syscall(72, i64::from(owned.as_raw_fd()), 2i64, 1i64) };
+    if cloexec < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(owned.into_raw_fd())
 }
 
 fn content_filter() -> Vec<SockFilter> {
@@ -1863,8 +2497,6 @@ struct SeccompResp {
 unsafe extern "C" {
     fn syscall(num: i64, ...) -> i64;
     fn ioctl(fd: i32, req: u64, ...) -> i32;
-    fn close(fd: i32) -> i32;
-    fn readlink(path: *const i8, buf: *mut i8, size: usize) -> isize;
     fn mkfifo(path: *const i8, mode: u32) -> i32;
 }
 
@@ -1872,4 +2504,237 @@ impl std::fmt::Debug for ContentHit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}({})", self.kind, self.nr)
     }
+}
+
+fn pipe_cloexec() -> (OwnedFd, OwnedFd) {
+    let mut fds = [0i32; 2];
+    let rc = unsafe { syscall(293, fds.as_mut_ptr(), 0x8_0000i64) };
+    assert_eq!(rc, 0, "pipe2 {}", std::io::Error::last_os_error());
+    unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+}
+
+fn exit_group(code: i32) -> ! {
+    unsafe {
+        syscall(231, i64::from(code));
+    }
+    loop {
+        thread::yield_now();
+    }
+}
+
+fn emit_line(text: &str) {
+    let mut line = String::with_capacity(text.len() + 1);
+    line.push_str(text);
+    line.push('\n');
+    let mut err = std::io::stderr();
+    let _ = err.write_all(line.as_bytes());
+    let _ = err.flush();
+}
+
+fn mark_start(mode: &str, fixture: &Path) {
+    let line = format!(
+        "OBSERVER_CHILD_START pid={} mode={mode} fixture={}",
+        std::process::id(),
+        fixture.display()
+    );
+    emit_line(&line);
+    if let Some(path) = std::env::var_os("OMNI_OBSERVER_MARKER") {
+        let mut file = File::create(path).unwrap();
+        writeln!(file, "{line}").unwrap();
+        file.sync_all().unwrap();
+    }
+}
+
+fn note_settled() {
+    emit_line("OBSERVER_SETTLED");
+    if let Some(path) = std::env::var_os("OMNI_OBSERVER_MARKER")
+        && let Ok(mut file) = OpenOptions::new().append(true).open(path)
+    {
+        let _ = writeln!(file, "OBSERVER_SETTLED");
+        let _ = file.sync_all();
+    }
+}
+
+fn observer_child_entered(mode: &str) -> bool {
+    match std::env::var("OMNI_OBSERVER_CHILD") {
+        Ok(actual) => {
+            assert_eq!(actual, mode);
+            run_observer_child(&actual);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn run_observer_child(mode: &str) {
+    let fixture = Fixture::new();
+    mark_start(mode, fixture.path());
+    fs::write(fixture.path().join("ready"), b"ready").unwrap();
+    match mode {
+        "normal" => run_normal_child(&fixture),
+        "content" => run_content_child(&fixture),
+        "panic" => run_panic_child(&fixture),
+        "timeout" => run_timeout_child(&fixture),
+        other => panic!("unknown observer child {other}"),
+    }
+}
+
+fn run_normal_child(fixture: &Fixture) {
+    let path = fixture.path().join("note.txt");
+    fs::write(&path, b"quiet-stat").unwrap();
+    warm(&path);
+    let mount = bind(
+        fixture.path(),
+        Caller::new(grant(LIBRARY, Some(MOUNT), 1, &[])),
+    );
+    let report = observe(&[&path], move || mount.stat(&rel("note.txt"), room()));
+    assert!(report.admitted, "{}", report.admit_reason());
+    assert!(report.content.is_empty(), "{:?}", report.content);
+    assert!(!report.unresolved, "{}", report.admit_reason());
+    let obs = ok_product(report.value);
+    assert_eq!(obs.availability, Availability::Available);
+}
+
+fn run_content_child(fixture: &Fixture) {
+    let body = fixture.path().join("body");
+    fs::write(&body, b"visible-read").unwrap();
+    let alias = fixture.path().join("alias");
+    fs::hard_link(&body, &alias).unwrap();
+    warm(&body);
+    let report = observe(&[&body], move || {
+        fs::read(&alias).expect("deliberate read");
+    });
+    assert!(report.admitted, "{}", report.admit_reason());
+    assert!(!report.unresolved, "{}", report.admit_reason());
+    assert!(
+        !report.content.is_empty(),
+        "hard-link read was invisible: {}",
+        report.admit_reason()
+    );
+}
+
+fn run_panic_child(fixture: &Fixture) {
+    let path = fixture.path().join("note.txt");
+    fs::write(&path, b"panic-control").unwrap();
+    warm(&path);
+    let late = fixture.path().join("late");
+    let _report = observe(&[&path], move || -> () {
+        panic!("deliberate observer action panic");
+    });
+    fs::write(&late, b"late").unwrap();
+}
+
+fn run_timeout_child(fixture: &Fixture) {
+    let path = fixture.path().join("note.txt");
+    fs::write(&path, b"timeout-control").unwrap();
+    warm(&path);
+    let (read_end, write_end) = pipe_cloexec();
+    let late = fixture.path().join("late");
+    let late_after = late.clone();
+    let _report = observe(&[&path], move || {
+        let mut buf = [0u8; 1];
+        let _ = unsafe {
+            syscall(
+                0,
+                i64::from(read_end.as_raw_fd()),
+                buf.as_mut_ptr() as i64,
+                1i64,
+            )
+        };
+        let _ = write_end;
+        fs::write(&late, b"late").unwrap();
+    });
+    fs::write(&late_after, b"returned").unwrap();
+}
+
+struct ChildOutcome {
+    status: ExitStatus,
+    marker: String,
+}
+
+fn spawn_observer_child(test: &str, mode: &str, bound_ms: Option<u64>) -> ChildOutcome {
+    let marker_dir = Fixture::new();
+    let marker_path = marker_dir.path().join("marker");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .arg("--exact")
+        .arg(test)
+        .env("OMNI_OBSERVER_CHILD", mode)
+        .env("OMNI_OBSERVER_MARKER", &marker_path)
+        .env_remove("OMNI_FIFO_WORKER")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(ms) = bound_ms {
+        command.env("OMNI_OBSERVER_BOUND_MS", ms.to_string());
+    }
+    let mut child = command.spawn().expect("observer child");
+    let pid = child.id();
+    emit_line(&format!(
+        "OBSERVER_PARENT_START pid={pid} mode={mode} test={test}"
+    ));
+    let limit = if bound_ms.is_some() {
+        Duration::from_secs(20)
+    } else {
+        Duration::from_secs(15)
+    };
+    let status = wait_child(&mut child, limit, pid, mode);
+    let marker = fs::read_to_string(&marker_path).unwrap_or_default();
+    assert!(
+        marker.contains(&format!("pid={pid}")),
+        "marker {marker:?} does not name pid {pid}"
+    );
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "residual pid {pid}"
+    );
+    ChildOutcome { status, marker }
+}
+
+fn wait_child(
+    child: &mut std::process::Child,
+    limit: Duration,
+    pid: u32,
+    mode: &str,
+) -> ExitStatus {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            panic!("observer child {pid} mode {mode} exceeded the owned-process bound: {status}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_child_exit(outcome: &ChildOutcome, code: Option<i32>) {
+    assert_eq!(outcome.status.code(), code, "{}", outcome.status);
+}
+
+fn assert_no_late_work(outcome: &ChildOutcome) {
+    let fixture = child_fixture(outcome);
+    if fixture.exists() {
+        assert!(
+            !fixture.join("late").exists(),
+            "late fixture work at {}",
+            fixture.display()
+        );
+    }
+}
+
+fn child_fixture(outcome: &ChildOutcome) -> PathBuf {
+    let line = outcome
+        .marker
+        .lines()
+        .find(|line| line.contains("OBSERVER_CHILD_START"))
+        .unwrap_or(&outcome.marker);
+    let fixture = line
+        .split_once("fixture=")
+        .map(|(_, path)| path.trim())
+        .unwrap_or("");
+    assert!(!fixture.is_empty(), "no fixture in {}", outcome.marker);
+    PathBuf::from(fixture)
 }
