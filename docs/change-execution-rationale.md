@@ -16,6 +16,6 @@ Tests can also preserve the wrong premise. Public-interface tests leave implemen
 
 ## Trial A Pattern Before Making It Universal
 
-Every mechanism costs maintenance, setup, and reader attention. An explicit necessity claim and an ablation expose whether an existing owner or a smaller method is sufficient. Complexity numbers help locate costs but become misleading when agents optimize the numbers instead of the outcome. A two-sided inventory checks both new concepts and parallel copies because reducing one visible count can merely move duplication elsewhere.
+Every mechanism costs maintenance, setup, and reader attention. An explicit necessity claim and a reasoned ablation expose whether an existing owner or a smaller method is sufficient. Experimental removal resolves uncertain claims and tests maintenance or deletion candidates; it is not a universal ritual for justified additions. Complexity numbers help locate costs but become misleading when agents optimize the numbers instead of the outcome. A two-sided inventory checks both new concepts and parallel copies because reducing one visible count can merely move duplication elsewhere.
 
 These reasons justify the adopted rules, not a new coordination framework, runner, registry, or review quota. [The adoption decision](decisions/2026-11-04-engineering-doctrine-sync.md) records provenance and deliberate exclusions.

@@ -176,7 +176,9 @@ M0 freezes owners and DTOs, characterizes preserved behavior, names intended-red
 M1 supplies storage/mounts/tracking/cache; M2 history/remote; M3 processing; M4 retrieval/archive reading; M5 packages; M6 service/transports; M7 GUI; M8 integrates all features.
 Each milestone needs direct public-seam evidence; a document or compilation result is not implementation acceptance.
 Independent test authors derive checks from owners and DTOs, not candidate source.
-A coupled-test replacement needs independent OLD-and-NEW passing proof before deletion; a new behavior needs its intended OLD failure and NEW pass.
+
+Use the [test lifecycle](test-strategy.md#test-authority-and-lifecycle) for behavior-preserving replacement, intended behavior changes, and internal-mechanism retirement; this delivery summary does not broaden those proof obligations.
+
 Each landing gates the final rebased HEAD; integrated batches account for the complete deterministic suite and artifact smoke.
 
 The first CI workflow must include Linux x86_64 headless tests, lint, release build, and artifact smoke.

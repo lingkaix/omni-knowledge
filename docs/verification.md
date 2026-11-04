@@ -39,9 +39,11 @@ A deciding oracle needs four properties:
 
 Run the applicable falsifier before claiming deterministic proof. State each missing property rather than hiding weakness. A weak oracle informs accountable judgment but cannot establish deterministic proof. Either declare and demote it, or convert the question to a directly observable necessary condition. Add a mechanical proxy only for an observed failure it can detect, not an imagined completeness claim. A judgment about value or simplicity states its authority, evidence, alternatives, and uncertainty; agreement is not reproducibility proof.
 
-For a new or materially changed acceptance harness, demonstrate success and deliberate failure before trusting its verdict. Demonstrate timeout handling if it declares a timeout outcome. Use stable stand-in targets to admit the instrument; this self-check provides no product evidence. Keep a target observable until its deciding observation completes, and use explicit terminal outcomes. A skipped or inapplicable classification needs its own observation and accepted reason. Confirm that the deciding assertion ran for every counted case.
+Separate harness admission applies to distinct process, native-interface, artifact-smoke, and real-use acceptance harnesses. Ordinary module and in-process contract test files do not acquire a separate stand-in admission or re-admission cycle when their assertions change. Their oracles must still be independent of the candidate, and their intended failures must still be observed.
 
-An unchanged admitted harness remains admitted. Changes to its control flow, oracle, terminal outcomes, stand-ins, or deciding observations require renewed admission. An unadmitted harness produces no gate evidence, whether it passes or fails.
+For a new or materially changed distinct acceptance harness, demonstrate success and deliberate failure before trusting its verdict. Demonstrate timeout handling if it declares a timeout outcome. Use stable stand-in targets to admit the instrument; this self-check provides no product evidence. Keep a target observable until its deciding observation completes, and use explicit terminal outcomes. A skipped or inapplicable classification needs its own observation and accepted reason. Confirm that the deciding assertion ran for every counted case.
+
+Within that distinct-harness scope, an unchanged admitted harness remains admitted. Changes to its control flow, oracle, terminal outcomes, stand-ins, or deciding observations require renewed admission. An unadmitted harness produces no gate evidence, whether it passes or fails.
 
 Use mutation or fault injection when a claimed detector's power is uncertain. Record the instrument commit or digest, exact check, intervention, mutated path, exercised path, expected result, observations on both sides, and date. Do not count a skipped or unexercised assertion as coverage. Keep mutations off integration branches and verify their removal. When mechanisms back each other up, analyze them together before claiming either is removable.
 
@@ -56,6 +58,8 @@ For real-environment checks, name the target, exact artifact version, observed e
 Never include credentials in test evidence. Report whether cleanup completed and which state remains. A simulation does not establish production behavior.
 
 ## Measure Without Retrying The Result
+
+The bounded exact-candidate smoke, operator-defect allowance, false-positive exception, no-retry rule, fail-open observer, and preregistered threshold requirements below are stronger local worker additions. They are not ports of equivalent rules in the inspected OpenKit owners.
 
 Before a costly run, perform a smoke check of at most 60 seconds on the exact candidate and planned command path. Record its code or artifact identity, inputs, environment, expected observation, and outcome. A different binary or earlier head does not qualify the candidate. If the bounded smoke cannot exercise the path, report that limitation before the expensive run.
 

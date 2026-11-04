@@ -2,6 +2,8 @@
 
 Date: 2026-11-04. Decision source: the engineer's explicit request to synchronize Omni Knowledge with OpenKit and the supplied synchronization brief. This record preserves provenance and reasons; operative rules remain in the linked owners.
 
+Historical adoption record: the [accepted review corrections](2026-11-04-doctrine-review-rulings.md) subsequently narrow the ablation and OLD/NEW scopes, restore source qualifiers, and separate accounting provenance. Its original review status below describes the initial execution, not the later supplied review.
+
 ## Decision
 
 Adopt applicable OpenKit engineering doctrine and testing changes since the 2026-10-14 baseline. The source snapshot is OpenKit `b67cd0f2c07fba11f189a8850b9f5e5cf0a703f1`, inspected through `origin/main` without modifying the checkout. The starting Omni Knowledge snapshot is `fa7a3c9d974c8a8e622e6e9ad88105c6aa6f781b`.

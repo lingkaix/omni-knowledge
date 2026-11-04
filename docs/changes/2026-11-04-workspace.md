@@ -33,8 +33,9 @@ A foreign governance adapter does not make host authority part of the shared cra
 ## Preservation And Verification
 
 Independent tests characterize existing public behavior before implementation retirement.
-A coupled-test replacement must pass on both old and new code before deleting the old check.
-A changed behavior needs a separate specification-first old-fails/new-passes regression.
+
+Use the [test lifecycle](../specs/test-strategy.md#test-authority-and-lifecycle) for the distinct proof obligations of behavior-preserving replacement, intended changes, and internal-mechanism retirement.
+
 No test or source module is retired by the initial workspace declaration.
 The first declaration has the existing package as its sole member and leaves dependency resolution unchanged.
 

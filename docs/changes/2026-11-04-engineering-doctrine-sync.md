@@ -1,6 +1,6 @@
 # Engineering Doctrine Synchronization Record
 
-Date: 2026-11-04. Status: implementation complete; independent criterion comparison remains outstanding. This record preserves execution evidence and cannot authorize product behavior or independently accept its writer's work.
+Date: 2026-11-04. Initial implementation complete. The supervisor subsequently supplied an independent changes-requested review and accepted F1–F6/N1; the r2 correction mapping below records the follow-up. This record preserves execution evidence and cannot authorize product behavior or independently accept its writer's work.
 
 ## Source Intent And Boundary
 
@@ -81,7 +81,7 @@ Locations below refer to headings at the baseline unless marked new. Unlisted te
 | 20261014 baseline record, old role link | Relinked only | roles/README; historical observations and conclusions are unchanged. |
 | docs/agents, product client and knowledge workflow | Unchanged | This is a product operations guide, not a stale role-policy duplicate. |
 
-## Added Rules And Provenance
+## Initial Added Rules And Provenance
 
 The October 22 source supplies public-interface units, real owned stores, behavior assertions, shared setup builders, three-way failure triage, independent retirement, and line-ratio review signals. The October 31 source supplies the admitted rebuild corpus and falsifiable delegation premise. Existing source doctrine supplies oracle falsifiers, harness admission, effect boundaries, explicit environments, independent roles, and lossless documentation.
 
@@ -98,8 +98,27 @@ The brief supplies stricter or missing worker rules: independent authorship for 
 
 No executable layer, runner, registry, source module, dependency, product state, CI workflow, or validator is added. Existing cleanly mapped filenames remain; no alias or stale role duplicate is left.
 
-## Verification And Remaining Work
+## Initial Verification And Remaining Work
 
 The initial candidate passed `node temp/doctrine-sync/check-docs.cjs`: 51 Markdown files, 184 local links and anchors, and 23 changed documentation paths. The probe's valid-target and valid-anchor controls passed; deliberate missing-target and missing-anchor controls were detected. `git diff --check` and `cargo fmt --all -- --check` also passed. The external evidence report records the repeated gate on final HEAD with exact command results. Cargo compilation, Clippy, tests, native UI, and packaging are not required for this content-only diff and are not claimed as passed. The first bare Cargo format invocation caused mise to provision the declared Rust 1.99.0 toolchain automatically; no repository setup or source file changed. Product and test source lines changed: zero.
 
-Independent criterion comparison and independent acceptance have not run because the task prohibits starting agents. The sole writer inspected the actual diff and surrounding owners, but that is self-review only. An authorized future independent reviewer should compare this mapping, baseline text, final artifacts, and the source crosswalk before treating the rewrite as independently accepted. The explicit commit-and-push request does not turn this missing review into a passing result.
+At initial closeout, independent criterion comparison and independent acceptance had not run because the task prohibited starting agents. The sole writer's artifact inspection was self-review only. A later independent review requested the changes recorded below; the supervisor accepted those findings. Neither the initial push nor r2 self-checks constitute independent approval.
+
+## R2 Accepted Review Corrections
+
+The supervisor supplied an independent review of the two initial commits with 0 blocking findings, 6 should-fix findings, and 1 note. The supervisor accepted F1–F6/N1 and supplied explicit F2, F5, and F6 rulings. The [supplemental decision](../decisions/2026-11-04-doctrine-review-rulings.md) records their authority, reasons, and alternatives. This section supersedes over-broad scope and mixed-provenance claims in the historical initial mapping, without rewriting what the first execution observed.
+
+The follow-up began by pulling fresh main at `28df447f4d7ddf1415155d9aa71f9f63e0eb3815`, preserving the concurrent worker's workspace, service contracts, and revised Cargo gate. A daemon restart interrupted editing after F1/F2; local and remote HEAD were checked again and still matched that commit. Only those two files were dirty, and no r2 commit or push had occurred. Work resumed without duplicating a push.
+
+| Finding / old criterion | Accepted change and destination | Retained boundary |
+| --- | --- | --- |
+| F1: recovery could be self-reconciliation; selected triggers were optional | change-execution, Execute The Next Useful Step: require a fresh independent check after recovery events before renewed investment and at a selected meaningful trigger. | Scope remains material long-running work; ordinary commits within an examined route are not triggers. |
+| F2: every addition required experimental removal | engineering-principles, Keep Responsibilities Clear; builder; execution rationale: mandatory necessity and reasoned ablation for every new mechanism, with experiments only for uncertain claims or maintenance/deletion. | Preserve capable observation for experimental necessity or safe-removal claims; a blind green suite is insufficient. |
+| F3: admission and re-admission omitted lower-layer exception | verification, Check The Check: distinct process/native/artifact/real-use harnesses need admission; ordinary module/in-process contract files do not acquire a stand-in cycle. | Independent oracles and intended failures still apply to ordinary tests. |
+| F4: duplicate retirement lost passing, same clause, and boundary qualifiers | test-strategy, Test Authority And Lifecycle; test-author: require an existing passing check of the same owner clause at an equal/lower sufficient boundary. | Independent disposition remains required. |
+| F5: two-pass coupled replacement applied universally | test-strategy lifecycle; test-author; root summary: apply local two-pass proof only to still-required behavior during behavior-preserving replacement. Fresh-main product delivery and workspace-record testing summaries now link that lifecycle instead of repeating the broad condition. | Intended changes use fail-OLD/pass-NEW; pure internal retirement uses independent disposition and coverage accounting without invented requirements or duplicate tests. No product behavior changes. |
+| F6: clean working diff could inspect no committed changes | toolchain, Checks And Packaging; change-execution, Land And Check The Final Head: record the reviewed base and check its committed range to HEAD; check staged/unstaged changes separately. | Use the actual integrated baseline and re-gate after rebase or content changes. |
+| N1: one missing-in-both row mixed accounting and worker cadence | test-strategy, Keep Coverage And Cost Honest; change-execution; external crosswalk: split source accounting invariants from locally generalized cadence and local-batch application. | No source CI or release machinery is imported. |
+| Stronger additions could look like equivalent ports | Label local additions in principles, execution, test strategy, verification, root language restriction, and role summaries. | Source-derived necessity judgment, independent disposition, and accounting invariants remain source-derived, not newly missing doctrine. |
+
+Only doctrine documentation changes in r2. No new mechanism, runtime, registry, dependency, source code, or permanent validator is introduced. The existing temporary structural probe is reused with an explicit reviewed-base argument so concurrent source commits do not become this documentation change's scope. Product/runtime checks remain not run for the content-only diff. Exact final rebased HEAD, reviewed base, whitespace checks, repository-wide format check, link results, commit, and remote verification are recorded in the external report. No agent was started and no coordinator was contacted. A separate independent re-review of r2 has not run; the writer does not claim it did.
