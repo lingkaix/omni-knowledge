@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "vendor/retrieval-kernel"]
+members = [".", "vendor/retrieval-kernel", "crates/omni-service"]
 resolver = "3"
 
 [package]
