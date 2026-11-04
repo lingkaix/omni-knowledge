@@ -97,7 +97,14 @@ The CI artifact is labelled unsigned; this option does not change local signing 
 
 ## Other Helpers
 
-`scripts/collect-licenses.py` uses development-time Python 3.9 or newer to collect locked Darwin dependency notices and exact MPL source archives.
-It writes only a fresh destination and records upstream notice gaps; Python is not required by the app.
+`scripts/collect-licenses.py` uses development-time Python 3.9 or newer to collect target-specific locked dependency notices and exact MPL source archives.
+Its default remains the Darwin GUI graph for the existing macOS bundler.
+Use `python3 scripts/collect-licenses.py --target x86_64-unknown-linux-gnu --headless OUTPUT` for the Linux CLI archive; `OUTPUT` must be a new directory.
+The inventory binds the target, selected features, root package, and exact workspace lock digest and conservatively includes reachable normal/build dependencies, not dev-only edges.
+It can reuse retained upstream notices only when crate/version/VCS identity and notice hash all match; it introduces no second notice registry.
+For a registry package with no discovered notice text, it includes the exact checksum-verified original source archive as evidence and retains the gap rather than inventing copyright terms.
+CI includes these notices/source archives in the Linux archive and checks the unpacked inventory and required Tantivy notice evidence before upload.
+Coverage gaps remain explicit; discovered text or a source archive is not a complete legal compliance certification.
+Python is not required by the installed CLI or app.
 `scripts/setup-asr.sh` prepares a pinned optional whisper.cpp and multilingual model under ignored `temp/asr-runtime/`.
 Read [the multimodal guide](../docs/multimodal.md) before setting executable and model paths in a library configuration.

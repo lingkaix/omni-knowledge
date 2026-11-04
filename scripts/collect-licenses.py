@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect an offline, conservative macOS dependency notice snapshot for a staged app.
+"""Collect an offline, target-specific dependency notice snapshot for a staged artifact.
 
 This development-time tool uses Python's standard library and needs no Python runtime in the app.
 It preserves discovered upstream text and explicitly reports missing or partial notice evidence.
@@ -47,10 +47,11 @@ def safe_url(value: str | None) -> str | None:
     return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
 
 
-def cargo_metadata() -> dict:
-    """Read the locked Darwin GUI graph offline without building or updating the lockfile."""
-    command = ["cargo", "metadata", "--offline", "--locked", "--features", "gui",
-               "--filter-platform", TARGET, "--format-version", "1"]
+def cargo_metadata(target: str, gui: bool) -> dict:
+    """Read the requested locked target graph offline without building or changing resolution."""
+    command = ["cargo", "metadata", "--offline", "--locked", "--filter-platform", target,
+               "--format-version", "1"]
+    command += ["--features", "gui"] if gui else ["--no-default-features"]
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, timeout=60)
     return json.loads(result.stdout)
@@ -207,8 +208,8 @@ def source_url(package: dict) -> str | None:
     return None
 
 
-def mpl_archive(package: dict, root: Path, output: Path, lock_checksum: str | None) -> dict:
-    """Copy an exact cached MPL-only crate archive after hash and contained-source validation."""
+def source_archive(package: dict, root: Path, output: Path, lock_checksum: str | None) -> dict:
+    """Copy exact cached source after hash/confinement checks for MPL obligations or notice gaps."""
     expected = lock_checksum
     if expected is None:
         checksum_path = root / ".cargo-checksum.json"
@@ -219,10 +220,10 @@ def mpl_archive(package: dict, root: Path, output: Path, lock_checksum: str | No
     archive = root.parent.parent.parent / "cache" / root.parent.name / filename
     if (any(path.is_symlink() for path in [archive, archive.parent, archive.parent.parent])
         or not archive.is_file() or archive.stat().st_size > MAX_ARCHIVE_BYTES):
-        raise ValueError(f"missing or unsafe MPL source archive: {filename}")
+        raise ValueError(f"missing or unsafe crate source archive: {filename}")
     data = archive.read_bytes()
     if len(data) > MAX_ARCHIVE_BYTES or digest(data) != expected:
-        raise ValueError(f"MPL source archive checksum mismatch: {filename}")
+        raise ValueError(f"crate source archive checksum mismatch: {filename}")
     top = f"{package['name']}-{package['version']}"
     size, count = 0, 0
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as source:
@@ -233,16 +234,43 @@ def mpl_archive(package: dict, root: Path, output: Path, lock_checksum: str | No
             if (path.is_absolute() or not path.parts or path.parts[0] != top or ".." in path.parts
                 or any(part in EXCLUDED or part.startswith(".env") for part in path.parts)
                 or not (member.isfile() or member.isdir()) or count > 20000 or size > MAX_ARCHIVE_BYTES):
-                raise ValueError(f"MPL source archive contains unsafe or excessive entries: {filename}")
+                raise ValueError(f"crate source archive contains unsafe or excessive entries: {filename}")
     destination = output / "Sources" / filename
     destination.parent.mkdir(exist_ok=True)
     destination.write_bytes(data)
     return {"path": destination.relative_to(output).as_posix(), "sha256": expected, "bytes": len(data)}
 
 
-def collect(metadata: dict, output: Path) -> dict:
-    """Write a fresh notice inventory and verified MPL source archives, recording rather than hiding coverage gaps."""
+def retained_notices(package: dict, root: Path | None, workspace: Path) -> list[dict]:
+    """Reuse hash-verified vendor notice evidence only for the same crate, version, and VCS revision."""
+    directory = workspace / "vendor/retrieval-kernel/notices"
+    manifest = directory / "UPSTREAM.json"
+    if root is None or not manifest.is_file():
+        return []
+    revision = vcs_revision(root)
+    records = []
+    for entry in json.loads(read_text(manifest)):
+        if (entry["crate"] != package["name"] or entry["version"] != package["version"]
+                or not revision or entry["revision"] != revision):
+            continue
+        relative = PurePosixPath(entry["file"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("uncontained retained notice path")
+        path = directory / entry["file"]
+        text = read_text(path)
+        if digest(text.encode("utf-8")) != entry["sha256"]:
+            raise ValueError(f"retained notice checksum mismatch: {entry['file']}")
+        records.append({"path": "retained-upstream/" + entry["file"], "text": text})
+    return records
+
+
+def collect(metadata: dict, output: Path, target: str, gui: bool) -> dict:
+    """Write target/lock-bound notices and MPL source, retaining explicit coverage gaps."""
     output.mkdir(parents=True, exist_ok=False)
+    root_id = metadata["resolve"]["root"]
+    root_package = next(package for package in metadata["packages"] if package["id"] == root_id)
+    lockfile = Path(metadata["workspace_root"]) / "Cargo.lock"
+    lock_digest = digest(read_text(lockfile, 8 * 1024 * 1024).encode("utf-8"))
     packages = reachable_packages(metadata)
     checksums = locked_checksums(metadata)
     inventory, texts, snapshots = [], {}, []
@@ -254,6 +282,7 @@ def collect(metadata: dict, output: Path) -> dict:
         records, fallbacks, warnings = [], [], []
         if root:
             records, fallbacks, warnings = collect_text(package, root)
+            records.extend(retained_notices(package, root, Path(metadata["workspace_root"])))
         else:
             warnings.append("nonregistry, local-patched, or unsafe source was excluded from collection")
         snapshots.append((package, root, entry, records, fallbacks, warnings))
@@ -277,14 +306,20 @@ def collect(metadata: dict, output: Path) -> dict:
             warnings.append("declared license is unspecified; upstream terms require review")
         if not records and not fallbacks:
             warnings.append("no upstream license or copyright text discovered; metadata and exact source URL only")
-        if package.get("license") == "MPL-2.0":
+        mpl = package.get("license") == "MPL-2.0"
+        missing_notice = root is not None and not records and not fallbacks
+        if mpl or missing_notice:
             if root is None:
                 raise ValueError(f"MPL-only dependency source cannot be collected: {package['name']}")
             key = (package["name"], package["version"], package.get("source"))
-            entry["source_archive"] = mpl_archive(package, root, output, checksums.get(key))
+            entry["source_archive"] = source_archive(package, root, output, checksums.get(key))
+            entry["source_archive_reason"] = "mpl_source_obligation" if mpl else "upstream_notice_gap_evidence"
         entry["warnings"] = warnings
         inventory.append(entry)
-    audit = {"target": TARGET, "features": ["gui"], "scope": "conservative reachable normal and build dependencies; excludes root and dev-only edges; not an exact linked-code inventory",
+    audit = {"target": target, "features": ["gui"] if gui else [],
+             "root_package": {"name": root_package["name"], "version": root_package["version"]},
+             "lockfile_sha256": lock_digest,
+             "scope": "conservative reachable normal and build dependencies; excludes root and dev-only edges; not an exact linked-code inventory",
              "coverage_limit": "Discovered upstream text is preserved. Fallback and missing cases need review; this snapshot is not a public-release compliance certification.",
              "package_count": len(inventory), "declared_license_counts": dict(sorted(collections.Counter(entry["declared_license"] or "UNSPECIFIED" for entry in inventory).items())),
              "packages": inventory}
@@ -292,7 +327,7 @@ def collect(metadata: dict, output: Path) -> dict:
     with (output / "THIRD_PARTY_NOTICES.txt").open("w", encoding="utf-8", newline="\n") as document:
         document.write("Omni Knowledge third-party dependency notice snapshot\n\n" + audit["scope"] + "\n" + audit["coverage_limit"] + "\n")
         document.write("Original components retain their licenses; declared expressions are recorded verbatim, including legacy slash notation.\n")
-        document.write("MPL-only source archives are under Sources/; .crate files are gzip tar archives. Their source remains under MPL-2.0 with original notices.\n")
+        document.write("Sources/ contains exact gzip-tar .crate archives for MPL source obligations and upstream notice gaps; each retains its declared license and original source evidence.\n")
         for entry in inventory:
             document.write(f"\n=== {entry['name']} {entry['version']} ===\nDeclared license: {entry['declared_license'] or 'UNSPECIFIED'}\n")
             if entry["repository"]:
@@ -303,7 +338,7 @@ def collect(metadata: dict, output: Path) -> dict:
                 for notice in entry[field]:
                     document.write(f"{field}: {notice['path']} -> full text SHA-256 {notice['text_sha256']}\n")
             if entry.get("source_archive"):
-                document.write(f"Included unmodified MPL source: {entry['source_archive']['path']} (SHA-256 {entry['source_archive']['sha256']})\n")
+                document.write(f"Included unmodified source ({entry['source_archive_reason']}): {entry['source_archive']['path']} (SHA-256 {entry['source_archive']['sha256']})\n")
             for warning in entry["warnings"]:
                 document.write(f"Coverage note: {warning}\n")
         for content_hash, text in sorted(texts.items()):
@@ -314,7 +349,8 @@ def collect(metadata: dict, output: Path) -> dict:
             "dedicated_notice_files": sum(len(entry["notices"]) for entry in inventory),
             "fallback_review_cases": [f"{entry['name']}@{entry['version']}" for entry in inventory if not entry["notices"]],
             "metadata_only_gaps": [f"{entry['name']}@{entry['version']}" for entry in inventory if not entry["notices"] and not entry["fallback_evidence"]],
-            "mpl_source_archives": [entry["source_archive"] for entry in inventory if "source_archive" in entry],
+            "mpl_source_archives": [entry["source_archive"] for entry in inventory if entry.get("source_archive_reason") == "mpl_source_obligation"],
+            "source_archives": [entry["source_archive"] for entry in inventory if "source_archive" in entry],
             "artifact_bytes": sum(path.stat().st_size for path in output.rglob("*") if path.is_file())}
 
 
@@ -322,9 +358,11 @@ def main() -> int:
     """Generate a fresh staged resource directory and print a concise machine-readable audit summary."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new staged ThirdParty directory; must not already exist")
+    parser.add_argument("--target", default=TARGET, help="exact Cargo target triple; default preserves the macOS bundle")
+    parser.add_argument("--headless", action="store_true", help="collect the no-default-features CLI graph, not GUI dependencies")
     args = parser.parse_args()
     try:
-        summary = collect(cargo_metadata(), args.output)
+        summary = collect(cargo_metadata(args.target, not args.headless), args.output, args.target, not args.headless)
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
         print(f"Dependency notice collection failed: {error}", file=sys.stderr)
         return 1
