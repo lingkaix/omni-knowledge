@@ -125,3 +125,75 @@ Suggested separate follow-on leases are a confined local backend, an existing-OS
 Each needs its own independent public-seam tests; cloud/NAS/native effects require actual authorized environments.
 Initialization/migration, journal/tracking, safe writes, cache, history, packages, processing, service integration, settings/approval, and application cutover remain unimplemented here.
 See the [change record](../../docs/changes/2026-11-04-core-framework.md) for assignment and evidence scope.
+
+## Preparatory Private Cache
+
+The earlier scope statements describe the preserved manifest/backend slice.
+The new Linux/macOS `cache` module adds derived-object I/O only; it does not activate that slice or change its APIs.
+The [cache record](../../docs/changes/2026-11-04-cache-framework.md) records necessity, limitations, and required independent follow-up.
+
+### Trusted Inputs And Placement
+
+`Cache::open(existing_root, context, limits)` requires an already provisioned app-owned 0700 directory.
+It does not guess an OS cache location, create a parent, follow symlinks, or repair unknown permissions.
+Admission checks current-user ownership, exact mode bits, captured native identity, lexical overlap, and physical ancestor identities before creating even its owner file.
+Every effect/read rechecks current roots and source mapping, and held descriptors keep effects attached to captured roots and namespace directories.
+Changes refuse access; they never redirect an operation to a parent.
+
+`CacheContext` is the one trusted in-process mapping boundary, not a serializable approval token or provider/processor registry.
+Its native owner must supply complete current home/mount/cloud/history roots, independently observed locality, and private ACL/inheritance assessment.
+Mode checks establish Unix ownership/mode facts, not an independent extended-ACL or cloud-provider assessment.
+`Untrusted` locality always refuses; `ExplicitLocalAlternative` still requires native observation for that actual selected root.
+This module does not infer locality or permission from a manifest, filesystem name, or ID.
+Prohibited paths must currently be accessible absolute no-symlink directories; unresolved/offline roots fail closed rather than being assumed outside the cache.
+That current limitation is not approval to narrow accepted offline behavior; owner scrutiny is required before integration.
+
+`resolve(library, source, effective_processor)` must recheck current selected root, verified original digest, exclusions, local policy, and every effective dependency.
+A `SourceAdmission` returned by that trusted owner binds the native selected-home identity and local admission revision, not only a portable library ID.
+A copied same-ID library has another namespace; a moved same-inode library can reuse compatible facts only after current validation.
+Sensitive, unexposed, and exposed domains have distinct per-library namespaces.
+The cache exposes no naked-hash lookup, original-copy operation, filesystem adapter, service authentication, or exposure approval.
+
+### Keys And Real I/O
+
+`ProcessorIdentity::fingerprint(max_bytes)` structurally hashes code digest, effective version/options/model/package/space/dimensions/preprocessing, and dependency-role digests.
+The processor owner must expand defaults/overrides and include actual immutable artifacts plus every used corrected transcript and embedding-relevant annotation.
+Map keys sort deterministically; values are exact UTF-8 strings, not floating-point JSON numbers or ambiguous concatenations.
+Meaningful order belongs in the effective value; equivalent numeric spellings may conservatively produce different identities rather than collide through rounding.
+Never put credentials or source bodies into identity options; use the appropriate input digest.
+Distinct processor/object/namespace version salts prevent cross-domain reinterpretation.
+The object key binds the verified original digest and processor fingerprint, without inventing a source ID from equal bytes.
+
+`publish` streams actual derived bytes with finite buffer/object/disk/entry settings, verifies the complete candidate, and atomically hard-links its complete name without replacement.
+The old complete object is never overwritten, renamed away, rolled back, or deleted.
+Identical existing objects are independently verified; differing payloads at an identical key are conflicts, and corrupt objects are refused.
+Directory sync/binding failures after a possible install return `Indeterminate`, not fabricated success or automatic replay.
+The producer must provide derived output only and bound its own blocking I/O; EOF must mean validated complete processor success, not merely a failed child's closed pipe.
+Cancellation is observed between bounded chunks and before the atomic install; cancellation after that commit point cannot undo a complete object.
+
+`pin` resolves the current admitted source and opens a real complete object; `PinnedObject::read` revalidates that mapping and returns only a bounded range from one fully SHA-verified stream.
+Detected root, policy, dependency, source, namespace, or native file-version drift returns no bytes.
+One nonblocking I/O lane bounds cache-owned active buffers/accounting; concurrent or reentrant operations return `Busy`, without a hidden queue or deadlock.
+`max_pins` bounds retained reader descriptors and recipe copies; returned caller-owned byte buffers, context allocation, global RSS, and producer execution remain outside those per-operation bounds.
+Active RAM has a constant-factor buffer/range bound plus bounded retained request data; it is not a measured RSS or physical-memory ceiling.
+
+### Ownership And Deliberately Incomplete Lifecycle
+
+An actual nonblocking native file lock enforces one cooperative owning service for the entire selected root.
+Pins retain that semantic owner after the Cache handle drops; cross-process cache readers are not offered.
+The guard explicitly unlocks before closing, so unrelated inherited pre-exec descriptors do not intentionally prolong the reader lifetime.
+Post-fork cache use refuses before touching an inherited Rust mutex; child destructors do not unlock the parent's shared description.
+Independent native inherited-descriptor regression and macOS qualification remain required.
+
+No file is deleted in this slice, including successful/failed candidates, unknown files, symlinks, and complete objects.
+Usage reports retained-candidate and unknown-entry counts as inspection warnings; unknown directories stop accounting instead of concealing an unbounded subtree.
+Hard-linked complete/candidate names are conservatively charged twice by logical size; filesystem metadata/allocation overhead is not a physical-volume reservation.
+Capacity exhaustion stops publication and leaves prior complete objects readable.
+Complete objects can reopen under a new owner; partial candidates stay private, inspectable, and charged across restart, with no job replay or automatic reclamation.
+This is intentionally not full GC, coverage-after-eviction, reservation/restart recovery, or the complete storage lifecycle.
+Those omissions block owner-completeness claims and require a fresh owned key slice before integration that needs reclamation.
+
+Native mode checks and descriptor confinement protect the admitted cooperative private namespace, not arbitrary same-UID malicious code, privileged remounts, forged cache files, or atomicity across namespace movement and policy updates.
+Before/after checks detect observed substitutions; they cannot prove no adversary moved the root into a prohibited tree during a syscall.
+Never treat that limitation as permission to follow symlinks, delete unknown nodes, or publish through unvalidated roots.
+Use only disposable real local files for builder probes; lasting independent cache tests and consequential key review must precede integration.
