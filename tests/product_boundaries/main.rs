@@ -9,10 +9,12 @@ mod fixture;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Existing serve-mcp frame ceiling. Content longer than this is oversized.
@@ -52,9 +54,9 @@ const FRAME_WAIT: Duration = Duration::from_secs(8);
 const PROTOCOL_WAIT: Duration = Duration::from_secs(5);
 const HANG_WAIT: Duration = Duration::from_millis(500);
 const ADMISSION_WAIT: Duration = Duration::from_secs(2);
-const WRITE_GRACE: Duration = Duration::from_millis(400);
 const INIT_WAIT: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_millis(5);
+const COLLECT_WAIT: Duration = Duration::from_secs(1);
 
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
@@ -64,7 +66,10 @@ const SIGKILL: i32 = 9;
 unsafe extern "C" {
     fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
+    fn close(fd: i32) -> i32;
 }
+
+static UNRESOLVED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -113,14 +118,17 @@ fn allocation_delta<T>(body: impl FnOnce() -> T) -> (T, usize) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stop {
     Exited(Option<i32>),
-    StdoutEof,
+    Signaled(i32),
+    StdoutClosedLive,
     Timeout,
-    Predicate,
+    Response,
     ExitedDuringSettle(Option<i32>),
 }
 
 struct Watch {
     stop: Stop,
+    natural: String,
+    cleanup: String,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     bytes_written: usize,
@@ -141,14 +149,14 @@ enum InputPlan {
 }
 
 enum Goal {
-    Terminal,
-    Predicate,
-    WriteAccepted,
+    Exit,
+    ResponseOrExit,
 }
 
 struct Reap {
     child: Child,
     pid: u32,
+    start_ticks: Option<u64>,
     done: bool,
 }
 
@@ -157,8 +165,68 @@ impl Drop for Reap {
         if self.done {
             return;
         }
-        let _ = group_kill(self.pid);
-        let _ = self.child.wait();
+        if let Err(error) = self.finish(true)
+            && let Ok(mut unresolved) = UNRESOLVED.lock()
+        {
+            unresolved.push(error);
+        }
+    }
+}
+
+impl Reap {
+    fn arm(mut command: Command) -> Result<Self, String> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
+            .spawn()
+            .map_err(|error| format!("spawn failed: {error}"))?;
+        let pid = child.id();
+        let start_ticks = start_ticks(pid);
+        Ok(Self {
+            child,
+            pid,
+            start_ticks,
+            done: false,
+        })
+    }
+
+    fn finish(&mut self, kill: bool) -> Result<(), String> {
+        if self.done {
+            return Ok(());
+        }
+        let mut kill_error = None;
+        if kill {
+            kill_error = group_kill(self.pid).err();
+        }
+        let deadline = Instant::now() + COLLECT_WAIT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    self.done = true;
+                    return Ok(());
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    return Err(self.unresolved("still live", kill_error));
+                }
+                Ok(None) => {}
+                Err(error) if Instant::now() >= deadline => {
+                    return Err(self.unresolved(&error.to_string(), kill_error));
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    fn unresolved(&self, wait: &str, kill_error: Option<String>) -> String {
+        format!(
+            "unresolved pid {} start_ticks={:?} wait={wait} kill={}",
+            self.pid,
+            self.start_ticks,
+            kill_error.unwrap_or_else(|| "none".to_string())
+        )
     }
 }
 
@@ -251,32 +319,18 @@ fn write_available(
 }
 
 fn watch(
-    mut command: Command,
+    command: Command,
     plan: InputPlan,
     goal: Goal,
     settle: Duration,
     wait: Duration,
 ) -> Result<Watch, String> {
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = command
-        .spawn()
-        .map_err(|error| format!("spawn failed: {error}"))?;
-    let pid = child.id();
-    let start_ticks = start_ticks(pid);
-    let stdout_fd = child.stdout.as_ref().ok_or("missing stdout")?.as_raw_fd();
-    let stderr_fd = child.stderr.as_ref().ok_or("missing stderr")?.as_raw_fd();
-    let stdin_fd = child.stdin.as_ref().ok_or("missing stdin")?.as_raw_fd();
-    set_nonblocking(stdout_fd)?;
-    set_nonblocking(stderr_fd)?;
-    set_nonblocking(stdin_fd)?;
-    let mut reap = Reap {
-        child,
-        pid,
-        done: false,
-    };
+    let mut reap = Reap::arm(command)?;
+    if let Err(error) = prepare_stdio(&mut reap) {
+        return setup_failure(reap, error);
+    }
+    let pid = reap.pid;
+    let start_ticks = reap.start_ticks;
     let started = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -292,26 +346,18 @@ fn watch(
     let mut stop = None;
     let settle_deadline = started + settle;
     let wait_origin = settle_deadline;
-    let mut grace_started: Option<Instant> = None;
-    let mut wait_error: Option<String> = None;
+    let mut stdout_closed_live = false;
     while stop.is_none() {
         if !reap.done {
             match reap.child.try_wait() {
                 Ok(Some(status)) => {
                     reap.done = true;
-                    let during_settle = Instant::now() < settle_deadline && written == 0;
-                    stop = Some(if during_settle && !settle.is_zero() {
-                        Stop::ExitedDuringSettle(status_code(status))
-                    } else {
-                        Stop::Exited(status_code(status))
-                    });
+                    let during_settle =
+                        !settle.is_zero() && Instant::now() < settle_deadline && written == 0;
+                    stop = Some(stop_from_status(status, during_settle));
                 }
                 Ok(None) => {}
-                Err(error) => {
-                    reap.done = true;
-                    wait_error = Some(error.to_string());
-                    stop = Some(Stop::Exited(None));
-                }
+                Err(_) => {}
             }
         }
         read_available(&mut reap.child.stdout, &mut stdout, &mut stdout_eof);
@@ -338,37 +384,47 @@ fn watch(
                 }
             }
         }
-        if stdout_eof && stop.is_none() && !matches!(goal, Goal::WriteAccepted) {
-            stop = Some(Stop::StdoutEof);
+        if stdout_eof && !reap.done {
+            stdout_closed_live = true;
         }
-        if matches!(goal, Goal::Predicate) && predicate_ready(&stdout) && stop.is_none() {
-            stop = Some(Stop::Predicate);
-        }
-        if matches!(goal, Goal::WriteAccepted) && write_finished && stop.is_none() {
-            let grace = grace_started.get_or_insert_with(Instant::now);
-            if grace.elapsed() >= WRITE_GRACE {
-                stop = Some(Stop::Predicate);
-            }
+        if matches!(goal, Goal::ResponseOrExit) && stop.is_none() && response_ready(&stdout) {
+            stop = Some(Stop::Response);
         }
         if stop.is_none()
             && settled
             && Instant::now().saturating_duration_since(wait_origin) >= wait
         {
-            stop = Some(Stop::Timeout);
+            stop = Some(if stdout_closed_live && !reap.done {
+                Stop::StdoutClosedLive
+            } else {
+                Stop::Timeout
+            });
         }
         if stop.is_none() {
             std::thread::sleep(POLL);
         }
     }
     let stop = stop.unwrap_or(Stop::Timeout);
-    let cleanup_error = match (wait_error, cleanup_reap(&mut reap)) {
-        (None, later) => later,
-        (Some(error), None) => Some(error),
-        (Some(error), Some(later)) => Some(format!("{error}; {later}")),
+    let natural = natural_label(stop);
+    let kill = !reap.done;
+    let cleanup = if reap.done {
+        "already-collected"
+    } else if matches!(stop, Stop::Response) {
+        "killed-after-response"
+    } else {
+        "killed-for-containment"
+    };
+    let cleanup_error = reap.finish(kill).err();
+    let cleanup = if cleanup_error.is_some() {
+        "unresolved"
+    } else {
+        cleanup
     };
     let same = same_process(pid, start_ticks);
     Ok(Watch {
         stop,
+        natural,
+        cleanup: cleanup.to_string(),
         stdout,
         stderr,
         bytes_written: written,
@@ -382,30 +438,80 @@ fn watch(
     })
 }
 
-fn status_code(status: ExitStatus) -> Option<i32> {
-    status.code()
+fn prepare_stdio(reap: &mut Reap) -> Result<(), String> {
+    let stdout_fd = reap
+        .child
+        .stdout
+        .as_ref()
+        .ok_or("missing stdout")?
+        .as_raw_fd();
+    let stderr_fd = reap
+        .child
+        .stderr
+        .as_ref()
+        .ok_or("missing stderr")?
+        .as_raw_fd();
+    let stdin_fd = reap
+        .child
+        .stdin
+        .as_ref()
+        .ok_or("missing stdin")?
+        .as_raw_fd();
+    set_nonblocking(stdout_fd)?;
+    set_nonblocking(stderr_fd)?;
+    set_nonblocking(stdin_fd)?;
+    Ok(())
 }
 
-fn predicate_ready(stdout: &[u8]) -> bool {
-    stdout.contains(&b'\n')
-}
-
-fn cleanup_reap(reap: &mut Reap) -> Option<String> {
-    if reap.done {
-        return None;
-    }
-    let kill_error = group_kill(reap.pid).err();
-    let wait_error = match reap.child.wait() {
-        Ok(_) => None,
-        Err(error) => Some(error.to_string()),
+fn setup_failure(mut reap: Reap, error: String) -> Result<Watch, String> {
+    let pid = reap.pid;
+    let ticks = reap.start_ticks;
+    let cleanup = reap.finish(true);
+    let action = if cleanup.is_ok() {
+        "killed-for-containment"
+    } else {
+        "unresolved"
     };
-    reap.done = true;
-    match (kill_error, wait_error) {
-        (None, None) => None,
-        (Some(kill), None) => Some(kill),
-        (None, Some(wait)) => Some(wait),
-        (Some(kill), Some(wait)) => Some(format!("{kill}; {wait}")),
+    println!(
+        "OBSERVE setup_failure stop=setup natural=none cleanup={action} pid={pid} start_ticks={ticks:?}"
+    );
+    let primary = format!("setup failed: {error} pid={pid} start_ticks={ticks:?} cleanup={action}");
+    match cleanup {
+        Ok(()) => Err(primary),
+        Err(cleanup) => Err(format!("{primary}; cleanup unresolved: {cleanup}")),
     }
+}
+
+fn stop_from_status(status: ExitStatus, during_settle: bool) -> Stop {
+    if let Some(signal) = status.signal() {
+        return Stop::Signaled(signal);
+    }
+    let code = status.code();
+    if during_settle {
+        Stop::ExitedDuringSettle(code)
+    } else {
+        Stop::Exited(code)
+    }
+}
+
+fn natural_label(stop: Stop) -> String {
+    match stop {
+        Stop::Exited(Some(code)) => format!("exit({code})"),
+        Stop::Exited(None) => "exit(unknown)".to_string(),
+        Stop::Signaled(signal) => format!("signaled({signal})"),
+        Stop::StdoutClosedLive => "stdout-closed-live".to_string(),
+        Stop::Timeout => "timeout".to_string(),
+        Stop::Response => "response".to_string(),
+        Stop::ExitedDuringSettle(Some(code)) => format!("settle-exit({code})"),
+        Stop::ExitedDuringSettle(None) => "settle-exit(unknown)".to_string(),
+    }
+}
+
+fn response_ready(stdout: &[u8]) -> bool {
+    stdout.split(|byte| *byte == b'\n').any(|line| {
+        contains_slice(line, b"\"jsonrpc\"")
+            && (contains_slice(line, b"\"result\"") || contains_slice(line, b"\"error\""))
+    })
 }
 
 struct Outcome {
@@ -458,15 +564,26 @@ fn contains_run(haystack: &[u8], byte: u8, run: usize) -> bool {
 }
 
 fn has_result_for_id(buffer: &[u8], id: i64) -> bool {
+    protocol_line(buffer, id, b"\"result\"")
+}
+
+fn has_error_for_id(buffer: &[u8], id: i64) -> bool {
+    protocol_line(buffer, id, b"\"error\"")
+}
+
+fn has_jsonrpc_error(buffer: &[u8]) -> bool {
+    buffer
+        .split(|byte| *byte == b'\n')
+        .any(|line| contains_slice(line, b"\"jsonrpc\"") && contains_slice(line, b"\"error\""))
+}
+
+fn protocol_line(buffer: &[u8], id: i64, kind: &[u8]) -> bool {
     let exact = format!("\"id\":{id}").into_bytes();
     let spaced = format!("\"id\": {id}").into_bytes();
-    for line in buffer.split(|byte| *byte == b'\n') {
+    buffer.split(|byte| *byte == b'\n').any(|line| {
         let has_id = contains_slice(line, &exact) || contains_slice(line, &spaced);
-        if has_id && contains_slice(line, b"\"result\"") {
-            return true;
-        }
-    }
-    false
+        has_id && contains_slice(line, kind) && contains_slice(line, b"\"jsonrpc\"")
+    })
 }
 
 fn has_panic(buffer: &[u8]) -> bool {
@@ -489,8 +606,10 @@ fn one_line(bytes: &[u8]) -> String {
 
 fn watch_detail(watch: &Watch) -> String {
     format!(
-        "stop={:?} pid={} start_ticks={:?} written={}/{} stdin_closed={} elapsed_ms={} cleanup={} same_pid_after={} stdout={} stderr={}",
+        "stop={:?} natural={} cleanup={} pid={} start_ticks={:?} written={}/{} stdin_closed={} elapsed_ms={} cleanup_error={} same_pid_after={} stdout={} stderr={}",
         watch.stop,
+        watch.natural,
+        watch.cleanup,
         watch.pid,
         watch.start_ticks,
         watch.bytes_written,
@@ -502,6 +621,31 @@ fn watch_detail(watch: &Watch) -> String {
         one_line(&watch.stdout),
         one_line(&watch.stderr),
     )
+}
+
+fn observe(name: &str, watch: &Watch) {
+    println!(
+        "OBSERVE {name} stop={:?} natural={} cleanup={} pid={} start_ticks={:?} written={}/{} stdin_closed={} elapsed_ms={} same_pid_after={}",
+        watch.stop,
+        watch.natural,
+        watch.cleanup,
+        watch.pid,
+        watch.start_ticks,
+        watch.bytes_written,
+        watch.payload_len,
+        watch.stdin_closed_by_us,
+        watch.elapsed_ms,
+        watch.same_process_after_cleanup,
+    );
+}
+
+fn finish_case(primary: Result<(), String>, cleanup: Result<(), String>) -> Result<(), String> {
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(cleanup)) => Err(format!("cleanup separate from primary pass: {cleanup}")),
+        (Err(primary), Err(cleanup)) => Err(format!("primary {primary}; cleanup {cleanup}")),
+    }
 }
 
 fn require_cleanup(watch: &Watch) -> Result<(), String> {
@@ -533,79 +677,253 @@ fn admit_refuse() -> Result<(), String> {
     let watch = watch(
         standin("refuse"),
         InputPlan::Hold,
-        Goal::Terminal,
+        Goal::Exit,
         Duration::ZERO,
         ADMISSION_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    match watch.stop {
+    observe("observer_refuse", &watch);
+    let primary = match watch.stop {
         Stop::Exited(Some(2))
-            if !watch.stdin_closed_by_us && contains_slice(&watch.stdout, b"refused") =>
+            if !watch.stdin_closed_by_us
+                && watch.cleanup == "already-collected"
+                && contains_slice(&watch.stdout, b"refused")
+                && clean_refusal(&watch, b"unused-canary", 1) =>
         {
             Ok(())
         }
-        other => Err(format!(
-            "refuse stand-in classified as {other:?}; {}",
+        _ => Err(format!(
+            "natural refusal misclassified; {}",
             watch_detail(&watch)
         )),
-    }
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn admit_echo() -> Result<(), String> {
     let watch = watch(
         standin("echo"),
         InputPlan::WriteHold(CANARY.to_vec()),
-        Goal::Terminal,
+        Goal::Exit,
         Duration::ZERO,
         ADMISSION_WAIT,
     )?;
-    require_cleanup(&watch)?;
+    observe("observer_echo", &watch);
     let saw_canary = contains_slice(&watch.stdout, CANARY);
     let saw_result = has_result_for_id(&watch.stdout, 1);
     let clean = clean_refusal(&watch, CANARY, 1);
-    if saw_canary && saw_result && !clean {
+    let primary = if saw_canary && saw_result && !clean {
         Ok(())
     } else {
         Err(format!(
             "echo detector canary={saw_canary} result={saw_result} clean={clean}; {}",
             watch_detail(&watch)
         ))
-    }
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn admit_early_eof() -> Result<(), String> {
     let watch = watch(
         standin("early-eof"),
         InputPlan::CloseImmediately,
-        Goal::Terminal,
+        Goal::Exit,
         Duration::ZERO,
         ADMISSION_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if watch.stdin_closed_by_us
+    observe("observer_early_eof", &watch);
+    let primary = if watch.stdin_closed_by_us
         && matches!(watch.stop, Stop::Exited(Some(0)))
+        && watch.cleanup == "already-collected"
         && contains_slice(&watch.stdout, b"ended-on-eof")
     {
         Ok(())
     } else {
         Err(format!("early EOF misclassified; {}", watch_detail(&watch)))
-    }
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn admit_hang() -> Result<(), String> {
     let watch = watch(
         standin("hang"),
         InputPlan::Hold,
-        Goal::Terminal,
+        Goal::Exit,
         Duration::ZERO,
         HANG_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if matches!(watch.stop, Stop::Timeout) && !watch.stdin_closed_by_us {
+    observe("observer_hang", &watch);
+    let primary = if matches!(watch.stop, Stop::Timeout)
+        && watch.cleanup == "killed-for-containment"
+        && !watch.stdin_closed_by_us
+        && !clean_refusal(&watch, b"unused-canary", 1)
+    {
         Ok(())
     } else {
         Err(format!("hang was not a timeout; {}", watch_detail(&watch)))
+    };
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn admit_stdout_live() -> Result<(), String> {
+    let watch = watch(
+        standin("stdout-live"),
+        InputPlan::Hold,
+        Goal::Exit,
+        Duration::ZERO,
+        HANG_WAIT,
+    )?;
+    observe("observer_stdout_live", &watch);
+    let primary = if matches!(watch.stop, Stop::StdoutClosedLive)
+        && watch.cleanup == "killed-for-containment"
+        && !clean_refusal(&watch, b"unused-canary", 1)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "stdout eof while live counted as refusal; {}",
+            watch_detail(&watch)
+        ))
+    };
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn admit_drain_hang() -> Result<(), String> {
+    let watch = watch(
+        standin("drain-hang"),
+        InputPlan::WriteHold(b"drain-check\n".to_vec()),
+        Goal::ResponseOrExit,
+        Duration::ZERO,
+        HANG_WAIT,
+    )?;
+    observe("observer_drain_hang", &watch);
+    let rejected = terminated_outcome(&watch, Terminated::Refuse, None).is_err();
+    let primary = if rejected {
+        Ok(())
+    } else {
+        Err(format!(
+            "drain without a response counted as a terminated outcome; {}",
+            watch_detail(&watch)
+        ))
+    };
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn admit_signal() -> Result<(), String> {
+    let watch = watch(
+        standin("signal"),
+        InputPlan::Hold,
+        Goal::Exit,
+        Duration::ZERO,
+        ADMISSION_WAIT,
+    )?;
+    observe("observer_signal", &watch);
+    let primary = if matches!(watch.stop, Stop::Signaled(_))
+        && watch.cleanup == "already-collected"
+        && !clean_refusal(&watch, b"unused-canary", 1)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "signal death counted as ordinary refusal; {}",
+            watch_detail(&watch)
+        ))
+    };
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn admit_success() -> Result<(), String> {
+    let watch = watch(
+        standin("success"),
+        InputPlan::Hold,
+        Goal::ResponseOrExit,
+        Duration::ZERO,
+        ADMISSION_WAIT,
+    )?;
+    observe("observer_success", &watch);
+    let primary = if matches!(watch.stop, Stop::Response)
+        && has_result_for_id(&watch.stdout, 21)
+        && watch.cleanup == "killed-after-response"
+        && !clean_refusal(&watch, b"unused-canary", 21)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "persistent success was not separated from cleanup; {}",
+            watch_detail(&watch)
+        ))
+    };
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn admit_ownership() -> Result<(), String> {
+    let mut reap = Reap::arm(standin("hang"))?;
+    let pid = reap.pid;
+    let ticks = reap.start_ticks;
+    let cleanup = reap.finish(true);
+    let action = if cleanup.is_ok() {
+        "killed-for-containment"
+    } else {
+        "unresolved"
+    };
+    let alive = same_process(pid, ticks);
+    println!(
+        "OBSERVE observer_setup_fault stop=setup natural=none cleanup={action} pid={pid} start_ticks={ticks:?} same_pid_after={alive}"
+    );
+    if alive {
+        return Err(format!("setup failure left child pid={pid}"));
     }
+    if let Err(error) = cleanup {
+        return Err(format!("setup failure cleanup unresolved: {error}"));
+    }
+    let pid_slot = AtomicU32::new(0);
+    let tick_slot = AtomicU64::new(0);
+    let saw_ticks = AtomicBool::new(false);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = catch_unwind(AssertUnwindSafe(|| {
+        let reap = Reap::arm(standin("hang")).expect("spawn unwind stand-in");
+        pid_slot.store(reap.pid, Ordering::SeqCst);
+        if let Some(ticks) = reap.start_ticks {
+            tick_slot.store(ticks, Ordering::SeqCst);
+            saw_ticks.store(true, Ordering::SeqCst);
+        }
+        panic!("representative post-spawn unwind");
+    }));
+    std::panic::set_hook(previous);
+    let pid = pid_slot.load(Ordering::SeqCst);
+    let ticks = saw_ticks
+        .load(Ordering::SeqCst)
+        .then_some(tick_slot.load(Ordering::SeqCst));
+    let alive = pid > 1 && same_process(pid, ticks);
+    let unresolved = unresolved_note();
+    let action = if unresolved.is_empty() {
+        "dropped-containment"
+    } else {
+        "unresolved"
+    };
+    println!(
+        "OBSERVE observer_unwind stop=unwind natural=none cleanup={action} pid={pid} start_ticks={ticks:?} same_pid_after={alive}"
+    );
+    if caught.is_ok() {
+        return Err("unwind admission did not panic".to_string());
+    }
+    if pid <= 1 {
+        return Err("unwind admission did not own a child".to_string());
+    }
+    if alive {
+        return Err(format!("unwind left child pid={pid}"));
+    }
+    if !unresolved.is_empty() {
+        return Err(format!("unwind cleanup unresolved: {unresolved}"));
+    }
+    Ok(())
+}
+
+fn unresolved_note() -> String {
+    UNRESOLVED
+        .lock()
+        .map(|note| note.join(";"))
+        .unwrap_or_else(|poisoned| poisoned.into_inner().join(";"))
 }
 
 fn clean_refusal(watch: &Watch, canary: &[u8], id: i64) -> bool {
@@ -618,7 +936,11 @@ fn clean_refusal(watch: &Watch, canary: &[u8], id: i64) -> bool {
     if has_result_for_id(&watch.stdout, id) {
         return false;
     }
-    matches!(watch.stop, Stop::Exited(_) | Stop::StdoutEof)
+    match watch.stop {
+        Stop::Exited(Some(_)) => true,
+        Stop::Response => has_jsonrpc_error(&watch.stdout),
+        _ => false,
+    }
 }
 
 fn admit_allocator() -> Result<(), String> {
@@ -679,6 +1001,69 @@ fn omni(root: &Path, current: &Path) -> Command {
     command
 }
 
+fn at_bound_frame() -> Result<Vec<u8>, String> {
+    let prefix = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"b1\",\"version\":\"0\",\"note\":\"";
+    let suffix = "\"}}}";
+    let pad = MCP_FRAME_LIMIT
+        .checked_sub(prefix.len() + suffix.len())
+        .ok_or("initialize prefix exceeds the 4 MiB ceiling")?;
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.extend(std::iter::repeat_n(b'P', pad));
+    bytes.extend_from_slice(suffix.as_bytes());
+    if bytes.len() != MCP_FRAME_LIMIT || bytes.contains(&b'\n') || !json_text_balanced(&bytes) {
+        return Err(format!(
+            "at-bound initialize is not a {} byte JSON value",
+            MCP_FRAME_LIMIT
+        ));
+    }
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn json_text_balanced(bytes: &[u8]) -> bool {
+    let mut braces = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for &byte in bytes {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => braces += 1,
+            b'}' => {
+                braces -= 1;
+                if braces < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    braces == 0 && !in_string && !escape
+}
+
+fn admit_at_bound_fixture() -> Result<(), String> {
+    let bytes = at_bound_frame()?;
+    let content = &bytes[..bytes.len() - 1];
+    if content.len() == MCP_FRAME_LIMIT
+        && bytes.ends_with(b"\n")
+        && json_text_balanced(content)
+        && content.starts_with(b"{\"jsonrpc\":\"2.0\",\"id\":15,")
+    {
+        Ok(())
+    } else {
+        Err(format!("at-bound fixture length {}", content.len()))
+    }
+}
+
 fn initialize_bytes(id: i64, ending: &[u8]) -> Vec<u8> {
     let mut bytes = format!(
         "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"b1\",\"version\":\"0\"}}}}}}"
@@ -719,6 +1104,37 @@ fn run_admission() -> Result<(), String> {
         admit_early_eof(),
     );
     record(&mut cases, "controller", "observer_hang", admit_hang());
+    record(
+        &mut cases,
+        "controller",
+        "observer_stdout_live",
+        admit_stdout_live(),
+    );
+    record(
+        &mut cases,
+        "controller",
+        "observer_drain_hang",
+        admit_drain_hang(),
+    );
+    record(&mut cases, "controller", "observer_signal", admit_signal());
+    record(
+        &mut cases,
+        "controller",
+        "observer_success",
+        admit_success(),
+    );
+    record(
+        &mut cases,
+        "controller",
+        "observer_ownership",
+        admit_ownership(),
+    );
+    record(
+        &mut cases,
+        "controller",
+        "at_bound_fixture",
+        admit_at_bound_fixture(),
+    );
     record(
         &mut cases,
         "controller",
@@ -894,7 +1310,6 @@ fn serve(
 }
 
 fn require_success(watch: &Watch, id: i64) -> Result<(), String> {
-    require_cleanup(watch)?;
     if has_panic(&watch.stderr) || has_panic(&watch.stdout) {
         return Err(format!("panic; {}", watch_detail(watch)));
     }
@@ -904,10 +1319,76 @@ fn require_success(watch: &Watch, id: i64) -> Result<(), String> {
             watch_detail(watch)
         ));
     }
-    if matches!(watch.stop, Stop::Timeout | Stop::ExitedDuringSettle(_)) {
-        return Err(format!("no protocol response; {}", watch_detail(watch)));
+    if !matches!(watch.stop, Stop::Response | Stop::Exited(Some(_))) {
+        return Err(format!(
+            "no natural protocol response; {}",
+            watch_detail(watch)
+        ));
     }
     Ok(())
+}
+
+enum Terminated {
+    Accept,
+    Refuse,
+}
+
+fn terminated_outcome(
+    watch: &Watch,
+    mode: Terminated,
+    echo: Option<(u8, usize)>,
+) -> Result<(), String> {
+    if watch.bytes_written != watch.payload_len {
+        return Err(format!(
+            "terminated frame was not fully acquired; {}",
+            watch_detail(watch)
+        ));
+    }
+    if has_panic(&watch.stderr) || has_panic(&watch.stdout) {
+        return Err(format!(
+            "terminated frame panicked; {}",
+            watch_detail(watch)
+        ));
+    }
+    if let Some((byte, run)) = echo
+        && (contains_run(&watch.stdout, byte, run) || contains_run(&watch.stderr, byte, run))
+    {
+        return Err(format!(
+            "terminated frame echoed input; {}",
+            watch_detail(watch)
+        ));
+    }
+    match mode {
+        Terminated::Accept => {
+            let accepted =
+                has_result_for_id(&watch.stdout, 15) || has_error_for_id(&watch.stdout, 15);
+            let natural = matches!(watch.stop, Stop::Response | Stop::Exited(Some(_)));
+            if accepted && natural {
+                Ok(())
+            } else {
+                Err(format!(
+                    "exact ceiling request had no public response; {}",
+                    watch_detail(watch)
+                ))
+            }
+        }
+        Terminated::Refuse => {
+            if contains_slice(&watch.stdout, b"\"result\"") {
+                return Err(format!(
+                    "terminated oversized frame produced success; {}",
+                    watch_detail(watch)
+                ));
+            }
+            if clean_refusal(watch, b"unused-canary", 0) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "terminated oversized frame was not a natural refusal; {}",
+                    watch_detail(watch)
+                ))
+            }
+        }
+    }
 }
 
 fn b1_unterminated(root: &Path, current: &Path) -> Result<(), String> {
@@ -916,94 +1397,76 @@ fn b1_unterminated(root: &Path, current: &Path) -> Result<(), String> {
         root,
         current,
         InputPlan::WriteHold(payload),
-        Goal::Terminal,
+        Goal::ResponseOrExit,
         REFUSAL_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if matches!(watch.stop, Stop::ExitedDuringSettle(_)) {
-        return Err(format!(
+    observe("b1_unterminated_open", &watch);
+    let primary = if matches!(watch.stop, Stop::ExitedDuringSettle(_)) {
+        Err(format!(
             "server exited before the frame; {}",
             watch_detail(&watch)
-        ));
-    }
-    if watch.bytes_written <= MCP_FRAME_LIMIT {
-        return Err(format!(
+        ))
+    } else if watch.bytes_written <= MCP_FRAME_LIMIT {
+        Err(format!(
             "oversized frame was not delivered; {}",
             watch_detail(&watch)
-        ));
-    }
-    if !clean_refusal(&watch, CANARY, 14) {
-        return Err(format!(
+        ))
+    } else if clean_refusal(&watch, CANARY, 14) {
+        Ok(())
+    } else {
+        Err(format!(
             "unterminated oversized frame was not refused; {}",
             watch_detail(&watch)
-        ));
-    }
-    Ok(())
+        ))
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
-fn b1_valid(root: &Path, current: &Path, ending: &[u8], id: i64) -> Result<(), String> {
+fn b1_valid(root: &Path, current: &Path, ending: &[u8], id: i64, name: &str) -> Result<(), String> {
     let watch = serve(
         root,
         current,
         InputPlan::WriteHold(initialize_bytes(id, ending)),
-        Goal::Predicate,
+        Goal::ResponseOrExit,
         PROTOCOL_WAIT,
     )?;
-    if watch.stdin_closed_by_us {
-        return Err(format!(
+    observe(name, &watch);
+    let primary = if watch.stdin_closed_by_us {
+        Err(format!(
             "valid frame closed stdin; {}",
             watch_detail(&watch)
-        ));
-    }
-    require_success(&watch, id)
+        ))
+    } else {
+        require_success(&watch, id)
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
-fn b1_write_accepted(
-    root: &Path,
-    current: &Path,
-    payload: Vec<u8>,
-    echo: Option<(u8, usize)>,
-) -> Result<(), String> {
+fn b1_at_bound(root: &Path, current: &Path) -> Result<(), String> {
+    let payload = at_bound_frame()?;
     let watch = serve(
         root,
         current,
         InputPlan::WriteHold(payload),
-        Goal::WriteAccepted,
+        Goal::ResponseOrExit,
         FRAME_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if watch.bytes_written != watch.payload_len {
-        return Err(format!(
-            "terminated frame was not fully acquired; {}",
-            watch_detail(&watch)
-        ));
-    }
-    if has_panic(&watch.stderr)
-        || has_panic(&watch.stdout)
-        || contains_slice(&watch.stdout, b"\"result\"")
-    {
-        return Err(format!(
-            "terminated frame produced panic or success; {}",
-            watch_detail(&watch)
-        ));
-    }
-    if let Some((byte, run)) = echo
-        && (contains_run(&watch.stdout, byte, run) || contains_run(&watch.stderr, byte, run))
-    {
-        return Err(format!(
-            "terminated frame echoed input; {}",
-            watch_detail(&watch)
-        ));
-    }
-    if matches!(watch.stop, Stop::Timeout | Stop::ExitedDuringSettle(_))
-        && watch.bytes_written != watch.payload_len
-    {
-        return Err(format!(
-            "terminated frame timed out; {}",
-            watch_detail(&watch)
-        ));
-    }
-    Ok(())
+    observe("b1_at_bound", &watch);
+    let primary = terminated_outcome(&watch, Terminated::Accept, None);
+    finish_case(primary, require_cleanup(&watch))
+}
+
+fn b1_oversized(root: &Path, current: &Path) -> Result<(), String> {
+    let watch = serve(
+        root,
+        current,
+        InputPlan::WriteHold(repeated(b'B', MCP_FRAME_LIMIT + FRAME_OVERSHOOT)),
+        Goal::ResponseOrExit,
+        FRAME_WAIT,
+    )?;
+    observe("b1_oversized_terminated", &watch);
+    let primary = terminated_outcome(&watch, Terminated::Refuse, Some((b'B', 64)));
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn b1_malformed(root: &Path, current: &Path) -> Result<(), String> {
@@ -1011,26 +1474,27 @@ fn b1_malformed(root: &Path, current: &Path) -> Result<(), String> {
         root,
         current,
         InputPlan::WriteClose(vec![0xff, 0xfe, b'\n']),
-        Goal::Terminal,
+        Goal::Exit,
         PROTOCOL_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if has_panic(&watch.stderr)
+    observe("b1_malformed_utf8", &watch);
+    let primary = if has_panic(&watch.stderr)
         || has_panic(&watch.stdout)
         || contains_slice(&watch.stdout, b"\"result\"")
     {
-        return Err(format!(
+        Err(format!(
             "malformed utf-8 failed closed observation; {}",
             watch_detail(&watch)
-        ));
-    }
-    if !matches!(watch.stop, Stop::Exited(_)) {
-        return Err(format!(
-            "malformed utf-8 did not end on EOF; {}",
+        ))
+    } else if !matches!(watch.stop, Stop::Exited(Some(_))) {
+        Err(format!(
+            "malformed utf-8 did not end naturally; {}",
             watch_detail(&watch)
-        ));
-    }
-    Ok(())
+        ))
+    } else {
+        Ok(())
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn b1_empty_eof(root: &Path, current: &Path) -> Result<(), String> {
@@ -1038,20 +1502,24 @@ fn b1_empty_eof(root: &Path, current: &Path) -> Result<(), String> {
         root,
         current,
         InputPlan::CloseImmediately,
-        Goal::Terminal,
+        Goal::Exit,
         PROTOCOL_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    if has_panic(&watch.stderr) || contains_slice(&watch.stdout, b"\"result\"") {
-        return Err(format!(
+    observe("b1_empty_eof", &watch);
+    let primary = if has_panic(&watch.stderr) || contains_slice(&watch.stdout, b"\"result\"") {
+        Err(format!(
             "empty EOF produced a result or panic; {}",
             watch_detail(&watch)
-        ));
-    }
-    if !matches!(watch.stop, Stop::Exited(_)) {
-        return Err(format!("empty EOF timed out; {}", watch_detail(&watch)));
-    }
-    Ok(())
+        ))
+    } else if !matches!(watch.stop, Stop::Exited(Some(_))) {
+        Err(format!(
+            "empty EOF had no natural exit; {}",
+            watch_detail(&watch)
+        ))
+    } else {
+        Ok(())
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn b1_short_eof(root: &Path, current: &Path) -> Result<(), String> {
@@ -1059,14 +1527,19 @@ fn b1_short_eof(root: &Path, current: &Path) -> Result<(), String> {
         root,
         current,
         InputPlan::WriteClose(initialize_bytes(13, b"")),
-        Goal::Terminal,
+        Goal::Exit,
         PROTOCOL_WAIT,
     )?;
-    require_success(&watch, 13)?;
-    if !matches!(watch.stop, Stop::Exited(_)) {
-        return Err(format!("short EOF did not exit; {}", watch_detail(&watch)));
-    }
-    Ok(())
+    observe("b1_short_eof", &watch);
+    let primary = if !matches!(watch.stop, Stop::Exited(Some(_))) {
+        Err(format!(
+            "short EOF did not exit naturally; {}",
+            watch_detail(&watch)
+        ))
+    } else {
+        require_success(&watch, 13)
+    };
+    finish_case(primary, require_cleanup(&watch))
 }
 
 fn prepare_library(directory: &Path) -> Result<PathBuf, String> {
@@ -1077,14 +1550,20 @@ fn prepare_library(directory: &Path) -> Result<PathBuf, String> {
     let watch = watch(
         command,
         InputPlan::CloseImmediately,
-        Goal::Terminal,
+        Goal::Exit,
         Duration::ZERO,
         INIT_WAIT,
     )?;
-    require_cleanup(&watch)?;
-    match watch.stop {
+    observe("init", &watch);
+    let primary = match watch.stop {
         Stop::Exited(Some(0)) => Ok(root),
         _ => Err(format!("init did not succeed; {}", watch_detail(&watch))),
+    };
+    match (primary, require_cleanup(&watch)) {
+        (Ok(root), Ok(())) => Ok(root),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(format!("cleanup separate from primary pass: {cleanup}")),
+        (Err(error), Err(cleanup)) => Err(format!("primary {error}; cleanup {cleanup}")),
     }
 }
 
@@ -1127,35 +1606,25 @@ fn run_product(cases: &mut Vec<Outcome>) {
                 cases,
                 "product",
                 "b1_valid_lf",
-                b1_valid(&root, &directory, b"\n", 11),
+                b1_valid(&root, &directory, b"\n", 11, "b1_valid_lf"),
             );
             record(
                 cases,
                 "product",
                 "b1_valid_crlf",
-                b1_valid(&root, &directory, b"\r\n", 12),
+                b1_valid(&root, &directory, b"\r\n", 12, "b1_valid_crlf"),
             );
             record(
                 cases,
                 "product",
                 "b1_at_bound",
-                b1_write_accepted(
-                    &root,
-                    &directory,
-                    repeated(b'A', MCP_FRAME_LIMIT),
-                    Some((b'A', 64)),
-                ),
+                b1_at_bound(&root, &directory),
             );
             record(
                 cases,
                 "product",
                 "b1_oversized_terminated",
-                b1_write_accepted(
-                    &root,
-                    &directory,
-                    repeated(b'B', MCP_FRAME_LIMIT + FRAME_OVERSHOOT),
-                    Some((b'B', 64)),
-                ),
+                b1_oversized(&root, &directory),
             );
             record(
                 cases,
@@ -1237,6 +1706,47 @@ fn run_standin_mode(mode: &str) -> ! {
             std::thread::sleep(Duration::from_secs(30));
             std::process::exit(0);
         }
+        "stdout-live" => {
+            let _ = std::io::stdout().flush();
+            unsafe { close(1) };
+            std::thread::sleep(Duration::from_secs(30));
+            std::process::exit(0);
+        }
+        "drain-hang" => {
+            let _ = set_nonblocking(std::io::stdin().as_raw_fd());
+            let mut buffer = [0u8; 4096];
+            let mut total = 0usize;
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_millis(200) && total < 8192 {
+                match std::io::stdin().read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(size) => total += size,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(POLL);
+                    }
+                    Err(_) => break,
+                }
+            }
+            std::thread::sleep(Duration::from_secs(30));
+            std::process::exit(0);
+        }
+        "signal" => {
+            match i32::try_from(std::process::id()) {
+                Ok(pid) if pid > 1 => unsafe {
+                    kill(pid, SIGKILL);
+                },
+                _ => std::process::exit(78),
+            }
+            std::thread::sleep(Duration::from_secs(30));
+            std::process::exit(78);
+        }
+        "success" => {
+            let _ = std::io::stdout().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{}}\n");
+            let _ = std::io::stdout().flush();
+            std::thread::sleep(Duration::from_secs(30));
+            std::process::exit(0);
+        }
         _ => std::process::exit(78),
     }
 }
@@ -1272,8 +1782,9 @@ fn product_boundaries() {
         .map(|case| format!("{}:{}:{}", case.kind, case.name, case.detail))
         .collect::<Vec<_>>()
         .join(",");
-    if !failed.is_empty() {
-        panic!("product boundary cases failed: {failed}");
+    let unresolved = unresolved_note();
+    if !failed.is_empty() || !unresolved.is_empty() {
+        panic!("product boundary cases failed: {failed}; unresolved: {unresolved}");
     }
     if !blocked.is_empty() {
         panic!("setup blocked product cases: {blocked}");

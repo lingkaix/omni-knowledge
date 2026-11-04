@@ -34,22 +34,41 @@ The deciding failure is live requested-byte growth during the call, not the leng
 ## Instruments
 
 The process observer is admitted on stand-ins before any product case.
-The stand-ins cover prompt refusal, a lying success prefix with a canary, early EOF, and a hang that must time out.
-Cleanup has to reap the started pid, and a leftover process fails the controller case.
+The stand-ins cover natural refusal, a lying success prefix with a canary, early stdin EOF, a hang, stdout closed while the child stays live, a terminated drain with no response, signal death, and a persistent success response.
+A separate ownership check spawns a real child, injects a post-spawn failure, and unwinds with that child armed.
+Both paths must collect the owned pid. Cleanup does not use a blocking wait.
 The allocator counter delegates to the system allocator and is admitted with an 8 MiB hold and a 4 KiB hold.
 Those controller cases are not MCP or extractor results.
-The stand-in is the same `product_boundaries` test with `OMNI_PRODUCT_BOUND_STANDIN` set to `refuse`, `echo`, `early-eof`, or `hang`.
-That child exits in the named observer role and is counted only as a controller case.
+The stand-in is the same `product_boundaries` test with `OMNI_PRODUCT_BOUND_STANDIN` set.
+That child performs only the named observer role.
 With the variable unset, the test runs admission and the product oracle.
 This target has no ignored test and no empty test.
 The earlier ignored helper remains only on the preserved receipt commit.
 
+A natural coded exit, a signal, a public JSON-RPC response or error, stdout EOF while the child is still live, and a timeout are different observations.
+Stdout EOF waits for a natural exit until the same bounded deadline. It is not refusal by itself.
+Signal death is not ordinary refusal.
+The observer may kill only after that observation, to contain a live process or to reap a persistent server that already answered.
+The kill is not the refusal evidence.
+The primary outcome and a cleanup failure stay visible together.
+The reap guard is armed at spawn, before pipe or `fcntl` setup can fail.
+Settlement is marked only after `try_wait` confirms collection.
+
+The exact-ceiling frame is one valid initialize request whose JSON text is 4 MiB, then LF.
+Its public outcome is a JSON-RPC result or error for that request.
+The oversized terminated frame remains 4 MiB plus 64 `B` bytes and LF, with stdin left open.
+Its outcome is a natural coded exit or a JSON-RPC error, not a completed write.
+LF, CRLF, and final-EOF controls still require their natural response or exit.
+The overshoot, open stdin, canary, and prefix checks are unchanged.
+
 ## Case Count
 
-The controller count is 6: CRC-32 vector, four observer stand-ins, and one allocator case that runs both windows.
+The controller count is 12: CRC-32 vector, nine observer cases, the exact-ceiling fixture check, and one allocator case that runs both windows.
+The ownership case performs both the setup-failure reap and the unwind reap.
 The product count is 10: two XLSX cases and eight MCP cases.
 One of the XLSX cases and the unterminated MCP case are the deciding regressions.
 The other eight product cases preserve ordinary behavior.
+The XLSX ceiling and fixture are unchanged.
 
 ## Proof Boundary
 
