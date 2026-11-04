@@ -9,7 +9,8 @@ The accepted [product contract](docs/specs/product.md) defines one full delivery
 The [service wire contract](docs/specs/service.md) defines the public DTO boundary for GUI, CLI, and MCP.
 The [workspace transition](docs/changes/2026-11-04-workspace.md) records migration and preservation obligations.
 The [headless-first amendment](docs/changes/2026-11-04-headless-delivery.md) prioritizes the complete headless service, MCP, and CLI mechanisms for the current delivery.
-GUI milestone M7 is deferred; the existing GPUI application keeps building and adapts only where a service DTO change requires compatibility.
+The engineer's 2026-11-04 correction gives GUI milestone M7 lower priority, not a stop; the existing GPUI application keeps building and adapts only where a service DTO change requires compatibility.
+No new GPUI investment happens beyond that duty until GUI technology is confirmed; a shared Web knowledge component is only a possible direction under discussion, not a selected dependency.
 These accepted contracts are not claims that every feature is already implemented or qualified.
 The compatibility commands and storage description below describe the retained first-version implementation while the migration is in progress.
 Linux headless builds and macOS GUI builds have separate gates; native platform effects require their actual platform observations.

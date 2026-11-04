@@ -1,10 +1,10 @@
 # Product Requirements
 
 Status: Accepted product requirements; implementation and verification remain separate.
-Acceptance sources: product decisions on 2026-10-14 and 2026-10-15, the full-version design with overriding supervisor amendments accepted on 2026-11-04, and the engineer's headless-first delivery amendment accepted on 2026-11-04.
+Acceptance sources: product decisions on 2026-10-14 and 2026-10-15, the full-version design with overriding supervisor amendments accepted on 2026-11-04, the engineer's headless-first delivery amendment accepted on 2026-11-04, and the engineer's GUI priority correction on 2026-11-04.
 This document owns product scope, retained desktop requirements, delivery boundaries, and acceptance outcomes.
 The [service contract](service.md) owns the public wire surface.
-The full version is one delivery; the 2026-11-04 headless-first amendment defers its GUI milestone M7.
+The full version is one delivery; the 2026-11-04 headless-first amendment gives its GUI milestone M7 lower priority.
 Its non-GUI requirements stay complete and are not reduced to an MVP.
 
 ## Outcome
@@ -176,9 +176,12 @@ Do not keep the old omni lexical engine alongside the vendored engine permanentl
 M0 through M8 are internal sequencing within one full delivery.
 M0 freezes owners and DTOs, characterizes preserved behavior, names intended-red new requirements, and proves the kernel downstream build.
 M1 supplies storage/mounts/tracking/cache; M2 history/remote; M3 processing; M4 retrieval/archive reading; M5 packages; M6 service/transports; M7 GUI; M8 integrates all features.
-The 2026-11-04 headless-first amendment defers GUI milestone M7 and prioritizes the complete headless service, MCP, and CLI mechanisms in the current delivery.
-The current headless delivery does not require GUI completion; the desktop requirements above remain normative owners for the deferred milestone.
+The 2026-11-04 headless-first amendment prioritizes the complete headless service, MCP, and CLI mechanisms in the current delivery.
+The engineer's same-day correction gives GUI milestone M7 lower priority, not a stop; M7 remains part of the one full delivery.
+The current headless delivery does not require GUI completion; the desktop requirements above remain normative owners for the M7 milestone.
 Keep the existing GPUI application building; adapt it only where a service DTO change requires compatibility, and add no GUI redesign.
+The engineer makes no new GPUI investment beyond keeping the existing application building until GUI technology is confirmed.
+A shared Web knowledge component is only a possible direction under discussion, not a selected technology or dependency.
 Each milestone needs direct public-seam evidence; a document or compilation result is not implementation acceptance.
 Independent test authors derive checks from owners and DTOs, not candidate source.
 

@@ -26,6 +26,7 @@ A losing time-boxed Lance vector experiment retains the required exact backend a
 | Lance nonblocking | Search Time-Boxed LanceDB Experiment: exact first, adopt only on registered evidence and retain exact on loss. |
 | Smallest mechanism | Necessity/ablation ledger below: reasoned removal analysis for each mechanism; experimental ablation only when its claim remains uncertain. |
 | Headless-first GUI deferral | Product Delivery And Qualification: the engineer's 2026-11-04 amendment defers M7 GUI completion, prioritizes the complete headless service, MCP, and CLI mechanisms, keeps the existing GPUI application building with only service-DTO compatibility adaptations, and leaves deferred desktop criteria owned without shipped-implementation claims. |
+| GUI priority correction | Product Delivery And Qualification: the engineer's 2026-11-04 correction gives M7 lower priority, not a stop; no new GPUI investment happens until GUI technology is confirmed, and a shared Web component remains only a possible direction under discussion. |
 
 ## Accepted-Design Requirement Map
 
@@ -164,6 +165,7 @@ The [test strategy](../specs/test-strategy.md) owns independent test authorship,
 | M8 integrated delivery | Complete deterministic suite/build/lint inventory and exact artifact smoke, restore/sync/recovery stories, independent strict-risk scrutiny and test dispositions, known gaps/cleanup and reproducible user qualification checklist; no MVP feature deferral. |
 
 The 2026-11-04 headless-first amendment defers M7 GUI completion; its exit criteria remain in force when GUI work resumes.
+The engineer's same-day correction gives M7 lower priority, not a stop, and makes no new GPUI investment until GUI technology is confirmed.
 The current delivery keeps the existing GPUI application building and retains the macOS CI GUI-build requirement.
 This deferral removes no existing GUI test and changes no non-GUI milestone gate.
 

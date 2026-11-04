@@ -7,6 +7,13 @@ This record explains the amendment, its owner destinations, criterion mapping, n
 It is not a behavioral owner, implementation report, or release approval.
 Current behavior is owned by [product](../specs/product.md) and the other `docs/specs/` owners.
 
+## GUI Priority Correction
+
+The engineer's later correction on 2026-11-04 refines this amendment: GUI milestone M7 has lower priority, not a stop, and its exit criteria stay in force for later delivery.
+No new GPUI investment happens beyond keeping the existing application building until GUI technology is confirmed; a shared Web knowledge component is only a possible direction under discussion, not a selected technology or dependency.
+The headless-first priority for the service, MCP, and CLI mechanisms stays in force, and this record keeps its original wording as the earlier decision history.
+[Product](../specs/product.md) Delivery And Qualification owns the current status.
+
 ## Amendment And Boundaries
 
 The amendment defers GUI milestone M7 and prioritizes the complete headless service, MCP, and CLI mechanisms in the current delivery.
