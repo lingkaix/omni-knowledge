@@ -1,6 +1,6 @@
 //! Confined read adapter for one explicitly selected ordinary local root.
 //!
-//! The adapter implements [`MountBackend`](knowledge_core::backend::MountBackend) with
+//! The adapter implements [`MountBackend`] with
 //! descriptor-relative no-follow metadata, listing, and full-digest range reads.
 //! It does not discover libraries, detect cloud or NAS residency, follow symlinks,
 //! write, watch, or authorize a caller. Read the crate guide before integrating it.
