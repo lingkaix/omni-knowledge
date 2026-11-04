@@ -219,7 +219,7 @@ A disconnected or timed-out client must inspect `operation_status` before retryi
 New source versions supersede obsolete jobs; cancellation never asserts rollback of a completed write or remote effect.
 `job_status` reports progress; completed snapshot/restore/migration outcomes are retrieved through `operation_status`.
 A terminal job does not imply full coverage: `partial` and classified failures remain visible.
-No runtime event stream or workflow engine is required; polling these DTOs is sufficient.
+Polling these DTOs remains supported; the bounded HTTP status-snapshot stream below supports Web clients without an event log or workflow engine.
 
 A `saved_local` write binds final source digests and exactly one text-operation commit; `unchanged` creates no empty commit.
 A durable file/ref ambiguity returns `indeterminate` with recovery state, not a false saved result.
@@ -425,6 +425,28 @@ HTTP returns 200 for an admitted domain response including typed failure; malfor
 Host and Origin checks use literal configured allowlists; reject cross-origin browser requests, redirects, and ambient proxy-driven provider routing.
 No public listener, account server, OAuth stack, raw index-file endpoint, or exposed inference port is added.
 Existing secure tunnels are the recommended remote access method; loopback is not proof of per-user identity or an OS ACL.
+
+### Web Status Snapshots
+
+`POST /v1/status-stream` accepts the same version-1 JSON `Request`, restricted to `command.op: "job_status"`, and returns `application/x-ndjson`.
+It does not add a command, alternate DTO, event bus, replay cursor, durable subscription, or new authority surface.
+Other operations and malformed requests are refused before streaming; ordinary `/v1/command` behavior is unchanged.
+Each LF-terminated UTF-8 frame is a complete existing `Response` with the original `request_id`; HTTP chunk boundaries are not frame boundaries.
+The first frame is an immediate current job snapshot; later snapshots are at most once per second and may coalesce intermediate changes.
+A connection lasts at most 30 seconds and 32 frames; at most 16 such connections may be active service-wide.
+The existing 1 MiB per-frame limit applies; a slow client cannot extend the delivery deadline or create an unbounded queue.
+A terminal job snapshot or typed error ends the stream; resource exhaustion returns `budget_exhausted` where a complete error frame can still be delivered.
+EOF, disconnection, or delivery-budget exhaustion never implies job completion, cancellation, rollback, or observation of every intermediate state.
+Clients reconnect or use ordinary `job_status`/`operation_status` to inspect current facts; incomplete frames are not successful responses.
+
+This route uses exactly the normal HTTP host/origin, selected-library, nonsensitive-only and `job_status` read-admission checks, including before each delivered chunk.
+It cannot disclose a sensitive/unexposed job, hidden counts, excluded-source errors, or a broader owner-IPC status snapshot.
+A revocation uses the same non-disclosing `not_exposed` result and stops further controllable delivery; already delivered bytes cannot be recalled.
+Stream capacity refusal does not grant access or reveal whether a guessed job exists.
+No status subscription starts processing, reads originals, contacts a remote/provider, changes exposure, or cancels the underlying job on disconnect.
+Web clients use the existing cursor/limit browsing/history requests, preserve opaque IDs/cursors, and retain `U64` as decimal strings rather than lossy JavaScript numbers.
+GUI technology and shared-component packaging remain undecided; these JSON/continuation/status boundaries do not require a GPUI or Web framework choice.
+The [Web-client contract record](../changes/2026-11-04-web-client-contract.md) states necessity, limits and the still-required runtime proof.
 
 Library MCP exposure defaults to `read_only` within an owner-selected set; HTTP initially selects no libraries.
 The MCP catalog excludes every owner-only operation, even in read-write mode.
