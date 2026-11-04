@@ -49,7 +49,11 @@ fn main() {
         }
         Some("competitor") => competitor(args.next()),
         Some("inherited-owner") => inherited_owner(args.next()),
-        Some("fork-destroy-owner") => fork_destroy_owner(args.next()),
+        Some("fork-destroy-owner") => {
+            let path = args.next();
+            let hold_ready = args.next().as_deref() == Some("hold-ready");
+            fork_destroy_owner(path, hold_ready)
+        }
         _ => 2,
     };
     exit(code);
@@ -127,6 +131,10 @@ fn inherited_owner(path: Option<String>) -> i32 {
     }
     let pid = unsafe { fork() };
     if pid < 0 {
+        unsafe {
+            close(fds[0]);
+            close(fds[1]);
+        }
         say("ERROR Fork");
         return 1;
     }
@@ -140,24 +148,27 @@ fn inherited_owner(path: Option<String>) -> i32 {
                 if read_bytes >= 0 {
                     break;
                 }
-                if errno() != 4 {
+                if errno() != EINTR {
                     break;
                 }
             }
             _exit(0);
         }
     }
+    // The child is owned before any readiness line. A panic or early return
+    // drops this guard. The inherited child stays blocked until UNBLOCK.
+    let mut child = ChildGuard::arm(pid);
     unsafe { close(fds[0]) };
     let token = start_token(pid as u32).unwrap_or_else(|| "missing".to_string());
     say(&format!("CHILD {pid} {token}"));
     say("HELD");
     let mut cache = Some(cache);
     let mut pin = Some(pin);
-    let mut child = ChildGuard { pid, reaped: false };
-    command_loop(&mut cache, &mut pin, &mut child, fds[1])
+    let code = command_loop(&mut cache, &mut pin, &mut child, fds[1]);
+    abandon(&mut child, code)
 }
 
-fn fork_destroy_owner(path: Option<String>) -> i32 {
+fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
     let world = attach(std::path::Path::new(&fixture_path(path)));
     let cache = match world.open(generous_limits()) {
         Ok(cache) => cache,
@@ -191,44 +202,61 @@ fn fork_destroy_owner(path: Option<String>) -> i32 {
     }
     let pid = unsafe { fork() };
     if pid < 0 {
+        unsafe {
+            close(fds[0]);
+            close(fds[1]);
+        }
         say("ERROR Fork");
         return 1;
     }
     if pid == 0 {
         arm_parent_death_signal();
+        if hold_ready {
+            unsafe {
+                // Keep the write end open so the parent blocks until its deadline.
+                close(fds[0]);
+                loop {
+                    if pause() < 0 && errno() != EINTR {
+                        break;
+                    }
+                }
+                _exit(0);
+            }
+        }
         drop(pin);
         drop(cache);
         unsafe {
             close(fds[0]);
             let marker = b"D";
-            let _ = write(fds[1], marker.as_ptr().cast::<c_void>(), 1);
+            let wrote = write(fds[1], marker.as_ptr().cast::<c_void>(), 1);
+            if wrote != 1 {
+                _exit(1);
+            }
             _exit(0);
         }
     }
+    let mut child = ChildGuard::arm(pid);
     let token = start_token(pid as u32).unwrap_or_else(|| "missing".to_string());
     say(&format!("CHILD {pid} {token}"));
     unsafe { close(fds[1]) };
-    match read_byte_bounded(fds[0], CHILD_SIGNAL_MS) {
+    let ready = read_byte_bounded(fds[0], CHILD_SIGNAL_MS);
+    unsafe { close(fds[0]) };
+    match ready {
         Ok(_byte) => {}
         Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-            say("ERROR ChildTimeout");
-            return 1;
+            return report_failure(&mut child, "ERROR ChildTimeout");
         }
-        Err(_) => {
-            say("ERROR ChildPipe");
-            return 1;
-        }
+        Err(_) => return report_failure(&mut child, "ERROR ChildPipe"),
     }
     if !observed_zombie(pid) {
-        say("ERROR ChildUserspace");
-        return 1;
+        return report_failure(&mut child, "ERROR ChildUserspace");
     }
     say("CHILD_DROPPED");
     say("HELD");
     let mut cache = Some(cache);
     let mut pin = Some(pin);
-    let mut child = ChildGuard { pid, reaped: false };
     let mut input = String::new();
+    let mut code = 0;
     loop {
         input.clear();
         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
@@ -238,10 +266,13 @@ fn fork_destroy_owner(path: Option<String>) -> i32 {
             "REAP" => {
                 if child.reaped {
                     say("ERROR AlreadyReaped");
-                    return 1;
+                    code = 1;
+                    break;
                 }
-                let (waited, status) = child.reap_now();
-                say(&format!("CHILD_REAPED {waited} {status}"));
+                code = announce_collect(&mut child);
+                if code != 0 {
+                    break;
+                }
             }
             "RELEASE" => {
                 pin.take();
@@ -251,11 +282,12 @@ fn fork_destroy_owner(path: Option<String>) -> i32 {
             "QUIT" => break,
             _ => {
                 say("ERROR Command");
-                return 1;
+                code = 1;
+                break;
             }
         }
     }
-    0
+    abandon(&mut child, code)
 }
 
 fn command_loop(
@@ -279,26 +311,26 @@ fn command_loop(
                 pin.take();
                 say("PIN_DROPPED");
             }
-            "STATUS_CHILD" => {
-                let mut status = 0;
-                let waited = unsafe { waitpid(child.pid, &mut status, 1) };
-                if waited == 0 {
-                    say("CHILD_RUNNING");
-                } else {
-                    if waited == child.pid {
-                        child.reaped = true;
-                    }
+            "STATUS_CHILD" => match poll_child(child.pid) {
+                PollChild::Running => say("CHILD_RUNNING"),
+                PollChild::Collected { waited, status } => {
+                    child.note_collected(waited, status);
                     say(&format!("CHILD_DEAD {waited}"));
                 }
-            }
+                PollChild::Unresolved => say("ERROR Unresolved"),
+            },
             "UNBLOCK" => {
                 let marker = [1u8];
-                unsafe {
-                    let _ = write(write_fd, marker.as_ptr().cast::<c_void>(), 1);
-                    close(write_fd);
+                let wrote = unsafe { write(write_fd, marker.as_ptr().cast::<c_void>(), 1) };
+                unsafe { close(write_fd) };
+                if wrote != 1 {
+                    say("ERROR Unblock");
+                    return 1;
                 }
-                let (waited, status) = child.reap_now();
-                say(&format!("CHILD_REAPED {waited} {status}"));
+                let code = announce_collect(child);
+                if code != 0 {
+                    return code;
+                }
             }
             "QUIT" => break,
             _ => {
@@ -315,20 +347,98 @@ type PinHolder = knowledge_core::cache::PinnedObject<support::Premise>;
 
 const CHILD_SIGNAL_MS: i32 = 2_000;
 const POLLIN: i16 = 1;
+const WNOHANG: i32 = 1;
+const SIGKILL: i32 = 9;
+const ESRCH: i32 = 3;
+const EINTR: i32 = 4;
+const CLEANUP_BOUND: Duration = Duration::from_millis(2_000);
+
+enum PollChild {
+    Running,
+    Collected { waited: i32, status: i32 },
+    Unresolved,
+}
+
+fn poll_child(pid: i32) -> PollChild {
+    for _ in 0..4 {
+        let mut status = 0;
+        let waited = unsafe { waitpid(pid, &mut status, WNOHANG) };
+        if waited == 0 {
+            return PollChild::Running;
+        }
+        if waited == pid {
+            return PollChild::Collected { waited, status };
+        }
+        if errno() != EINTR {
+            return PollChild::Unresolved;
+        }
+    }
+    PollChild::Unresolved
+}
 
 struct ChildGuard {
     pid: i32,
     reaped: bool,
+    waited: i32,
+    status: i32,
 }
 
 impl ChildGuard {
-    fn reap_now(&mut self) -> (i32, i32) {
-        let mut status = 0;
-        let waited = unsafe { waitpid(self.pid, &mut status, 0) };
-        if waited == self.pid {
-            self.reaped = true;
+    fn arm(pid: i32) -> Self {
+        Self {
+            pid,
+            reaped: false,
+            waited: 0,
+            status: 0,
         }
-        (waited, status)
+    }
+
+    fn note_collected(&mut self, waited: i32, status: i32) {
+        self.reaped = true;
+        self.waited = waited;
+        self.status = status;
+    }
+
+    fn collect_bounded(&mut self) -> Result<(), ()> {
+        if self.reaped {
+            return Ok(());
+        }
+        if self.pid <= 0 {
+            return Err(());
+        }
+        let deadline = Instant::now() + CLEANUP_BOUND;
+        loop {
+            match poll_child(self.pid) {
+                PollChild::Collected { waited, status } => {
+                    self.note_collected(waited, status);
+                    return Ok(());
+                }
+                PollChild::Running if Instant::now() >= deadline => return Err(()),
+                PollChild::Running => thread::yield_now(),
+                PollChild::Unresolved => return Err(()),
+            }
+        }
+    }
+
+    /// Kill, then collect with `WNOHANG`. A failed signal or wait leaves the child unsettled.
+    fn settle(&mut self) -> Result<(), ()> {
+        if self.reaped {
+            return Ok(());
+        }
+        if self.pid <= 0 {
+            return Err(());
+        }
+        let killed = unsafe { kill(self.pid, SIGKILL) };
+        let kill_errno = if killed == 0 { 0 } else { errno() };
+        match self.collect_bounded() {
+            Ok(()) => Ok(()),
+            Err(()) => {
+                if killed != 0 && kill_errno != ESRCH {
+                    eprintln!("ERROR Unresolved kill {kill_errno}");
+                }
+                Err(())
+            }
+        }
     }
 }
 
@@ -337,19 +447,52 @@ impl Drop for ChildGuard {
         if self.reaped || self.pid <= 0 {
             return;
         }
-        unsafe {
-            kill(self.pid, 9);
-            let mut status = 0;
-            waitpid(self.pid, &mut status, 0);
+        if self.settle().is_err() {
+            eprintln!("ERROR Unresolved");
         }
-        self.reaped = true;
     }
 }
 
+fn announce_collect(child: &mut ChildGuard) -> i32 {
+    match child.collect_bounded() {
+        Ok(()) => {
+            say(&format!("CHILD_REAPED {} {}", child.waited, child.status));
+            0
+        }
+        Err(()) => {
+            say("ERROR Unresolved");
+            1
+        }
+    }
+}
+
+fn report_failure(child: &mut ChildGuard, line: &str) -> i32 {
+    say(line);
+    abandon(child, 1)
+}
+
+fn abandon(child: &mut ChildGuard, code: i32) -> i32 {
+    if child.reaped {
+        return code;
+    }
+    match child.settle() {
+        Ok(()) => {
+            say(&format!("CHILD_REAPED {} {}", child.waited, child.status));
+            code
+        }
+        Err(()) => {
+            say("ERROR Unresolved");
+            1
+        }
+    }
+}
+
+/// Ask the kernel to kill this child if its parent dies.
+/// That signal does not reap a zombie and is not the cleanup result.
 fn arm_parent_death_signal() {
     const PR_SET_PDEATHSIG: i32 = 1;
     unsafe {
-        prctl(PR_SET_PDEATHSIG, 9, 0, 0, 0);
+        prctl(PR_SET_PDEATHSIG, SIGKILL as u64, 0, 0, 0);
         if getppid() == 1 {
             _exit(1);
         }
@@ -431,6 +574,7 @@ unsafe extern "C" {
     fn close(fd: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
+    fn pause() -> i32;
     fn getppid() -> i32;
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
     fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;

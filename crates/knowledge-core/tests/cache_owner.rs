@@ -20,11 +20,14 @@ use support::{World, start_token};
 const ADMIT_READY: Duration = Duration::from_secs(2);
 const ADMIT_HANG: Duration = Duration::from_millis(500);
 const PRODUCT_READY: Duration = Duration::from_secs(8);
+const CLEANUP_BOUND: Duration = Duration::from_secs(2);
+const ESRCH: i32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ObserveErr {
     Timeout,
     MissingTerminal,
+    Unresolved,
 }
 
 #[test]
@@ -61,7 +64,7 @@ fn observer_admits_pass_fail_and_timeout() {
         Err(ObserveErr::Timeout),
         "hang stand-in classification {timed:?}"
     );
-    hang.kill_exact();
+    hang.kill_exact().expect("hang cleanup");
     assert_reaped(pid, &start);
 
     let mut line_hang = spawn(&bin, &["admit-line-hang"]);
@@ -75,10 +78,11 @@ fn observer_admits_pass_fail_and_timeout() {
         Err(ObserveErr::Timeout),
         "line-then-hang classification {waited:?}"
     );
-    line_hang.kill_exact();
+    line_hang.kill_exact().expect("line-hang cleanup");
     assert_reaped(pid, &start);
 
     failure_cleanup(&bin);
+    fork_readiness_failure_settles_child(&bin);
 }
 
 #[test]
@@ -196,6 +200,41 @@ fn post_fork_child_destruction_does_not_unlock_the_parent() {
     world.lab.finish();
 }
 
+/// Real `fork-destroy-owner` readiness timeout. The forked child stays parked
+/// and the helper must reap it. `PR_SET_PDEATHSIG` is not that proof.
+fn fork_readiness_failure_settles_child(bin: &Path) {
+    let world = World::create(b"derived-SENTINEL_cache_6c2e91-payload-v1");
+    let mut owner = spawn(
+        bin,
+        &[
+            "fork-destroy-owner",
+            &world.lab.root().to_string_lossy(),
+            "hold-ready",
+        ],
+    );
+    let child_line = owner.next_line(PRODUCT_READY).expect("forked child line");
+    let (child_pid, child_token) = parse_child(&child_line);
+    let failed = owner.next_line(PRODUCT_READY).expect("readiness failure");
+    assert_eq!(failed.trim(), "ERROR ChildTimeout");
+    let reaped = owner.next_line(PRODUCT_READY).expect("cleanup line");
+    assert!(
+        reaped
+            .trim()
+            .starts_with(&format!("CHILD_REAPED {child_pid} ")),
+        "helper did not reap the forked child: {reaped}"
+    );
+    let closed = owner.next_line(ADMIT_READY);
+    assert_eq!(
+        closed,
+        Err(ObserveErr::MissingTerminal),
+        "unexpected extra line {closed:?}"
+    );
+    let status = owner.wait_bounded(ADMIT_READY).expect("helper wait");
+    assert_eq!(status.code(), Some(1), "readiness failure exit {status}");
+    assert_reaped(child_pid, &child_token);
+    world.lab.finish();
+}
+
 fn failure_cleanup(bin: &Path) {
     let probe = spawn(bin, &["admit-hang"]);
     let pid = probe.child.id();
@@ -242,8 +281,8 @@ fn competitor(world: &World) -> Competitor {
         .next_line(PRODUCT_READY)
         .expect("competitor produced no line");
     let status = child.wait_bounded(PRODUCT_READY).unwrap_or_else(|error| {
-        child.kill_exact();
-        panic!("competitor wait {error:?} line {line}");
+        let cleanup = child.kill_exact();
+        panic!("competitor wait {error:?} cleanup {cleanup:?} line {line}");
     });
     assert!(status.success(), "competitor exit {status} line {line}");
     let line = line.trim();
@@ -323,22 +362,49 @@ impl Owned {
         self.stdin.flush().expect("flush");
     }
 
-    fn kill_exact(&mut self) {
+    fn kill_exact(&mut self) -> Result<(), ObserveErr> {
         if self.settled {
-            return;
+            return Ok(());
         }
         let current = start_token(self.child.id());
-        if current.as_deref() == Some(self.start.as_str()) {
-            let _ = self.child.kill();
+        if current.as_deref() != Some(self.start.as_str()) {
+            return Err(ObserveErr::Unresolved);
         }
-        let _ = self.child.wait();
-        self.settled = true;
+        let kill_result = self.child.kill();
+        match self.collect_bounded() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Err(kill_error) = kill_result
+                    && kill_error.raw_os_error() != Some(ESRCH)
+                {
+                    eprintln!("kill failed before unresolved cleanup: {kill_error}");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn collect_bounded(&mut self) -> Result<(), ObserveErr> {
+        let deadline = Instant::now() + CLEANUP_BOUND;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    self.settled = true;
+                    return Ok(());
+                }
+                Ok(None) if Instant::now() >= deadline => return Err(ObserveErr::Unresolved),
+                Ok(None) => thread::yield_now(),
+                Err(_) => return Err(ObserveErr::Unresolved),
+            }
+        }
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        self.kill_exact();
+        if let Err(error) = self.kill_exact() {
+            eprintln!("ERROR Unresolved {error:?}");
+        }
     }
 }
 
