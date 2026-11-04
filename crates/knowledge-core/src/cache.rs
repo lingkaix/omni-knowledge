@@ -327,6 +327,8 @@ struct Inner<C> {
     context: C,
     /// Explicit operation/accounting ceilings.
     limits: Limits,
+    /// Fresh OS-random reservation domain for this owner; neither an object key nor access authority.
+    candidate_owner: [u8; 32],
     /// Serialize cache-owned I/O buffers/accounting without a hidden waiting queue.
     sequence: Mutex<u64>,
     /// Bounded intended-reader handles; release never waits on a producer callback.
@@ -343,6 +345,7 @@ impl<C: CacheContext> Cache<C> {
     /// Admit an existing app-owned 0700 root using current trusted facts, then acquire one service lock.
     /// No directory or byte is written before placement/ownership/locality/budget admission.
     /// Refuse unknown/inaccessible prohibited roots instead of silently assuming they cannot overlap.
+    /// OS entropy failure returns Io without a predictable candidate-reservation fallback.
     pub fn open(path: &Path, context: C, limits: Limits) -> Result<Self, CacheError> {
         limits.validate()?;
         let (root, _) = native::walk(path)?;
@@ -359,6 +362,8 @@ impl<C: CacheContext> Cache<C> {
             file: owner_file,
             pid: std::process::id(),
         };
+        let mut candidate_owner = [0; 32];
+        getrandom::fill(&mut candidate_owner).map_err(|_| CacheError::Io)?;
         let inner = Arc::new(Inner {
             root,
             path: path.to_path_buf(),
@@ -366,6 +371,7 @@ impl<C: CacheContext> Cache<C> {
             owner,
             context,
             limits,
+            candidate_owner,
             sequence: Mutex::new(0),
             pins: AtomicUsize::new(0),
         });
@@ -432,9 +438,9 @@ impl<C: CacheContext> Cache<C> {
         let location = self.inner.location(library, &admission, &key, true)?;
         self.inner.same(library, source, processor, &admission)?;
         location.validate(&self.inner.root)?;
-        *sequence = sequence.checked_add(1).ok_or(CacheError::Budget)?;
-        let name = format!(".candidate-{}-{}", self.inner.owner.pid, *sequence);
-        let mut candidate = native::create(&location.fanout, &name)?;
+        let (name, mut candidate) = self
+            .inner
+            .reserve_candidate(&location.fanout, &mut sequence)?;
         let candidate_identity = native::stamp(&candidate)?.identity;
         candidate
             .write_all(&[0; HEADER as usize])
@@ -614,6 +620,32 @@ impl Location {
 }
 
 impl<C: CacheContext> Inner<C> {
+    /// Exclusively reserve one candidate in the admitted fanout using this owner's random domain.
+    /// Advance the locked sequence on every attempt; never inspect, alter, or reuse a conflicting node.
+    /// At most eight creates are attempted: exhaustion returns Conflict, sequence overflow Budget,
+    /// and other native failures propagate without retry or a pathname/deletion fallback.
+    fn reserve_candidate(
+        &self,
+        fanout: &File,
+        sequence: &mut u64,
+    ) -> Result<(String, File), CacheError> {
+        let prefix = format!(
+            ".candidate-{}-{}",
+            self.owner.pid,
+            hex(&self.candidate_owner)
+        );
+        for _ in 0..8 {
+            *sequence = sequence.checked_add(1).ok_or(CacheError::Budget)?;
+            let name = format!("{prefix}-{}", *sequence);
+            match native::create(fanout, &name) {
+                Ok(file) => return Ok((name, file)),
+                Err(CacheError::Conflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CacheError::Conflict)
+    }
+
     /// Admit one cache-owned I/O buffer lane; contention/reentrancy returns Busy, never deadlocks a producer.
     fn operation(&self) -> Result<MutexGuard<'_, u64>, CacheError> {
         self.process()?;
