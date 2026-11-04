@@ -54,5 +54,5 @@ The prior probe commit and its admission logs remain as rejected-overdesign hist
 This change does not accept the macOS kernel suite, the seven face tests, or overall M0.
 The hosted macOS result remains 46 of 48 library tests and 0 of 7 face tests at head `6a52d333f37c8e4b9be3d2985f08e3ac21a66dae`.
 The face failure at that head is `process resource enforcement failed`.
-`PROVENANCE.json` still records the original vendored hash of `src/tests.rs`.
-Updating that inventory is outside this lease.
+`PROVENANCE.json` keeps the original upstream hash of `src/tests.rs` and records its current vendored hash.
+The observer repairs are entries in the replayable vendor patch.

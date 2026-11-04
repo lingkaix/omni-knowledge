@@ -200,7 +200,7 @@
     {
       "path": "src/main.rs",
       "upstream_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892",
-      "vendored_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892"
+      "vendored_sha256": "9018d50f4842a0cc3e435492d76d4f842d5e71bf69c454cf83601afe85e1ed72"
     },
     {
       "path": "src/model.rs",
@@ -220,7 +220,7 @@
     {
       "path": "src/tests.rs",
       "upstream_sha256": "874aa9b42ad6b6d0fd6b4b733e9c2278dcf9cce8a717912fcb175e6e5ca1f88a",
-      "vendored_sha256": "874aa9b42ad6b6d0fd6b4b733e9c2278dcf9cce8a717912fcb175e6e5ca1f88a"
+      "vendored_sha256": "18f0ae95a622dd201c7657a14d9f3029179ad0c4ef86dc429e03574e3744bd30"
     },
     {
       "path": "src/text.rs",

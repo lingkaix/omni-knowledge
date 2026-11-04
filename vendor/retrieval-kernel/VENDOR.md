@@ -22,22 +22,23 @@ No dictionary or model download is required by the seeded probe.
 
 ## Applied Patches
 
-[The replayable patch](../../tools/kernel-probe/patches/m0-vendoring.patch) contains only these adaptations.
-No analyzer, scoring, coverage, source admission, generation publication, or test assertion changes are applied.
+[The replayable patch](../../tools/kernel-probe/patches/m0-vendoring.patch) contains every upstream-to-vendored adaptation listed below.
+M0-P01 and M0-P02 change no analyzer, scoring, coverage, source admission, generation publication, or test assertion.
 
 | Patch | Necessity and effect | Future OpenKit candidate |
 | --- | --- | --- |
 | M0-P01: machinery lock location | `src/store.rs` now includes `../../upstream/openkit-b67cd0f2.Cargo.lock` and explains its provenance role. The old relative include would silently hash Omni's root lock after relocation. The retained bytes preserve upstream machinery identity. | Generic explicit build/dependency identity input instead of a monorepo-relative assumption; do not upstream this host-specific filename. |
 | M0-P02: Rust 1.99 Clippy compatibility | `decode_digest` uses fixed two-byte `as_chunks` instead of `chunks_exact`. Its prior 64-byte validation makes the empty remainder invariant unchanged. Rust 1.99's strict Clippy gate rejected the original form. | Direct mechanical iterator update, with unchanged decoding and public digest-window tests. |
+| DIAG-01: native limit failure context | `set_limit` reports the resource, errno, inherited limits, and requested limits from the failing `getrlimit` or `setrlimit`. | Diagnostic context at that call. Do not upstream a changed ceiling, a fallback, or a resource-policy change. |
 
 Remove a patch when upstream supplies its responsibility, then rerun the same downstream and parity checks before updating provenance.
 The [change record](../../docs/changes/2026-11-04-kernel-vendor.md) records M0 proof and exclusions.
 
 ## Observation Corrections
 
-These rows are not entries in the M0 replayable patch.
+OBS-01 and OBS-02 are entries in the same replayable patch as M0-P01, M0-P02, and DIAG-01.
 They do not change production path handling, resource ceilings, or controller policy.
-`PROVENANCE.json` still records the upstream `src/tests.rs` hash. Its vendored hash is not rewritten here.
+`PROVENANCE.json` keeps every original upstream hash and records the current vendored hashes of `src/main.rs` and `src/tests.rs`.
 
 | Correction | Necessity and effect | Boundary |
 | --- | --- | --- |

@@ -16,4 +16,5 @@ Retaining the shared text loses the distinction needed to diagnose the actual su
 
 ## Evidence scope
 
-OLD Linux executable behavior is retained at the qualified `6a52d33` receipts; NEW must retain all seven unchanged face cases and strict Clippy. Actual native diagnostics, repaired native library observations and any owner decision about standalone capability remain pending. Neither error formatting nor Linux success establishes macOS/full-M0 acceptance. The vendored patch ledger is updated only after its current observer writer releases the file.
+OLD Linux executable behavior is retained at the qualified `6a52d33` receipts; NEW must retain all seven unchanged face cases and strict Clippy. Actual native diagnostics, repaired native library observations and any owner decision about standalone capability remain pending. Neither error formatting nor Linux success establishes macOS/full-M0 acceptance. The vendored patch ledger lists this diagnostic in the same replayable patch.
+The ceilings and fail-closed startup behavior are unchanged.
