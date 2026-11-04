@@ -33,6 +33,17 @@ No analyzer, scoring, coverage, source admission, generation publication, or tes
 Remove a patch when upstream supplies its responsibility, then rerun the same downstream and parity checks before updating provenance.
 The [change record](../../docs/changes/2026-11-04-kernel-vendor.md) records M0 proof and exclusions.
 
+## Observation Corrections
+
+These rows are not entries in the M0 replayable patch.
+They do not change production path handling, resource ceilings, or controller policy.
+`PROVENANCE.json` still records the upstream `src/tests.rs` hash. Its vendored hash is not rewritten here.
+
+| Correction | Necessity and effect | Boundary |
+| --- | --- | --- |
+| OBS-01: canonical directory-race target | The fixture fault path now uses the canonical root that `Directory::new` binds. A `TMPDIR` symlink alias otherwise misses the pre-stat and pre-open removal. | Fixture setup only. Coverage, hit, unavailable-count, and privacy-marker assertions stay unchanged. No production path normalization. |
+| OBS-02: `ru_maxrss` unit | Darwin bytes come from XNU copying `resident_size_max`, which Mach `task_info` defines in bytes. Linux `getrusage(2)` reports kibibytes. The observer converts to bytes and keeps the 512 MiB ceiling. | The 48 MiB source bound, allocator check, exact-query checks, and child identity stay unchanged. This is not a budget increase. Native macOS execution remains unobserved. |
+
 ## Dependency Identity Is Not Yet A Production Binding
 
 The retained [upstream Cargo.lock](../upstream/openkit-b67cd0f2.Cargo.lock) has SHA-256 `88be6b21f6430d1aa5bf3b730822905e37ed7514a2378a49b454265797a0947a`.

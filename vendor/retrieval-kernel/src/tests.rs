@@ -1454,6 +1454,10 @@ fn observe_allocation(size: usize) {
 }
 
 /// The actual index path must not allocate the 48 MiB source; peak process RSS stays below 512 MiB.
+///
+/// Darwin `ru_maxrss` is bytes because XNU copies `resident_size_max` and Mach
+/// `task_info` defines that field in bytes. Linux `getrusage(2)` uses kibibytes.
+/// The ceiling stays 512 MiB on both.
 #[test]
 fn large_file_actual_allocations_and_peak_memory() {
     const FILE_BYTES: usize = 48 * 1024 * 1024;
@@ -1469,8 +1473,10 @@ fn large_file_actual_allocations_and_peak_memory() {
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
+            "allocation child status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         let output = String::from_utf8(output.stdout).unwrap();
         // Serial libtest can prefix nocapture output with the current test name.
@@ -1527,14 +1533,32 @@ fn large_file_actual_allocations_and_peak_memory() {
     }
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+    let peak_rss_bytes = peak_resident_bytes(usage.ru_maxrss);
     assert!(
-        usage.ru_maxrss < 512 * 1024,
-        "RSS exceeds fixed 512 MiB ceiling"
-    );
-    println!(
-        "allocation: file_bytes={size} maximum_single_allocation={maximum} peak_rss_kib={}",
+        peak_rss_bytes < 512 * 1024 * 1024,
+        "RSS exceeds fixed 512 MiB ceiling: peak_rss_bytes={peak_rss_bytes} ru_maxrss={}",
         usage.ru_maxrss
     );
+    println!(
+        "allocation: file_bytes={size} maximum_single_allocation={maximum} ru_maxrss={} peak_rss_bytes={peak_rss_bytes}",
+        usage.ru_maxrss
+    );
+}
+
+/// Convert `getrusage` `ru_maxrss` to bytes. The 512 MiB ceiling is unchanged.
+///
+/// XNU assigns `ru_maxrss` from `resident_size_max` in `bsd/kern/kern_resource.c`.
+/// `osfmk/mach/task_info.h` defines that field as maximum resident memory size in bytes.
+/// Linux `getrusage(2)` reports the same field in kibibytes.
+fn peak_resident_bytes(ru_maxrss: libc::c_long) -> u64 {
+    let raw = u64::try_from(ru_maxrss).expect("ru_maxrss is non-negative");
+    if cfg!(target_os = "macos") {
+        raw
+    } else if cfg!(target_os = "linux") {
+        raw.saturating_mul(1024)
+    } else {
+        panic!("ru_maxrss unit is not classified for this operating system");
+    }
 }
 
 /// Empty direct text still has its supplied title and never gains a sidecar.
@@ -1962,6 +1986,16 @@ pub(crate) fn directory_boundary(stage: &str, path: &Path) {
         }
     });
 }
+/// Resolve only this fixture's fault target through the canonical root.
+///
+/// `Directory::new` canonicalizes the root. `TempDir` keeps a `TMPDIR` symlink
+/// alias, so the pre-stat and pre-open removal would otherwise miss.
+fn canonical_fixture_target(root: &Path, name: &str) -> std::path::PathBuf {
+    fs::canonicalize(root)
+        .expect("fixture root must resolve")
+        .join(name)
+}
+
 /// Disappearance before stat or open is counted once without stopping the readable inventory.
 #[test]
 fn directory_stat_and_open_races_are_coverage_only() {
@@ -1969,9 +2003,8 @@ fn directory_stat_and_open_races_are_coverage_only() {
         let f = Fixture::new();
         f.text("public", "needle");
         f.text("SECRET_PRIVATE", "needle");
-        DIRECTORY_FAULT.with(|fault| {
-            *fault.borrow_mut() = Some((stage, f.root.path().join("SECRET_PRIVATE")))
-        });
+        let target = canonical_fixture_target(f.root.path(), "SECRET_PRIVATE");
+        DIRECTORY_FAULT.with(|fault| *fault.borrow_mut() = Some((stage, target)));
         let directory = crate::directory::Directory::new(f.root.path(), f.store.path()).unwrap();
         let view = directory.inventory().unwrap();
         assert_eq!(view.documents.len(), 1);
