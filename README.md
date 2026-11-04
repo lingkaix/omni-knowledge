@@ -1,10 +1,18 @@
 # Omni Knowledge
 
-Omni Knowledge is a local personal knowledge library for Apple silicon Macs.
-The Rust core serves a GPUI desktop application, the `omni` CLI, and a stdio MCP server for AI agents.
+Omni Knowledge is a local folder knowledge library with an Apple silicon GPUI desktop and a headless Rust CLI.
 Original files stay in ordinary folders; generated search indexes can be rebuilt.
 
-## Try The First Version
+## Full-Version Development
+
+The accepted [product contract](docs/specs/product.md) defines one full delivery with shared portable crates, reference mounts, safe text history, searchable ZIP packages, and a common multi-library service.
+The [service wire contract](docs/specs/service.md) defines the public DTO boundary for GUI, CLI, and MCP.
+The [workspace transition](docs/changes/2026-11-04-workspace.md) records migration and preservation obligations.
+These accepted contracts are not claims that every feature is already implemented or qualified.
+The compatibility commands and storage description below describe the retained first-version implementation while the migration is in progress.
+Linux headless builds and macOS GUI builds have separate gates; native platform effects require their actual platform observations.
+
+## Try The Retained First Version
 
 Build and open the local application:
 
@@ -85,7 +93,7 @@ The provider is a separate process and must be running for vector indexing or qu
 Lexical search works while it is stopped.
 
 ```sh
-cd /Users/m5pro/Documents/AI/local-ai/embedding-wemm
+cd /absolute/path/to/embedding-wemm
 ./scripts/serve.sh gpu
 ```
 
