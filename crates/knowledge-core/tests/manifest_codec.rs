@@ -805,26 +805,119 @@ fn input_byte_ceiling_refuses_without_echoing_the_body() {
     assert_eq!(exact.original_bytes(), bytes.as_bytes());
 }
 
-/// Output accounting includes escape expansion and returns no partial candidate.
+/// Public JSON string length. Quotes, backslashes, and controls expand; other
+/// characters stay one scalar. This is not codec output.
+fn json_string(name: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in name.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn compact_shell() -> (String, String) {
+    let marker = "\"__NAME_MARK__\"";
+    let skeleton = compact_v2(marker);
+    let at = skeleton.find(marker).expect("name marker");
+    (
+        skeleton[..at].to_string(),
+        skeleton[at + marker.len()..].to_string(),
+    )
+}
+
+fn compact_len(prefix: &str, suffix: &str, name: &str) -> usize {
+    prefix.len() + json_string(name).len() + suffix.len()
+}
+
+fn refuse_output(document: &ManifestDocument, name: &str, label: &str) {
+    match document.with_name(name) {
+        Ok(candidate) => panic!(
+            "{label} returned {} candidate bytes",
+            candidate.original_bytes().len()
+        ),
+        Err(error) => {
+            assert_eq!(error, ManifestError::ByteLimit, "{label}");
+            assert_input_free(&error, CANARY);
+        }
+    }
+}
+
+/// Output accounting includes escape expansion and the complete candidate.
+/// Lengths are the public JSON spelling of this fixture, not codec output.
 #[test]
 fn escaped_rename_over_the_output_ceiling_returns_no_candidate() {
     let bytes = compact_v2(r#""Shelf""#);
-    let document = ManifestDocument::decode(
-        bytes.as_bytes(),
-        ManifestLimits {
-            max_bytes: bytes.len(),
-        },
-    )
-    .expect("input fits");
+    let (prefix, suffix) = compact_shell();
+    assert_eq!(
+        compact_len(&prefix, &suffix, "Shelf"),
+        bytes.len(),
+        "fixture shell does not match the compact name token"
+    );
+    let ceiling = bytes.len();
+    let document =
+        ManifestDocument::decode(bytes.as_bytes(), ManifestLimits { max_bytes: ceiling })
+            .expect("input fits");
     let copied = document.with_name("Shelf").expect("no-op within ceiling");
     assert_eq!(copied.original_bytes(), bytes.as_bytes());
 
-    let mut widened = String::from(CANARY);
-    widened.push_str(&"\"".repeat(4000));
-    let error = document.with_name(&widened).manifest_err("expanded name");
-    assert_eq!(error, ManifestError::ByteLimit);
-    assert_input_free(&error, CANARY);
+    let mut escaped_name = String::from(CANARY);
+    escaped_name.push_str(&"\"".repeat(ceiling / 2));
+    let escaped_len = json_string(&escaped_name).len();
+    assert!(
+        escaped_name.len() <= ceiling,
+        "raw name {} exceeded ceiling {ceiling}",
+        escaped_name.len()
+    );
+    assert!(
+        escaped_len > ceiling,
+        "escaped name {escaped_len} did not exceed ceiling {ceiling}"
+    );
+    refuse_output(&document, &escaped_name, "escaped name");
     assert_eq!(document.original_bytes(), bytes.as_bytes());
+
+    let encoded_name = CANARY.to_string();
+    let encoded_len = json_string(&encoded_name).len();
+    let complete = compact_len(&prefix, &suffix, &encoded_name);
+    assert!(encoded_name.len() <= ceiling, "raw encoded-name stimulus");
+    assert!(
+        encoded_len <= ceiling,
+        "encoded name {encoded_len} exceeded ceiling {ceiling}"
+    );
+    assert!(
+        complete > ceiling,
+        "complete manifest {complete} did not exceed ceiling {ceiling}"
+    );
+    refuse_output(&document, &encoded_name, "complete manifest");
+    assert_eq!(document.original_bytes(), bytes.as_bytes());
+
+    let changed = "Renamed";
+    let changed_complete = compact_len(&prefix, &suffix, changed);
+    assert_ne!(changed, "Shelf");
+    assert!(changed.len() <= changed_complete);
+    assert!(json_string(changed).len() <= changed_complete);
+    assert!(changed_complete >= bytes.len());
+    let wide = ManifestDocument::decode(
+        bytes.as_bytes(),
+        ManifestLimits {
+            max_bytes: changed_complete,
+        },
+    )
+    .expect("changed-name ceiling admits the input");
+    let candidate = wide.with_name(changed).expect("changed name within budget");
+    assert!(!candidate.original_bytes().is_empty(), "empty candidate");
+    assert!(
+        candidate.original_bytes().len() <= changed_complete,
+        "candidate {} exceeded budget {changed_complete}",
+        candidate.original_bytes().len()
+    );
+    assert_eq!(candidate.metadata().expect("renamed").name, changed);
+    assert_eq!(wide.original_bytes(), bytes.as_bytes());
 }
 
 /// Depth equal to the published ceiling remains a normal supported document.

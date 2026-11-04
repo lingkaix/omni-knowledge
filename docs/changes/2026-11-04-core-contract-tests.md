@@ -21,6 +21,7 @@ A changed name may normalize only the outer object. Every other raw field value 
 The comparison parses those bytes with a test-local scanner. It does not treat `field_json` as the only oracle.
 Legacy version 1, unsigned versions other than 1 or 2, and unrecognized required tags stay inspectable and refuse even a no-op rename.
 Missing, duplicated, inconsistent, or wrongly typed recognized fields are read-only. Syntax, outer duplicate keys, non-objects, invalid UTF-8, and input past the caller ceiling return the documented errors.
+The output-ceiling case keeps each raw name within the selected ceiling. One name's JSON escaping alone exceeds that ceiling. A second encoded name fits while the complete mutated manifest exceeds it. A changed name whose mathematical compact candidate fits succeeds, and the candidate is non-empty. Refusal returns no candidate, leaves the original bytes unchanged, and stays input-free. Those lengths are the public JSON spelling of the fixture, not codec output.
 Container depth counts the outer object as level 1. Depth 128 stays editable. Depth 129 and depth 200 return `DepthLimit`.
 `RelativePath`, `ContentDigest`, and `ByteRange` enforce the documented lexical rejects. A zero `Budget` remains a stored zero. Nothing in that check calls an adapter.
 
@@ -59,7 +60,7 @@ Storage also does not enumerate the manifest's writable and reconciliation JSON 
 The tests use the service field names because the committed public projection says it reads those names. A passing editable fixture is not acceptance of a disk-format amendment, and it does not close the projection review required before persistence.
 `ManifestMetadata` has no convention, extension, or service-revision field. The tests do not serialize that snapshot as a manifest.
 A JSON number spelling such as `2.0` for `version` is not specified. The suite does not invent a verdict for it.
-`RelativePath` does not enumerate empty components, trailing slashes, or UNC prefixes. Those spellings are not given a normative result.
+The service owner explicitly excludes empty path segments. That exclusion is decided. This suite does not add a blanket path-test expansion for it. Trailing slashes and UNC prefixes remain unenumerated here and are not given a new normative result by this record.
 Empty bytes at a zero ceiling match both "invalid JSON" and "zero admits nothing", and neither text orders those reasons. Length zero does not exceed a zero ceiling. The test accepts `InvalidJson` or `ByteLimit` and requires an input-free error. One earlier execution observed `InvalidJson`. That observation is not promoted to a format rule.
 Changed-name tests do not pin outer key order or diagnostic wording. They pin raw non-name values, decoded names, diagnostic stability, and canary absence.
 No test opens a directory, activates a mount, migrates version 1, writes a journal, or grants exposure. The API-only stand-in is not evidence of confinement, residency, range reads, tracking, offline behavior, tombstones, or budget enforcement.
@@ -74,3 +75,4 @@ The knowledge-core package does not compile the vendored kernel, so no dictionar
 The library target and the manifest example target each reported 0 tests. Those are empty harnesses, not a filtered acceptance run.
 The example binary was not executed and is not an oracle.
 Independent key review has not accepted this suite.
+The 26-pass receipt above is the historical result from that run. It is retained. The later output-ceiling stimulus correction does not relax those bounds and does not replace that receipt.
