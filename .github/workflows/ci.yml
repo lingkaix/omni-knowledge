@@ -51,6 +51,8 @@ jobs:
           sudo apt-get install --no-install-recommends -y ffmpeg
       - name: Admit the gate instrument
         run: python3 scripts/gate.py self-test
+      - name: Admit the nested bundle lifecycle instrument
+        run: python3 tests/process/test_bundle_lifecycle.py --subject-repo "$PWD" --subject-ref "$GITHUB_SHA" --evidence-dir temp/ci-evidence/nested-bundle
       - name: Full headless workspace gate
         run: python3 scripts/gate.py headless
       - name: Stage Linux artifact
