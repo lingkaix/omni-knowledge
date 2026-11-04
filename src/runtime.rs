@@ -354,15 +354,31 @@ mod tests {
     }
 
     impl Fixture {
-        /// Creates mock tools; no real Terminal or Homebrew installation is ever invoked.
+        /// Creates mock tools without exposing writable executable descriptors to parallel forks.
+        /// No real Terminal or Homebrew installation is invoked; setup failures fail the test.
         fn new(brew_script: &str, launcher_script: &str) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let requests = directory.path().join("requests");
             fs::create_dir(&requests).unwrap();
             let brew = directory.path().join("brew 'quoted path");
             let launcher = directory.path().join("open");
-            for (path, script) in [(&brew, brew_script), (&launcher, launcher_script)] {
-                fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            // Only this child opens scripts for writing; sibling forks cannot inherit those FDs.
+            // See docs/changes/2026-11-04-test-disposition.md for the Linux ETXTBSY evidence.
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("printf '#!/bin/sh\\n%s\\n' \"$2\" > \"$1\" && printf '#!/bin/sh\\n%s\\n' \"$4\" > \"$3\"")
+                .arg("fixture-writer")
+                .arg(&brew)
+                .arg(brew_script)
+                .arg(&launcher)
+                .arg(launcher_script)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "synthetic executable setup failed: {status}"
+            );
+            for path in [&brew, &launcher] {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
             }
             Self {
@@ -523,7 +539,7 @@ mod tests {
     fn nonzero_launcher_exit_reports_uncertainty_and_preserves_helper() {
         let fixture = Fixture::new("exit 0", "printf 'mock launcher rejected\\n' >&2\nexit 9");
         let error = fixture.launch(BrewPackage::FFmpeg).unwrap_err().to_string();
-        assert!(error.contains("exit status: 9"));
+        assert!(error.contains("exit status: 9"), "{error}");
         assert!(error.contains("mock launcher rejected"));
         assert!(error.contains("Terminal may have started"));
         assert_eq!(fixture.helpers().len(), 1);
@@ -552,10 +568,13 @@ mod tests {
     }
 
     /// Resolves fixed prefixes independently with a limited PATH and rejects working-directory PATH entries.
+    /// Synthetic PATH directories make absence independent of installed media prerequisites.
     #[test]
     fn fixed_tool_directories_work_with_limited_path() {
         let fixed = tempfile::tempdir().unwrap();
         let fallback = tempfile::tempdir().unwrap();
+        let absent = tempfile::tempdir().unwrap();
+        let absent_path = std::env::join_paths([absent.path()]).unwrap();
         for path in [
             fixed.path().join("ffmpeg"),
             fallback.path().join("ffmpeg"),
@@ -575,14 +594,7 @@ mod tests {
             Some(fallback.path().join("ffprobe"))
         );
         assert!(resolve_from(RuntimeTool::WhisperCli, &directories, Some(&path)).is_none());
-        assert!(
-            resolve_from(
-                RuntimeTool::FFprobe,
-                &directories,
-                Some(OsStr::new("/usr/bin:/bin"))
-            )
-            .is_none()
-        );
+        assert!(resolve_from(RuntimeTool::FFprobe, &directories, Some(&absent_path)).is_none());
         assert!(resolve_from(RuntimeTool::FFmpeg, &[], Some(OsStr::new(".:relative"))).is_none());
     }
 }
