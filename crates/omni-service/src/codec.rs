@@ -48,8 +48,10 @@ impl std::error::Error for CodecError {}
 ///
 /// The byte bound is checked before UTF-8 or JSON parsing. Missing nullable fields,
 /// unknown command/nested fields, unknown operations/tags, unsafe integers, invalid
-/// paths, and explicit command bounds are refused. A supplied trailing delimiter
-/// counts toward the bound; no stream splitting, I/O, or authority check occurs.
+/// paths, and explicit command bounds are refused. Records must be JSON objects;
+/// string enums must be strings, including inside nullable fields and arrays.
+/// A supplied trailing delimiter counts toward the bound.
+/// No stream splitting, I/O, or authority check occurs.
 ///
 /// # Errors
 /// Returns an input-free [`CodecError`] for oversized, malformed, unsupported, or
@@ -64,11 +66,48 @@ pub fn decode_request(bytes: &[u8]) -> std::result::Result<Request, CodecError> 
             Category::Syntax | Category::Eof => CodecError::InvalidJson,
             Category::Data | Category::Io => CodecError::InvalidWireData,
         })?;
+    // Keep typed parsing first: a JSON Value alone would erase duplicate keys.
+    // Reuse the DTO's existing representation, not a second command/field schema.
+    let supplied = serde_json::from_slice(bytes).map_err(|_| CodecError::InvalidWireData)?;
+    let represented = serde_json::to_value(&request).map_err(|_| CodecError::InvalidWireData)?;
+    if !same_representation(&supplied, &represented) {
+        return Err(CodecError::InvalidWireData);
+    }
     if request.wire_version != WIRE_VERSION {
         return Err(CodecError::UnsupportedVersion);
     }
     validate_command(&request.command)?;
     Ok(request)
+}
+
+/// Return whether JSON kinds, keys and array lengths match the typed request representation.
+/// Both trees come only from an already byte-bounded, typed request, never a response.
+/// This rejects Serde's alternate record/enum containers through tagged-enum buffers.
+/// Primitive values and numeric spellings are not compared; typed parsing checks them.
+fn same_representation(supplied: &serde_json::Value, represented: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (supplied, represented) {
+        (Value::Object(supplied), Value::Object(represented)) => {
+            supplied.len() == represented.len()
+                && represented.iter().all(|(key, value)| {
+                    supplied
+                        .get(key)
+                        .is_some_and(|supplied| same_representation(supplied, value))
+                })
+        }
+        (Value::Array(supplied), Value::Array(represented)) => {
+            supplied.len() == represented.len()
+                && supplied
+                    .iter()
+                    .zip(represented)
+                    .all(|(supplied, represented)| same_representation(supplied, represented))
+        }
+        (Value::Null, Value::Null)
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_)) => true,
+        _ => false,
+    }
 }
 
 /// Encode one compact UTF-8 JSON response without a newline or transport wrapper.

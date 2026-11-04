@@ -1,4 +1,6 @@
 //! Checked wire scalars. None of these values grants access to a resource.
+//! String-backed newtypes serialize their borrowed inner text without cloning it.
+//! Deserialization and explicit owned conversions retain their existing checks.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
 use std::fmt;
@@ -47,7 +49,7 @@ impl std::error::Error for ScalarError {}
 
 /// An opaque nonempty identifier; not a UUID, path, identity, or permission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct Id(String);
 
 impl Id {
@@ -81,7 +83,7 @@ impl From<Id> for String {
 
 /// A lowercase, 64-character SHA-256 digest, not a source identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct Digest(String);
 impl Digest {
     /// Check `value` without case conversion or hashing content.
@@ -157,7 +159,7 @@ fn canonical_unsigned(text: &str) -> bool {
 
 /// A canonical signed nanosecond timestamp string, with no invented bit limit.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct SignedDecimal(String);
 impl SignedDecimal {
     /// Check canonical decimal notation; reject plus signs and negative zero.
@@ -191,7 +193,7 @@ impl From<SignedDecimal> for String {
 
 /// A UTC RFC 3339 timestamp, retained as data rather than ordering authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct Time(String);
 impl Time {
     /// Validate RFC 3339 and a UTC offset without rewriting `value`.
@@ -237,7 +239,7 @@ fn relative_path(value: &str) -> bool {
 
 /// A nonempty normalized relative path; not a filesystem handle or permission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct RelativePath(String);
 impl RelativePath {
     /// Reject absolute, dot, empty, traversal, backslash, and NUL syntax.
@@ -270,7 +272,7 @@ impl From<RelativePath> for String {
 
 /// A browse-only relative path that also permits the empty selected-root sentinel.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct RootRelativePath(String);
 impl RootRelativePath {
     /// Permit an empty browse root or validate the same syntax as `RelativePath`.
