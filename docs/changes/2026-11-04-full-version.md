@@ -180,6 +180,13 @@ This follow-up defines selected bounded EPUB plan/export over existing result ma
 The lead's early composition checks also identified hydrate job kind and schedule observability; service DTOs now represent both explicitly.
 The finding is repaired by committed owner changes, not by this narrative declaring review acceptance.
 
+A later independent composition review found that unverified discovery had no read-only path to source bytes: `read_range` required a verified version, while details did not hash and refresh/process required write admission.
+The service owner now declares bounded selected-source `verify_source` under read admission, returning the existing Source/ExpectedVersion DTO without relaxing mutation preconditions.
+This operation is the existing verify-on-read responsibility made expressible at the public seam, not another processing framework.
+Removing it leaves ordinary read-only browse-to-read/preview impossible without authority escalation or an undeclared command.
+Its acceptance sequence is unverified resident browse → bounded verification → expected-version range read, with drift, residency, exclusion, and budget refusals.
+Independent review of the committed correction and later runtime composition remain required; a documentation example alone proves neither.
+
 No production code or tests are changed by this contract task; changed production/test lines are both zero.
 No Cargo compilation, Clippy, product tests, native GUI, model, signing, archive, remote, or throughput result is claimed from documentation checks.
 Independent criterion comparison and the implementation M0 baseline/kernel/CI/test duties remain separately owned and cannot be self-certified by this writer.

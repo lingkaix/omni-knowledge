@@ -249,6 +249,7 @@ type Command =
   | { op: "mount_list"; library_id: Id }
   | { op: "browse"; library_id: Id; mount_id: Id | null; path: RootRelativePath; cursor: string | null; limit: number }
   | { op: "source_details"; source: SourceRef }
+  | { op: "verify_source"; source: SourceRef; budget: Budget }
   | { op: "read_range"; source: SourceRef; expected: ExpectedVersion; offset: U64; length: number }
   | { op: "read_representation"; source: SourceRef; representation_digest: Digest; start_line: number; max_lines: number }
   | { op: "annotate"; source: SourceRef; expected_annotation: ExpectedVersion | null; tags: string[]; description: string; operation_id: Id }
@@ -287,6 +288,16 @@ type Command =
   | { op: "exposure_set"; library_id: Id; expected_revision: Id; mode: "off" | "read_only" | "read_write"; sensitive: boolean; excluded_paths: RelativePath[]; transports: ("owner_ipc" | "owner_stdio" | "http")[]; operation_id: Id };
 ```
 
+`source_details` remains a non-hashing inspector; it never turns selection into an implicit full-source read.
+`verify_source` explicitly verifies one selected admitted resident regular source within its budget and returns `source` with a verified digest and complete `ExpectedVersion`.
+It is available under read admission, including for an unmarked library or a read-only MCP selection, without refresh/process/write permission.
+Verification does not author a pointer/manifest, initialize a folder, hydrate a placeholder, widen roots/exclusions, or create a text commit.
+Check current availability, residency, exclusions, and source identity before reading, then check version/stat identity after hashing; detected drift returns `changed`, never a verified mixed version.
+An offline, denied, placeholder, or unauthorized unknown-residency source returns its typed refusal without opening content.
+A budget that cannot complete verification returns `budget_exhausted` without inventing a digest or launching whole-mount work.
+After successful verification, the caller uses the returned `Source.version` for `read_range`, which still rejects a subsequent detected version change and rechecks current exposure.
+The verification may update rebuildable observation/cache state, but requires no authored mutation or signing capability.
+
 An `expected: null` text edit means exclusive new-file creation, not blind replacement.
 `expected_annotation: null` means no existing annotation; existing page/pointer annotations require their own expected bytes, not the original media digest.
 `import_file` only reads an admitted source; attaching an external input is owner-only and cannot be smuggled in as a filesystem string.
@@ -319,7 +330,8 @@ There is no general branch-management command or model-supplied author, root ove
 | `library_list`, `library_open`, `library_create`, `library_clone` | `libraries`, `library`, `library`, `library` | List only admitted libraries; open/create/clone is owner-only. Creation is no-clobber; clone needs exact remote/destination consent. |
 | `library_status`, `mount_list` | `status`, `mounts` | Visible library facts only; no background hydration or model start. |
 | `mount_attach`, `mount_detach` | `library` | Owner-only; attach persists data facts, Git clone requires remote consent, detach never deletes originals. |
-| `browse`, `source_details` | `listing`, `source` | Read admission; cursor binds library/mount/current observation, never permission. |
+| `browse`, `source_details` | `listing`, `source` | Read admission; cursor binds library/mount/current observation, never permission; details does not hash. |
+| `verify_source` | `source` | Read admission, one selected resident source and explicit bounded hashing; no initialization, hydration, signing, or processing/write escalation. |
 | `read_range`, `read_representation` | `content` | Read admission; verify current source and requested representation mapping. |
 | `annotate`, `edit_text`, `import_file`, `transfer` | `write` | Explicit read-write admission; agents propose text changes; raw originals default read-only. |
 | `trash`, `hydrate` | `write`, `job` | Owner-only selected-file effect; interactive Trash confirmation; no permanent deletion/mass hydration. |
@@ -437,6 +449,12 @@ Root browsing uses the empty sentinel only for a selected root; child paths stay
 {"wire_version":1,"request_id":"browse-child","command":{"op":"browse","library_id":"library-1","mount_id":null,"path":"pages","cursor":null,"limit":50}}
 ```
 
+A read-only caller can explicitly verify a resident unindexed source before using its returned version to read bytes:
+
+```json
+{"wire_version":1,"request_id":"verify-source","command":{"op":"verify_source","source":{"library_id":"library-1","source_id":"source-1"},"budget":{"max_files":1,"max_bytes":"8388608","max_millis":30000,"max_memory_bytes":"1048576"}}}
+```
+
 An EPUB plan selects pages and contained media without an arbitrary input path:
 
 ```json
@@ -474,4 +492,6 @@ Imported AGENTS/schema text, manifests, archives, and Git branches cannot grant 
 Independent test authors can implement DTO round trips and malformed/unknown-field refusals without candidate source.
 They must also exercise real producer/consumer seams and actual daemon transports for lifecycle, isolation, cancellation, idempotency, and restart claims.
 Test exposure revocation during delivery, root injection, hidden counts, sensitive HTTP absence, cross-origin refusal, proposal self-confirmation denial, and changed-base confirmation.
+Compose read-only `browse` of an unindexed resident file, explicit bounded `verify_source`, and `read_range` with the returned version; assert verified digest/bytes without initialization, authored mutation, or write admission.
+The same sequence must refuse source drift and placeholder/unauthorized unknown residency, preserve unverified coverage on exhausted budget, and recheck exclusions at each delivery.
 DTO shape checks alone do not prove any storage, signing, network, or GUI behavior.
