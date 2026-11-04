@@ -34,6 +34,10 @@ Cargo's registry dependency provisioning remains separate from dictionary supply
 
 `python3 scripts/gate.py prepare` performs only this prerequisite.
 The local bundler uses `python3 scripts/gate.py bundle-build` so the prepared environment reaches its Cargo build without a second shell-side setup owner.
+That internal helper keeps its supplier in the enclosing bundle process group and replaces itself with Cargo; it does not create a second Cargo supervisor/session.
+During `gui`, the outer gate owns that entire group and its effective timeout/interruption cleanup, including the nested preparation/build.
+Standalone local bundling retains the original foreground build behavior; use `gui` for the bounded CI composition.
+See the [nested lifecycle correction](../docs/changes/2026-11-04-bundle-process-ownership.md); admission stand-ins are not native Mac proof.
 For a direct Cargo invocation outside the gate, prepare explicitly first:
 
 ```sh
@@ -105,6 +109,7 @@ It can reuse retained upstream notices only when crate/version/VCS identity and 
 For a registry package with no discovered notice text, it includes the exact checksum-verified original source archive as evidence and retains the gap rather than inventing copyright terms.
 CI includes these notices/source archives in the Linux archive and checks the unpacked inventory and required Tantivy notice evidence before upload.
 Coverage gaps remain explicit; discovered text or a source archive is not a complete legal compliance certification.
+The [Linux artifact correction](../docs/changes/2026-11-04-linux-artifact-notices.md) records the actual composition and retained upstream notice gaps.
 Python is not required by the installed CLI or app.
 `scripts/setup-asr.sh` prepares a pinned optional whisper.cpp and multilingual model under ignored `temp/asr-runtime/`.
 Read [the multimodal guide](../docs/multimodal.md) before setting executable and model paths in a library configuration.

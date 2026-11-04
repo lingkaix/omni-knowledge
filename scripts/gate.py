@@ -21,17 +21,18 @@ class GateError(Exception):
     """Report a failed prerequisite, command, or test-accounting assertion."""
 
 
-def run(command, evidence, label, timeout):
-    """Run an argument array, retain output, and kill its process group on timeout.
+def run(command, evidence, label, timeout, own_group=True):
+    """Run a bounded argument array; return output or raise GateError on FAIL/TIMEOUT.
 
-    Return the decoded output on success; raise GateError on FAIL or TIMEOUT.
+    Normally own and settle a new process group. Nested bundle preparation keeps
+    the enclosing group's ownership; its known supplier spawns no children.
     The caller supplies a private evidence directory and a positive deadline.
     """
     print(f"RUN {label}: {' '.join(map(str, command))}", flush=True)
     log = evidence / f"{label}.log"
     with log.open("w") as output:
         process = subprocess.Popen(
-            command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
+            command, stdout=output, stderr=subprocess.STDOUT, start_new_session=own_group
         )
         try:
             try:
@@ -40,11 +41,14 @@ def run(command, evidence, label, timeout):
             except subprocess.TimeoutExpired:
                 code, status = 124, "TIMEOUT"
         finally:
-            # Also settle descendants if the group leader exits before its children.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            # The outer owner settles its whole group, including nested Cargo.
+            if own_group:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
             process.wait()
     text = log.read_text(errors="replace")
     (evidence / f"{label}.json").write_text(
@@ -93,12 +97,13 @@ def check_tests(inventory, ignored, output):
     print(f"PASS accounting: {sum(observed.values())} cases, {sum(ignored.values())} declared opt-ins")
 
 
-def prepare_dictionary(evidence, timeout):
+def prepare_dictionary(evidence, timeout, own_group=True):
     """Supply the pinned dictionary before Cargo, preserving an explicit cache path.
 
     Earlier heads without the kernel are inapplicable; an incomplete vendor head
     fails before Cargo can invoke a build script or implicitly fetch a dictionary.
     The supplier owns archive identity and verification, not this gate.
+    Nested bundle preparation must remain in the enclosing command group.
     """
     supplier = Path("tools/kernel-probe/prepare-dictionary.py")
     vendor = Path("vendor/retrieval-kernel")
@@ -114,7 +119,7 @@ def prepare_dictionary(evidence, timeout):
     cache = Path(os.environ.get("LINDERA_BUILD_DICTIONARY_CACHE_DIR") or str(default)).resolve()
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.environ["LINDERA_BUILD_DICTIONARY_CACHE_DIR"] = str(cache)
-    run([sys.executable, str(supplier), "--cache", str(cache)], evidence, "dictionary-supply", timeout)
+    run([sys.executable, str(supplier), "--cache", str(cache)], evidence, "dictionary-supply", timeout, own_group=own_group)
 
 
 def test_workspace(evidence, timeout, gui=False):
@@ -218,12 +223,17 @@ def main():
     evidence = arguments.evidence_dir.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     timeout = arguments.timeout_seconds
+    if arguments.mode == "bundle-build":
+        # Replace this internal helper instead of creating an escaped Cargo group.
+        # The enclosing gui gate owns the bundle group and its effective deadline.
+        prepare_dictionary(evidence, timeout, own_group=False)
+        command = ["cargo", "build", "--workspace", "--locked", "--release", "--features", "gui"]
+        print(f"EXEC bundle-build: {' '.join(command)}", flush=True)
+        os.execvp(command[0], command)
     if arguments.mode not in {"self-test", "smoke"}:
         prepare_dictionary(evidence, timeout)
     if arguments.mode == "prepare":
         pass
-    elif arguments.mode == "bundle-build":
-        run(["cargo", "build", "--workspace", "--locked", "--release", "--features", "gui"], evidence, "bundle-build", timeout)
     elif arguments.mode == "self-test":
         self_test(evidence)
     elif arguments.mode == "smoke":
