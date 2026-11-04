@@ -27,7 +27,7 @@ The exact OLD run is expected to exit 1; use a separate committed NEW subject to
 The test exports the committed scripts, build manifests, license resources, and brand assets through `git archive`.
 It never reads controller implementations for an oracle, imports their private functions, rewrites them, or replaces their delegation.
 Each case executes the actual `python3 scripts/gate.py gui`, real `sh scripts/bundle-macos.sh --ci-unsigned`, and real nested `python3 scripts/gate.py bundle-build`.
-Owned ancestor observations prove that the selected external tool came through all three invocations.
+Owned ancestor observations prove that the selected external tool came through all three invocations: the supplier route observes the live `bundle-build` helper at its own selection, and the Cargo route binds the helper's immutable PID plus start-time identity, recorded while it invoked the preceding nested supplier, to the selected Cargo itself or its ancestry.
 The test requires the script hashes to remain unchanged.
 
 `standin.py` supplies external Cargo and dictionary-supplier effects, platform prerequisites, and synthetic CLI artifacts.
@@ -81,13 +81,11 @@ The selected path is explicitly CI unsigned, and production scripts remain uncha
 This suite does not replace local signing/refusal checks or native release acceptance.
 NEW must run with the same deciding assertion after an independently supplied committed correction; OLD failure alone is not correction evidence.
 
-### Current Provenance-Observation Limitation
+### Process-Replacement Provenance Observation
 
-The unchanged instrument was run against supplied NEW `1764150`; see the change record for complete results and artifact identities.
-The supplier route passes, and both routes show no residual live descendants or delayed writes.
-However, all Cargo cases stop at the current live-ancestor assertion, so the complete unittest result is red.
-A real build controller can replace its process with Cargo without remaining a live ancestor.
-The accepted owner requires the real invocation, not retention of that intermediate process.
-The instrument needs an authorized provenance-observation correction and OLD/NEW re-admission before Cargo settlement assertions can be counted as passing.
-No Python assertion or fixture was changed after NEW, as required by the supervisor.
-Do not treat the current provenance assertion as authority to change production or as a completed gate.
+The original instrument required a live `bundle-build` ancestor of the selected Cargo tool.
+Run unchanged against supplied NEW `1764150`, it blocked all four Cargo cases at that assertion because NEW replaces its build-controller process with Cargo by exec; see the change record for complete results and artifact identities.
+Requiring that controller to remain alive is not an owner obligation: the owner requires the real build-delegation invocation, not retention of the intermediate controller process.
+Under authorization, the corrected instrument records the helper's immutable PID plus start-time identity at the preceding nested supplier invocation and binds the selected Cargo to that identity in itself or its ancestry; the supplier route keeps its live-helper observation, and every other assertion stays unchanged.
+Re-admission on exact OLD `ff1cc27` reproduced the same four intended settlement failures after provenance succeeded, and exact NEW `1764150` passed all eight subcases with zero live descendants, no delayed writes, and empty cleanup sets.
+This proves instrument admission only, not native macOS, GUI, signing, real compilation, licenses, or product test counts.

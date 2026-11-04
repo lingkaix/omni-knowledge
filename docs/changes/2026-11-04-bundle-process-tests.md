@@ -161,6 +161,53 @@ Do not integrate this instrument as a complete green gate or reject the producti
 Raw NEW output is retained as `new-1764150.log`, beside its complete evidence directory.
 All OLD evidence remains intact.
 
+## Authorized Provenance-Observation Correction
+
+A mechanical observer correction was authorized for the live-ancestor coupling documented above: make actual invocation and provenance observation survive process replacement without requiring the intermediate controller to stay alive, while every public command and script remains unchanged and every settlement obligation is retained.
+
+The instrument changed only in its two Python fixture files:
+
+- `standin.py` now records each observed ancestor's immutable start-time identity alongside its PID and argv, and each existing controlled-effect `tool` event now carries the full invocation ancestry observed at that moment.
+- The fixture replaces the Cargo-route live-ancestor requirement with an identity binding: the `bundle-build` helper's PID plus start-time identity, observed while it invoked the preceding nested supplier, must appear as the selected Cargo itself or in its ancestry. The supplier route keeps its live-helper observation, and the ownership-crossing, bundle-script, readiness, terminal, zero-live-descendant, no-delayed-write, and cleanup assertions are unchanged.
+
+No production script, manifest, lockfile, existing test, or signing default changed, and no assertion was removed, weakened, skipped, or retuned. A controller that exec-replaces itself with Cargo proves delegation through the retained identity; a controller that would orphan the selected tool still fails the unchanged ownership-crossing assertion.
+
+The corrected instrument was re-admitted on the exact same committed subjects from the lead repository with separate fresh evidence directories and preserved prior red runs:
+
+```sh
+python3 tests/process/test_bundle_lifecycle.py \
+  --subject-repo /home/simonx/.cache/openkit-tmp/omni/lead/omni-knowledge \
+  --subject-ref ff1cc2777c5e01b8ca89cfd09da1d48e434f37b5 \
+  --evidence-dir /home/simonx/AI/temp/backlog-20261015/evidence/omni/process-observer-artifacts/old-ff1cc27-observer
+
+python3 tests/process/test_bundle_lifecycle.py \
+  --subject-repo /home/simonx/.cache/openkit-tmp/omni/lead/omni-knowledge \
+  --subject-ref 1764150 \
+  --evidence-dir /home/simonx/AI/temp/backlog-20261015/evidence/omni/process-observer-artifacts/new-1764150-observer
+```
+
+| Observation | OLD `ff1cc27` | NEW `1764150` |
+| --- | --- | --- |
+| Driver result | Exit 1; two methods, eight subcases, four failures; 11.784 seconds | Exit 0; two methods, eight subcases, all passing; 12.609 seconds |
+| Controls | All four passed | All four passed |
+| Cargo provenance | Helper identity (PID plus start time) observed at the nested supplier matched the live `bundle-build` ancestor of selected Cargo | The same helper identity matched the selected Cargo process itself: process replacement by exec retained the recorded PID and start time |
+| Supplier provenance | Live `bundle-build` helper observed at supplier selection in all cases | Live `bundle-build` helper observed at supplier selection in all cases |
+| Settlement arms | Same four intended failures: ready, two live owned descendants, delayed write present, settlement assertion reached | All four passed: ready, zero live descendants, no delayed write, settlement assertion reached |
+| Cleanup | Empty residual set in all eight cases | Empty residual set in all eight cases |
+
+Every OLD case passed provenance before failing; the only OLD failures remain the unmodified settlement assertion `terminal gate failure must settle owned descendants before subsequent writes`.
+No case failed at provenance, and no Cargo case stopped at the removed coupling.
+The NEW exec observation is an immutable process identity: the helper recorded as `python3 scripts/gate.py bundle-build` at supplier selection time carried the same PID and start time as the selected Cargo process.
+The runs observed 227 owned process identities in total, none of which remained live afterwards, and no file under the retained earlier evidence root was modified.
+This correction proves instrument admission only, not native macOS, GUI, signing, real compilation, licenses, or product test counts, and independent review of the corrected instrument remains an integration-owner obligation.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Corrected `tests/process/test_bundle_lifecycle.py` | `03057e443b75d5ba3dafc6843ce2ce4ff369ca2af13b77296291d806a4cd4c73` |
+| Corrected `tests/process/standin.py` | `80871c7cfb6e5401daa561ab6c9b1ebd34ef1400a819f8286eb3be9b8bea8aeb` |
+| OLD export archive (unchanged subject) | `a8080282e9b73f0bd2c894106da034cd36b6bda2f7bee6f39a2d14aa7acf174b` |
+| NEW export archive (unchanged subject) | `1b79ba7860a165bd88c6b4d116a450bb1b25c8ca9125807781569abeef03e3c5` |
+
 ## Checks, Scope, And Handoff
 
 Python compilation of both source files passed under Python 3.14.7 on Linux.
@@ -170,7 +217,7 @@ No production script, manifest, lockfile, existing test, or signing default chan
 The explicit unsigned route was exercised, but local signing/refusal behavior and native macOS effects are not newly qualified.
 Rust compilation, Cargo product suites, and native GUI tests were not run for this Python admission assignment.
 
-The supplied NEW was tested once with unchanged fixtures and assertions; the complete gate remains red for the provenance-observation limitation described above.
-An authorized instrument correction, re-admission, and independent review remain integration-owner obligations.
+The supplied NEW was tested once with unchanged fixtures and assertions; the complete gate remained red for the provenance-observation limitation described above.
+The authorized correction, its re-admission on both exact subjects, and the retained OLD/NEW proof are recorded in the section above.
 This author cannot independently accept their own consequential test artifact.
 No push, deployment, publication, agent delegation, or coordinator message was performed.

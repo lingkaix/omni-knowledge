@@ -94,6 +94,32 @@ def cleanup(gate):
 class BundleLifecycle(unittest.TestCase):
     """Check one real ownership crossing with success and failure controls."""
 
+    def assert_delegation_provenance(self, route, events, chain):
+        """Require the real build-delegation invocation through immutable process identities.
+
+        The supplier route observes the live `bundle-build` helper at its own selection.
+        The Cargo route binds the helper's recorded PID plus start-time identity from the
+        preceding nested supplier invocation to the selected tool itself or its ancestry,
+        so a controller that replaces its process with Cargo by exec still proves real
+        delegation while a merely claimed invocation cannot. Diagnostic wording is never
+        an observation.
+        """
+        if route != "cargo":
+            self.assertTrue(any("bundle-build" in row["argv"] for row in chain),
+                            "real build delegation absent")
+            return
+        helpers = []
+        for row in events:
+            if row["event"] == "selected":
+                break
+            if row["event"] == "tool" and row["tool"] == "prepare-dictionary.py" and row["nested"]:
+                helpers += [{"pid": ancestor["pid"], "start": ancestor["start"]}
+                            for ancestor in row["ancestors"] if "bundle-build" in ancestor["argv"]]
+        self.assertTrue(helpers,
+                        "no nested supplier invocation recorded the real build-delegation helper")
+        self.assertTrue(any({"pid": row["pid"], "start": row["start"]} in helpers for row in chain),
+                        "selected Cargo is not the recorded build-delegation helper or its descendant")
+
     def run_case(self, route, mode):
         """Run an isolated committed subject; retain observations even on failure.
 
@@ -162,7 +188,7 @@ class BundleLifecycle(unittest.TestCase):
             chain = selected[0]["ancestors"]
             self.assertTrue(any(row["pid"] == gate.pid and "gui" in row["argv"] for row in chain),
                             "selected tool is not owned by the actual outer GUI gate")
-            self.assertTrue(any("bundle-build" in row["argv"] for row in chain), "real build delegation absent")
+            self.assert_delegation_provenance(route, events, chain)
             self.assertTrue(any(any(Path(arg).name == "bundle-macos.sh" for arg in row["argv"]) for row in chain),
                             "real bundle script absent")
             self.assertFalse(any(row["event"] == "signing" for row in events),

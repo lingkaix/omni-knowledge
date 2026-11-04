@@ -28,14 +28,15 @@ def event(kind, **fields):
 
 
 def ancestors():
-    """Return owned ancestor commands, stopping at the fixture driver."""
+    """Return owned ancestor commands with start identities, stopping at the fixture driver."""
     result = []
     pid = os.getpid()
     while pid > 1:
         try:
             directory = Path("/proc") / str(pid)
             fields = (directory / "stat").read_text().rsplit(")", 1)[1].split()
-            result.append({"pid": pid, "argv": (directory / "cmdline").read_bytes().decode().split("\0")[:-1]})
+            result.append({"pid": pid, "start": fields[19],
+                           "argv": (directory / "cmdline").read_bytes().decode().split("\0")[:-1]})
             if pid == int(os.environ["PROCESS_DRIVER_PID"]):
                 break
             pid = int(fields[1])
@@ -85,7 +86,7 @@ def main():
         return 39
     chain = ancestors()
     nested = any(any(Path(arg).name == "bundle-macos.sh" for arg in row["argv"]) for row in chain)
-    event("tool", tool=tool, args=args, nested=nested)
+    event("tool", tool=tool, args=args, nested=nested, ancestors=chain)
     if tool == "prepare-dictionary.py":
         if nested and os.environ["PROCESS_ROUTE"] == "supplier":
             return controlled_effect("supplier", chain)
