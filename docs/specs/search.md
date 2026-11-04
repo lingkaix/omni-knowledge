@@ -45,6 +45,7 @@ The desktop's case-insensitive literal method uses escaped line regex and is lab
 Regex preserves the kernel LF-line dialect, line boundaries, occurrence locations, and deterministic source/location ordering.
 Trigram candidates are conservative accelerators only; short/ambiguous patterns, alternatives, and case transformations fall back to canonical scans where necessary.
 Exact/regex scans read every admitted partition/representation, not just BM25 top candidates.
+Retain filename/description fallback for legacy grep intent; literal/regex metadata evidence is labelled metadata observation, never proof of a source-body match.
 A semantic candidate is neither proof of a literal match nor proof of absence in an unprocessed binary body.
 
 Required-tag filters match every complete value before result limiting, case-insensitively by default.

@@ -169,7 +169,9 @@ The actual previous complete generation survives failed publication; retirement 
 Expected state includes verified digest and stat/file identity, not mtime alone; compare current bytes before changing existing files.
 Serialize omni writers for one home; acquire a fresh admitted owner/generation context for each operation.
 Create new files exclusively with no-clobber; import copies and never deletes its source.
-Preserve reserved marker-name handling, child ownership, and destination annotation collisions during explicit transfers.
+Initialization preflights every template destination and writes the manifest last; a failed partial unmarked initialization is reported for inspection before retry.
+Import a source named `omni-knowledge.json` as `omni-knowledge.asset.json` so an asset cannot replace the manifest.
+Preserve child ownership and destination annotation collisions during explicit transfers.
 An explicit transfer preserves annotations; failure removes only its own provably unchanged staged data.
 Interrupted staged reservations are inspectable recovery conflicts, never permission to guess and overwrite.
 A selected-file inspector reads live properties and authored annotations without loading a full index or hashing source content.
