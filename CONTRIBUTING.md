@@ -26,7 +26,7 @@ Describe non-obvious decisions and constraints. Keep code and documentation in E
 
 ## Verify And Review
 
-Inspect the final diff and affected consumers. Run the checks required by the changed surface. Report exact results and checks that could not run.
+Inspect the final diff and affected consumers. Run the checks required by the changed surface under [toolchain](docs/toolchain.md#checks-and-packaging). Use [test authority and lifecycle](docs/specs/test-strategy.md#test-authority-and-lifecycle) before changing failing tests. Report exact results and checks that could not run. Before an authorized push, gate the final integrated or rebased HEAD, including the applicable repository-wide check.
 
 Use independent review for governing documents and consequential results. The reviewer checks actual artifacts, retained criteria, safety, correctness, simplicity, and evidence. Resolve in-scope findings before claiming completion.
 

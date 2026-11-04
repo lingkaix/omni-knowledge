@@ -2,15 +2,22 @@
 
 This guide owns setup and command discovery. The product uses Rust 1.99.0 and Cargo, selected through `mise.toml`.
 
-Use `mise` to manage runtimes and development tools when the project needs them. Add only tools justified by accepted work. Record the versions and setup procedure with the first implementation.
+## Setup And Dependencies
 
-Before adopting a dependency, identify its owner, purpose, license, and maintenance cost. Use the selected package manager's normal dependency and lockfile procedure.
+Use `mise` to provision and pin runtimes, not as a second command surface. Run bare Cargo commands after provisioning the declared toolchain for the executing shell. Keep `mise.toml` limited to required tool versions; do not add pass-through tasks over existing Cargo commands. Add only tools justified by accepted work. Record the versions and setup procedure with the first implementation. Read setup scripts before running them and keep procedures version-controlled. Prefer official package-manager or generator paths; add a handwritten setup layer only for a demonstrated gap.
 
-Run `cargo test --features gui`, `cargo clippy --all-targets --features gui -- -D warnings`, and `cargo fmt --all -- --check`.
-Run `sh scripts/bundle-macos.sh` for the local macOS app and CLI.
-Packaging uses Python 3.9 or newer to collect third-party notices; the app has no Python runtime dependency.
-Use `git diff --check` and resolve local documentation links.
-Socket mock tests require loopback permission; media tests require ffmpeg and ffprobe.
-No successful command proves native layout or real-model accuracy without the corresponding direct observation.
+Before adopting a dependency, identify its owner, purpose, license, and maintenance cost. Use Cargo's normal dependency and lockfile procedure and commit the corresponding lockfile change with the dependency when authorized. Prefer maintained current versions unless the accepted work requires another version. When a dependency changes architecture or workflow, record the reason in the appropriate owner or guide. When a pin or command changes, update affected setup and contribution guidance in the same change.
+
+## Checks And Packaging
+
+Run `cargo test --features gui`, `cargo clippy --all-targets --features gui -- -D warnings`, and `cargo fmt --all -- --check` for a complete code gate on the supported host. For a focused landing, run changed tests and directly related tests in affected Cargo packages. This repository currently has one package; use `cargo test --package omni-knowledge --features gui <test-filter>` with an actual test filter. Do not treat a filtered run as a complete suite. Account for all selected tests when batching a complete gate, and retain exact code identities and outcomes.
+
+For a documentation-only change, run `git diff --check`, resolve local Markdown links and anchors, and inspect retained criteria and owner consistency. Also run `cargo fmt --all -- --check` as the repository-wide format check. Content-only changes do not require Cargo compilation, Clippy, product tests, or packaging unless they alter executable examples or another accepted boundary requires them. Record omitted checks as not run, not passing. Run these applicable checks on the final integrated or rebased HEAD before pushing. The repository has no separate documentation linter or generated documentation-index command. Do not add a permanent validator merely for this sync; a bounded temporary link probe is sufficient.
+
+Run `sh scripts/bundle-macos.sh` for the local macOS app and CLI. Packaging uses Python 3.9 or newer to collect third-party notices; the app has no Python runtime dependency. Socket mock tests require loopback permission; media tests require ffmpeg and ffprobe. Native UI and macOS-only behavior require the actual supported platform. Declare platform exclusions and real-model opt-ins before execution. A missing prerequisite after a test is selected fails or blocks the check; do not manufacture a runtime skip. No successful command proves native layout or real-model accuracy without the corresponding direct observation.
+
+## Temporary State And Evidence
+
+Honor the caller-selected temporary directory and use an invocation-private directory for shared runs where needed. On shared machines, choose private disk-backed storage instead of assuming shared temporary-storage capacity. Use existing Rust temporary-directory ownership and cleanup facilities; close resources and remove owned fixtures on success and failure. A forcibly killed run may need separately authorized reclamation; never delete another run's state. The [test strategy](specs/test-strategy.md#reach-state-through-shared-builders) owns fixture setup, and [verification](verification.md) owns evidence and environment limits.
 
 Keep temporary probes under `temp/`. Add a permanent script only when repeated work establishes its need.

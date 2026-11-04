@@ -22,7 +22,7 @@ Source: OpenKit at commit `dab3a0920254a536ca7dd5c1fd50e303ab4dbcd2`. The source
 | AGENTS.md QUALITY clauses and engineering-doctrine.md | SOLID, KISS, DRY, YAGNI, deep interfaces, discoverability, present need, and measured simplification. | [Principles](../engineering-principles.md) |
 | AGENTS.md DOC-017 and writing.md | Definition, data authority, lifecycle, failure semantics, and observable acceptance. | [Documentation](../documentation.md) |
 | change-execution.md | Source intent, revisable checkpoint, useful next action, reframe, human decision, retention, and evidence-based closeout. | [Execution](../change-execution.md) |
-| roles/ and agent-harnesses.md | Bounded dispatch, capability, independent review, direct artifacts, and runtime restrictions. | [Roles](../agent-roles.md), [execution](../change-execution.md) |
+| roles/ and agent-harnesses.md | Bounded dispatch, capability, independent review, direct artifacts, and runtime restrictions. | [Roles](../roles/README.md), [execution](../change-execution.md) |
 | verification-instruments.md and AGENTS.md TEST clauses | Test-first default, sufficient regression, sound oracle, deliberate failure, effect-domain limits, and exact results. | [Verification](../verification.md) |
 | documentation-model.md and writing.md | One owner per rule, intent versus fact, acceptance versus implementation, lossless rewriting, and local navigation. | [Documentation](../documentation.md) |
 | writing.md and COMM-001 | Plain active language, stable terms, sentence targets, retained qualifiers, and no prose line wrapping. | [Writing](../writing.md) |

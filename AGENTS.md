@@ -36,13 +36,13 @@ Apply [engineering principles](docs/engineering-principles.md). Use [change exec
 
 Before asking for a factual answer, run the cheapest safe probe that could change the decision. Stop repeating a method when evidence defeats its premise.
 
-Use the lowest sufficient regression for behavior changes. [Verification](docs/verification.md) defines tests, evidence limits, and justified exceptions. Never weaken, delete, skip, or bypass a contract-derived failing check to obtain a pass.
+Use the lowest sufficient regression through the module's public interface. [Test strategy](docs/specs/test-strategy.md) owns test authority, independent test authorship, fixture setup, failure triage, and test retirement. Tests project accepted owners; they do not authorize production changes. An independent test author decides a disputed test's disposition, including the required old/new proof before retiring a coupled test. [Verification](docs/verification.md) owns oracle quality, harness admission, evidence limits, and justified exceptions. Never weaken, delete, skip, or bypass a contract-derived failing check to obtain a pass.
 
-Inspect the actual diff and affected callers after implementation. Check correctness, simplicity, cohesion, duplication, ownership, and direct evidence. Use independent judgment when consequence, uncertainty, or producer bias makes self-review insufficient.
+Inspect the actual diff and affected callers after implementation. Check correctness, simplicity, cohesion, duplication, ownership, and direct evidence. Use independent judgment when consequence, uncertainty, or producer bias makes self-review insufficient. Before pushing, follow the [final-head gate](docs/change-execution.md#land-and-check-the-final-head), including the applicable repository-wide check.
 
 ## Communication And Documentation
 
-Write repository code, comments, commit messages, and engineering documents in English. Use Markdown for documentation. Apply [STE100-based writing rules](docs/writing.md). Keep each sentence and paragraph on one source line; let the reader wrap it.
+Write repository code, comments, commit messages, and engineering documents in English. Do not use Vietnamese anywhere in repository contributions. Use Markdown for documentation. Apply [STE100-based writing rules](docs/writing.md). Keep each sentence and paragraph on one source line; let the reader wrap it.
 
 Document changed code entities in the language-standard format. Explain purpose, parameters, results, errors, and non-obvious constraints. Include private entities and test functions. Link temporary solutions and known debt to a traceable issue or change record. State the affected scope, risk, and removal condition.
 
