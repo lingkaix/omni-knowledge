@@ -1,3 +1,7 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
 [package]
 name = "omni-knowledge"
 version = "0.1.0"
