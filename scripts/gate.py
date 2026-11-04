@@ -93,6 +93,30 @@ def check_tests(inventory, ignored, output):
     print(f"PASS accounting: {sum(observed.values())} cases, {sum(ignored.values())} declared opt-ins")
 
 
+def prepare_dictionary(evidence, timeout):
+    """Supply the pinned dictionary before Cargo, preserving an explicit cache path.
+
+    Earlier heads without the kernel are inapplicable; an incomplete vendor head
+    fails before Cargo can invoke a build script or implicitly fetch a dictionary.
+    The supplier owns archive identity and verification, not this gate.
+    """
+    supplier = Path("tools/kernel-probe/prepare-dictionary.py")
+    vendor = Path("vendor/retrieval-kernel")
+    required = vendor.exists() or "vendor/retrieval-kernel" in Path("Cargo.toml").read_text()
+    if not supplier.is_file():
+        if required:
+            raise GateError("FAIL: vendored kernel requires tools/kernel-probe/prepare-dictionary.py")
+        print("Dictionary supply: INAPPLICABLE (head has no vendored kernel)")
+        return
+    if sys.version_info < (3, 11):
+        raise GateError("FAIL: pinned dictionary supplier requires Python 3.11 or newer")
+    default = Path(os.environ.get("CARGO_TARGET_DIR") or "target") / "dictionary-cache"
+    cache = Path(os.environ.get("LINDERA_BUILD_DICTIONARY_CACHE_DIR") or str(default)).resolve()
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.environ["LINDERA_BUILD_DICTIONARY_CACHE_DIR"] = str(cache)
+    run([sys.executable, str(supplier), "--cache", str(cache)], evidence, "dictionary-supply", timeout)
+
+
 def test_workspace(evidence, timeout, gui=False):
     """Inventory and execute workspace tests, including doctests and optional GUI.
 
@@ -184,7 +208,7 @@ def self_test(evidence):
 def main():
     """Dispatch one documented gate mode and return nonzero on any failed observation."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["self-test", "headless", "tests", "gui", "smoke"])
+    parser.add_argument("mode", choices=["self-test", "prepare", "bundle-build", "headless", "tests", "gui", "smoke"])
     parser.add_argument("--binary", default="target/release/omni")
     parser.add_argument("--evidence-dir", type=Path, default=Path("temp/ci-evidence"))
     parser.add_argument("--timeout-seconds", type=float, default=1800)
@@ -194,7 +218,13 @@ def main():
     evidence = arguments.evidence_dir.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     timeout = arguments.timeout_seconds
-    if arguments.mode == "self-test":
+    if arguments.mode not in {"self-test", "smoke"}:
+        prepare_dictionary(evidence, timeout)
+    if arguments.mode == "prepare":
+        pass
+    elif arguments.mode == "bundle-build":
+        run(["cargo", "build", "--workspace", "--locked", "--release", "--features", "gui"], evidence, "bundle-build", timeout)
+    elif arguments.mode == "self-test":
         self_test(evidence)
     elif arguments.mode == "smoke":
         smoke(arguments.binary, evidence, min(timeout, 60))

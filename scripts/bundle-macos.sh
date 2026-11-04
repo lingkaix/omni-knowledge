@@ -19,7 +19,8 @@ if [ "$#" -ne 0 ]; then
     exit 1
 fi
 cd "$(dirname "$0")/.."
-cargo build --workspace --locked --release --features gui
+# The gate supplies the pinned dictionary and passes its private cache to Cargo.
+python3 scripts/gate.py bundle-build
 # Honor Cargo configuration as well as CARGO_TARGET_DIR, including absolute paths.
 target=$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 bundle="dist/Omni Knowledge.app"

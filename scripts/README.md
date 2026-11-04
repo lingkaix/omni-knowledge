@@ -16,7 +16,36 @@ The root compatibility member remains included.
 Install the Rust version from `mise.toml`, rustfmt, Clippy, system ffmpeg/ffprobe, and Python 3.9 or newer before running the gate.
 Use `CARGO_BUILD_JOBS=2` and a private `CARGO_TARGET_DIR` for shared-host local checks.
 No container, model, cloud account, or private library is needed.
+When the kernel supplier is present, it additionally requires Python 3.11 or newer.
 The workflow uses standard runner package managers for FFmpeg and retains actual tool versions in evidence; it does not claim fixed FFmpeg output bytes across OS package versions.
+
+## Pinned Kernel Dictionary Supply
+
+Before any Cargo build, test, or lint in the gate, it runs the actual `tools/kernel-probe/prepare-dictionary.py` supplier.
+The supplier verifies the repository's pinned IPADIC archive and prepares the `5.3.0-fmt2` cache; it does not download a replacement.
+The supplier owns archive identity and verification; this gate adds no parallel checksum list or provider registry.
+`LINDERA_BUILD_DICTIONARY_CACHE_DIR` selects the caller's private build cache and is passed to all child Cargo commands as an absolute path.
+Without an explicit setting, the gate uses `dictionary-cache/` under `CARGO_TARGET_DIR` or the checkout's `target/` directory.
+CI checkouts and shared-host lane targets are isolated; do not select a shared writable dictionary cache for unrelated runs.
+An earlier head with neither supplier nor vendored kernel reports dictionary preparation as inapplicable.
+If `vendor/retrieval-kernel` exists or the root manifest names that member, a missing supplier fails before Cargo starts.
+An invalid source or cached archive also fails; there is no implicit dictionary-download fallback, including for offline Cargo use.
+Cargo's registry dependency provisioning remains separate from dictionary supply.
+
+`python3 scripts/gate.py prepare` performs only this prerequisite.
+The local bundler uses `python3 scripts/gate.py bundle-build` so the prepared environment reaches its Cargo build without a second shell-side setup owner.
+For a direct Cargo invocation outside the gate, prepare explicitly first:
+
+```sh
+export LINDERA_BUILD_DICTIONARY_CACHE_DIR="$PWD/temp/dictionary-cache"
+python3 tools/kernel-probe/prepare-dictionary.py --cache "$LINDERA_BUILD_DICTIONARY_CACHE_DIR"
+cargo test --workspace --offline
+```
+
+The example requires the vendored supplier/archive and already provisioned Cargo registry dependencies.
+An archive-supply pass alone does not prove a complete offline workspace build.
+
+## Test Accounting And Evidence
 
 The gate collects actual libtest inventories with `--list` and an ignored-only inventory before execution.
 It rejects zero collection, unlisted outcomes, missing outcomes, failures, and undeclared ignored cases.
