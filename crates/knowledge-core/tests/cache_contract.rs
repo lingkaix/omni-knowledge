@@ -3,7 +3,7 @@
 //! The mapping premise is not provider discovery or service authorization.
 //! No assertion treats garbage collection, eviction, or deletion as implemented.
 
-#[allow(dead_code)]
+#[allow(dead_code, unexpected_cfgs)]
 mod support {
     include!("cache/support.rs");
 }
@@ -63,10 +63,36 @@ fn processor_fingerprint_frames_order_options_and_dependencies() {
         fingerprint(&processor("1", transcript, annotation))
     );
 
-    let other_transcript = processor("1.10", b"corrected-transcript-v2", annotation);
-    let other_annotation = processor("1.10", transcript, b"embedding-annotation-v2");
-    assert_ne!(fingerprint(&forward), fingerprint(&other_transcript));
-    assert_ne!(fingerprint(&forward), fingerprint(&other_annotation));
+    let mut transcript_only = forward.clone();
+    transcript_only.dependencies.insert(
+        "corrected-transcript".to_string(),
+        digest_of(b"corrected-transcript-v2"),
+    );
+    let mut annotation_only = forward.clone();
+    annotation_only.dependencies.insert(
+        "embedding-annotation".to_string(),
+        digest_of(b"embedding-annotation-v2"),
+    );
+    assert_eq!(transcript_only.options, forward.options);
+    assert_eq!(annotation_only.options, forward.options);
+    assert_eq!(
+        transcript_only.dependencies.get("embedding-annotation"),
+        forward.dependencies.get("embedding-annotation")
+    );
+    assert_ne!(
+        transcript_only.dependencies.get("corrected-transcript"),
+        forward.dependencies.get("corrected-transcript")
+    );
+    assert_eq!(
+        annotation_only.dependencies.get("corrected-transcript"),
+        forward.dependencies.get("corrected-transcript")
+    );
+    assert_ne!(
+        annotation_only.dependencies.get("embedding-annotation"),
+        forward.dependencies.get("embedding-annotation")
+    );
+    assert_ne!(fingerprint(&forward), fingerprint(&transcript_only));
+    assert_ne!(fingerprint(&forward), fingerprint(&annotation_only));
 
     let mut swapped_roles = forward.clone();
     let transcript_digest = swapped_roles
@@ -293,9 +319,10 @@ fn unresolved_or_symlink_prohibited_roots_fail_closed_without_effects() {
     // the cache, and it is not a root detector.
     let world = World::create(DERIVED);
     let cache_dir = world.premise.cache_dir();
+    let admitted_roots = world.premise.prohibited();
     let dangling = world.lab.root().join("offline-root");
     symlink(world.lab.root().join("missing-target"), &dangling).expect("dangling");
-    let mut prohibited = world.premise.prohibited();
+    let mut prohibited = admitted_roots.clone();
     prohibited.push(dangling);
     world.premise.set_prohibited(prohibited);
     let before = snapshot(&cache_dir);
@@ -309,8 +336,13 @@ fn unresolved_or_symlink_prohibited_roots_fail_closed_without_effects() {
     assert_eq!(snapshot(&cache_dir), before);
 
     let absent = world.lab.root().join("absent-prohibited");
-    let mut prohibited = world.premise.prohibited();
-    prohibited.push(absent);
+    assert!(!absent.exists(), "absent root was already present");
+    assert!(
+        !file_is_symlink(&absent),
+        "absent root was already a symlink"
+    );
+    let mut prohibited = admitted_roots;
+    prohibited.push(std::path::absolute(&absent).expect("absolute absent root"));
     world.premise.set_prohibited(prohibited);
     let error = closed_open(world.open(generous_limits()), "absent prohibited");
     assert!(
@@ -381,6 +413,7 @@ fn corrupt_objects_are_not_overwritten_or_repaired() {
     let world = World::create(DERIVED);
     let cache = world.open(generous_limits()).expect("open");
     publish_bytes(&cache, &world.premise, DERIVED).expect("publish");
+    drop(cache);
     let cache_dir = world.premise.cache_dir();
     let changed = corrupt_regular_files_at_least(&cache_dir, DERIVED.len());
     assert!(
@@ -388,20 +421,23 @@ fn corrupt_objects_are_not_overwritten_or_repaired() {
         "observer found no payload-sized cache file to corrupt"
     );
     let mutated = snapshot(&cache_dir);
-    match pin_object(&cache, &world.premise) {
-        Err(error) => assert_input_free(&error),
-        Ok(pin) => {
-            let error = pin.read(0, 1).expect_err("corrupt range");
+    assert!(
+        DERIVED.len() > 1,
+        "range cannot exclude the flipped payload byte"
+    );
+    let cache = world.open(generous_limits()).expect("fresh owner");
+    assert_corrupt_object_unreadable(&cache, &world, "fresh pin");
+    let republish = publish_bytes(&cache, &world.premise, DERIVED);
+    match republish {
+        Ok(publication) => panic!("corrupt complete object was replaced: {publication:?}"),
+        Err(error) => {
+            assert!(
+                matches!(error, CacheError::Corrupt | CacheError::Conflict),
+                "{}",
+                variant_name(&error)
+            );
             assert_input_free(&error);
         }
-    }
-    let republish = publish_bytes(&cache, &world.premise, DERIVED);
-    assert!(
-        republish.is_err(),
-        "corrupt complete object was replaced: {republish:?}"
-    );
-    if let Err(error) = &republish {
-        assert_input_free(error);
     }
     let after = snapshot(&cache_dir);
     for (path, node) in &mutated {
@@ -426,16 +462,32 @@ fn corrupt_objects_are_not_overwritten_or_repaired() {
             ),
         }
     }
-    match pin_object(&cache, &world.premise) {
-        Err(error) => assert_input_free(&error),
+    assert_corrupt_object_unreadable(&cache, &world, "after refused repair");
+    world.lab.finish();
+}
+
+/// `pin` opens and verifies the complete object. A granted reader must still
+/// verify the whole payload when the requested range excludes the flipped byte.
+fn assert_corrupt_object_unreadable(cache: &Cache<support::Premise>, world: &World, label: &str) {
+    match pin_object(cache, &world.premise) {
+        Err(error) => {
+            assert!(
+                matches!(error, CacheError::Corrupt),
+                "{label}: {}",
+                variant_name(&error)
+            );
+            assert_input_free(&error);
+        }
         Ok(pin) => {
-            let error = pin
-                .read(0, DERIVED.len())
-                .expect_err("corrupt object became readable");
+            let error = pin.read(0, DERIVED.len() - 1).expect_err(label);
+            assert!(
+                matches!(error, CacheError::Corrupt),
+                "{label}: {}",
+                variant_name(&error)
+            );
             assert_input_free(&error);
         }
     }
-    world.lab.finish();
 }
 
 #[test]
@@ -691,6 +743,54 @@ fn namespaces_isolate_domain_library_and_copied_home() {
     world.lab.finish();
 }
 
+/// Same process, same source and processor, after every pin and the owner are dropped.
+/// Duplicate publication must reach independent verification, and cancellation must reach
+/// the producer. A new processor key is a different case and stays in the retention test.
+#[test]
+fn reopened_same_processor_reaches_duplicate_and_cancellation() {
+    let world = World::create(DERIVED);
+    let cache = world.open(generous_limits()).expect("open");
+    assert_eq!(
+        publish_bytes(&cache, &world.premise, DERIVED).expect("publish"),
+        Publication::Installed
+    );
+    drop(cache);
+    let cache = world.open(generous_limits()).expect("reopen");
+    let duplicate = publish_bytes(&cache, &world.premise, DERIVED);
+    assert_eq!(
+        duplicate.expect("same-key duplicate after reopen"),
+        Publication::AlreadyPresent
+    );
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    let mut producer = ChunkThen {
+        data: vec![b'q'; 24],
+        pos: 0,
+        chunk: 8,
+        arm: flag,
+        fail: false,
+        canary: CANARY,
+    };
+    let (library, source, processor) = world.premise.binding();
+    let error = cache
+        .publish(&library, &source, &processor, &mut producer, || {
+            cancel.load(Ordering::SeqCst)
+        })
+        .expect_err("same-key cancellation");
+    assert!(
+        matches!(error, CacheError::Cancelled),
+        "{}",
+        variant_name(&error)
+    );
+    assert_input_free(&error);
+    assert_eq!(
+        read_exact(&cache, &world.premise, DERIVED.len()).expect("prior"),
+        DERIVED
+    );
+    world.lab.finish();
+}
+
 #[test]
 fn unknown_entries_symlinks_and_failed_candidates_are_retained() {
     let world = World::create(DERIVED);
@@ -832,10 +932,15 @@ fn finite_entry_disk_pin_and_io_limits_refuse() {
     }
     let before = snapshot(&cache_dir);
     let mut tight = generous_limits();
-    tight.max_entries = 3;
+    tight.max_entries = 8;
+    assert!(tight.max_entries >= 8, "entry ceiling must be admitted");
+    assert!(
+        12 > tight.max_entries,
+        "fixture must exceed the entry ceiling"
+    );
     let error = closed_open(world.open(tight), "entry ceiling");
     assert!(
-        matches!(error, CacheError::Budget | CacheError::Invalid),
+        matches!(error, CacheError::Budget),
         "{}",
         variant_name(&error)
     );

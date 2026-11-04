@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "cache-public-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Single-threaded public cache consumer for owner-lifetime tests"
+
+[[bin]]
+name = "cache-public-consumer"
+path = "../public_consumer.rs"
+
+[dependencies]
+knowledge-core = { path = "../../.." }
+libc = "=0.2.190"
+sha2 = "=0.10.9"

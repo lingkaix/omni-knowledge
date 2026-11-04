@@ -18,23 +18,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Cursor, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(not(cache_public_consumer))]
+use std::process::{Command, Stdio};
+#[cfg(not(cache_public_consumer))]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CANARY: &str = "SENTINEL_cache_6c2e91";
 pub const LIBRARY: &str = "library-1";
 pub const SOURCE: &str = "source-1";
-
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
 
 pub fn assert_sha256_vectors() {
     assert_eq!(
@@ -52,89 +45,209 @@ pub fn assert_sha256_vectors() {
     assert_ne!(sha256_hex(b"abc"), sha256_hex(b""));
 }
 
-pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = sha256(data);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
 }
 
-const HEX: &[u8; 16] = b"0123456789abcdef";
+/// Fixture digests use locked `sha2`, not a second SHA-256 and not the cache fingerprint.
+pub fn sha256_hex(data: &[u8]) -> String {
+    #[cfg(cache_public_consumer)]
+    {
+        use sha2::{Digest, Sha256};
+        hex_encode(&Sha256::digest(data))
+    }
+    #[cfg(not(cache_public_consumer))]
+    {
+        external_sha256(data)
+    }
+}
 
-fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut hash: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let bit_len = (data.len() as u64).saturating_mul(8);
-    let mut message = data.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in message.chunks(64) {
-        let mut words = [0u32; 64];
-        for (index, word) in chunk.as_chunks::<4>().0.iter().take(16).enumerate() {
-            words[index] = u32::from_be_bytes(*word);
+#[cfg(not(cache_public_consumer))]
+fn external_sha256(data: &[u8]) -> String {
+    let bin = consumer_executable();
+    let mut child = Command::new(&bin)
+        .arg("sha256")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sha2 helper");
+    child
+        .stdin
+        .take()
+        .expect("sha2 stdin")
+        .write_all(data)
+        .expect("write sha2 stdin");
+    let output = child.wait_with_output().expect("sha2 helper");
+    assert!(
+        output.status.success(),
+        "sha2 helper failed\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = String::from_utf8(output.stdout).expect("sha2 hex");
+    line.trim().to_string()
+}
+
+#[cfg(not(cache_public_consumer))]
+pub fn consumer_executable() -> PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(build_consumer).clone()
+}
+
+#[cfg(not(cache_public_consumer))]
+fn build_consumer() -> PathBuf {
+    let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest = package.join("tests/cache/consumer/Cargo.toml");
+    let repo = package
+        .parent()
+        .and_then(|parent| parent.parent())
+        .expect("repository")
+        .to_path_buf();
+    let scratch = repo.parent().expect("scratch").join("target-consumer");
+    let target = scratch.join("target");
+    fs::create_dir_all(&target).expect("consumer target");
+    let lock = scratch.join("build.lock");
+    fs::File::create(&lock).expect("consumer build lock");
+    let output = Command::new("flock")
+        .arg(&lock)
+        .arg("cargo")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--locked")
+        .arg("--offline")
+        .arg("-j")
+        .arg("2")
+        .arg("--message-format=json")
+        .env("CARGO_TARGET_DIR", &target)
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            "--cfg\u{1f}cache_public_consumer",
+        )
+        .env_remove("RUSTFLAGS")
+        .env_remove("MAKEFLAGS")
+        .env_remove("MFLAGS")
+        .env_remove("CARGO_MAKEFLAGS")
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .expect("cargo build consumer");
+    assert!(
+        output.status.success(),
+        "consumer build failed\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exe = cargo_executable(&String::from_utf8_lossy(&output.stdout));
+    assert!(exe.is_file(), "cargo did not record an executable");
+    assert!(
+        dep_info_tracks_cache_source(&target),
+        "consumer build did not track knowledge-core cache source"
+    );
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git head");
+    assert!(head.status.success(), "git rev-parse failed");
+    let head = String::from_utf8(head.stdout)
+        .expect("head")
+        .trim()
+        .to_string();
+    let exe_hash = hash_with_consumer(&exe, &exe);
+    let identity = scratch.join("helper-identity.txt");
+    fs::write(
+        &identity,
+        format!(
+            "head {head}\nexecutable {}\nsha256 {exe_hash}\ntracks cache.rs native.rs\n",
+            exe.display()
+        ),
+    )
+    .expect("identity");
+    exe
+}
+
+#[cfg(not(cache_public_consumer))]
+fn cargo_executable(stdout: &str) -> PathBuf {
+    let mut found = None;
+    for line in stdout.lines() {
+        let Some(executable) = json_string_field(line, "executable") else {
+            continue;
+        };
+        if executable.ends_with("cache-public-consumer") {
+            found = Some(PathBuf::from(executable));
         }
-        for index in 16..64 {
-            let first = words[index - 15].rotate_right(7)
-                ^ words[index - 15].rotate_right(18)
-                ^ (words[index - 15] >> 3);
-            let second = words[index - 2].rotate_right(17)
-                ^ words[index - 2].rotate_right(19)
-                ^ (words[index - 2] >> 10);
-            words[index] = words[index - 16]
-                .wrapping_add(first)
-                .wrapping_add(words[index - 7])
-                .wrapping_add(second);
-        }
-        let mut a = hash[0];
-        let mut b = hash[1];
-        let mut c = hash[2];
-        let mut d = hash[3];
-        let mut e = hash[4];
-        let mut f = hash[5];
-        let mut g = hash[6];
-        let mut h = hash[7];
-        for index in 0..64 {
-            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ ((!e) & g);
-            let temp1 = h
-                .wrapping_add(sum1)
-                .wrapping_add(choose)
-                .wrapping_add(SHA256_K[index])
-                .wrapping_add(words[index]);
-            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = sum0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        hash[0] = hash[0].wrapping_add(a);
-        hash[1] = hash[1].wrapping_add(b);
-        hash[2] = hash[2].wrapping_add(c);
-        hash[3] = hash[3].wrapping_add(d);
-        hash[4] = hash[4].wrapping_add(e);
-        hash[5] = hash[5].wrapping_add(f);
-        hash[6] = hash[6].wrapping_add(g);
-        hash[7] = hash[7].wrapping_add(h);
     }
-    let mut out = [0u8; 32];
-    for (index, value) in hash.iter().enumerate() {
-        out[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    found.expect("compiler-artifact executable")
+}
+
+#[cfg(not(cache_public_consumer))]
+fn json_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("\"{field}\":\"");
+    let start = line.find(&key)? + key.len();
+    let end = line[start..].find('"')? + start;
+    Some(&line[start..end])
+}
+
+#[cfg(not(cache_public_consumer))]
+fn dep_info_tracks_cache_source(target: &Path) -> bool {
+    let mut cache_rs = false;
+    let mut native_rs = false;
+    let mut stack = vec![target.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("d") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            cache_rs |= text.contains("src/cache.rs");
+            native_rs |= text.contains("src/cache/native.rs");
+            if cache_rs && native_rs {
+                return true;
+            }
+        }
     }
-    out
+    false
+}
+
+#[cfg(not(cache_public_consumer))]
+fn hash_with_consumer(bin: &Path, file: &Path) -> String {
+    let bytes = fs::read(file).expect("hash input");
+    let mut child = Command::new(bin)
+        .arg("sha256")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hash executable");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&bytes)
+        .expect("write");
+    let output = child.wait_with_output().expect("hash wait");
+    assert!(output.status.success(), "hash helper failed");
+    String::from_utf8(output.stdout)
+        .expect("hash hex")
+        .trim()
+        .to_string()
 }
 
 pub fn digest_of(bytes: &[u8]) -> ContentDigest {
@@ -343,6 +456,11 @@ pub fn corrupt_regular_files_at_least(root: &Path, min_len: usize) -> usize {
             continue;
         }
         let path = root.join(relative);
+        let original_mode = fs::symlink_metadata(&path)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
         let mut permissions = fs::symlink_metadata(&path).expect("meta").permissions();
         permissions.set_mode(0o600);
         fs::set_permissions(&path, permissions).expect("make writable");
@@ -350,6 +468,16 @@ pub fn corrupt_regular_files_at_least(root: &Path, min_len: usize) -> usize {
         let last = updated.len() - 1;
         updated[last] ^= 0xff;
         fs::write(&path, &updated).expect("corrupt");
+        force_mode(&path, original_mode);
+        let restored = fs::symlink_metadata(&path)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            restored, original_mode,
+            "corruption left {path:?} at mode {restored:o} instead of admitted {original_mode:o}"
+        );
         changed += 1;
     }
     changed
@@ -498,14 +626,7 @@ impl CacheContext for Premise {
         if shared.refuse || library != shared.library || source != shared.source {
             return Err(CacheError::Invalid);
         }
-        let presented = processor
-            .fingerprint(1024 * 1024)
-            .map_err(|_| CacheError::Invalid)?;
-        let expected = shared
-            .processor
-            .fingerprint(1024 * 1024)
-            .map_err(|_| CacheError::Invalid)?;
-        if presented != expected {
+        if processor != &shared.processor {
             return Err(CacheError::Changed);
         }
         Ok(SourceAdmission {
