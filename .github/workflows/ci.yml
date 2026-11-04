@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'mise.toml'
+      - 'src/**'
+      - 'crates/**'
+      - 'packages/**'
+      - 'vendor/**'
+      - 'tests/**'
+      - 'assets/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: '1'
+
+jobs:
+  linux:
+    name: Linux x86_64 headless
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Provision repository-pinned Rust and system media tools
+        shell: bash
+        run: |
+          test "$(uname -m)" = x86_64
+          rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
+          rustup toolchain install "$rust" --profile minimal --component rustfmt --component clippy
+          rustup override set "$rust"
+          rustc --version
+          cargo --version
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+      - name: Admit the gate instrument
+        run: python3 scripts/gate.py self-test
+      - name: Full headless workspace gate
+        run: python3 scripts/gate.py headless
+      - name: Stage Linux artifact
+        run: |
+          mkdir -p dist/linux-x86_64
+          cp target/release/omni LICENSE dist/linux-x86_64/
+          tar -czf dist/omni-linux-x86_64.tar.gz -C dist/linux-x86_64 .
+          mkdir temp/artifact-smoke
+          tar -xzf dist/omni-linux-x86_64.tar.gz -C temp/artifact-smoke
+          python3 scripts/gate.py smoke --binary temp/artifact-smoke/omni --evidence-dir temp/ci-evidence/archived-smoke
+          sha256sum dist/omni-linux-x86_64.tar.gz
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omni-linux-x86_64-${{ github.sha }}
+          path: dist/omni-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Linux evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-linux-evidence-${{ github.sha }}
+          path: temp/ci-evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos:
+    name: macOS ARM64 GUI and headless
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Provision repository-pinned Rust and system media tools
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
+          rustup toolchain install "$rust" --profile minimal --component rustfmt --component clippy
+          rustup override set "$rust"
+          rustc --version
+          cargo --version
+          brew list ffmpeg >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
+      - name: Admit the gate instrument
+        run: python3 scripts/gate.py self-test
+      - name: Full headless workspace gate (includes available FSEvents tests)
+        run: python3 scripts/gate.py headless
+      - name: GUI lint/tests, unsigned bundle and bundled CLI smoke
+        run: python3 scripts/gate.py gui
+      - name: Archive unsigned app without losing bundle permissions
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist/Omni Knowledge.app" dist/omni-macos-arm64-unsigned.zip
+          mkdir temp/artifact-smoke
+          ditto -x -k dist/omni-macos-arm64-unsigned.zip temp/artifact-smoke
+          python3 scripts/gate.py smoke --binary "temp/artifact-smoke/Omni Knowledge.app/Contents/MacOS/omni" --evidence-dir temp/ci-evidence/archived-smoke
+          shasum -a 256 dist/omni-macos-arm64-unsigned.zip
+      - name: Upload unsigned macOS app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omni-macos-arm64-unsigned-${{ github.sha }}
+          path: dist/omni-macos-arm64-unsigned.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload macOS evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-macos-evidence-${{ github.sha }}
+          path: temp/ci-evidence/
+          if-no-files-found: warn
+          retention-days: 14

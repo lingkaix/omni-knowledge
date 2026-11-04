@@ -1,8 +1,27 @@
 #!/bin/sh
-# Build and validate a locally ad-hoc-signed app without publishing it.
+# Build a locally ad-hoc-signed app, or an explicitly unsigned CI bundle.
 set -eu
+unsigned=0
+case "${1:-}" in
+    '') ;;
+    --ci-unsigned)
+        if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${CI:-}" != true ]; then
+            printf '%s\n' '--ci-unsigned requires a GitHub Actions CI job' >&2
+            exit 1
+        fi
+        unsigned=1
+        shift
+        ;;
+    *) printf 'Usage: sh scripts/bundle-macos.sh [--ci-unsigned]\n' >&2; exit 1 ;;
+esac
+if [ "$#" -ne 0 ]; then
+    printf 'Unexpected bundle arguments\n' >&2
+    exit 1
+fi
 cd "$(dirname "$0")/.."
-cargo build --release --features gui --bin omni-knowledge-gui --bin omni
+cargo build --workspace --locked --release --features gui
+# Honor Cargo configuration as well as CARGO_TARGET_DIR, including absolute paths.
+target=$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 bundle="dist/Omni Knowledge.app"
 if [ -L dist ] || [ -L "$bundle" ]; then
     printf 'Refusing a symbolic link at the bundle destination\n' >&2
@@ -42,8 +61,8 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 staged="$stage/Omni Knowledge.app"
 mkdir -p "$staged/Contents/MacOS" "$staged/Contents/Resources"
-cp target/release/omni-knowledge-gui "$staged/Contents/MacOS/omni-knowledge-gui"
-cp target/release/omni "$staged/Contents/MacOS/omni"
+cp "$target/release/omni-knowledge-gui" "$staged/Contents/MacOS/omni-knowledge-gui"
+cp "$target/release/omni" "$staged/Contents/MacOS/omni"
 cp LICENSE "$staged/Contents/Resources/LICENSE"
 cp assets/brand/app.icns "$staged/Contents/Resources/AppIcon.icns"
 mkdir -p "$staged/Contents/Resources/Licenses"
@@ -72,9 +91,14 @@ cat > "$staged/Contents/Info.plist" <<'PLIST'
 PLIST
 # The linker signature covers a standalone executable, not its enclosing bundle.
 # Sign nested code first, then bind the final plist and resources to the app.
-codesign --force --sign - --timestamp=none --identifier local.omni-knowledge.cli "$staged/Contents/MacOS/omni"
-codesign --force --sign - --timestamp=none "$staged"
-codesign --verify --deep --strict --verbose=2 "$staged"
+if [ "$unsigned" -eq 0 ]; then
+    codesign --force --sign - --timestamp=none --identifier local.omni-knowledge.cli "$staged/Contents/MacOS/omni"
+    codesign --force --sign - --timestamp=none "$staged"
+    codesign --verify --deep --strict --verbose=2 "$staged"
+else
+    # Keep mandatory ARM64 linker signatures; do not sign the enclosing app.
+    printf 'UNSIGNED CI bundle: no app signing, Developer ID, or notarization\n'
+fi
 plutil -lint "$staged/Contents/Info.plist"
 
 # Fresh inodes avoid replacing signed executable contents in an existing app.
@@ -88,7 +112,9 @@ published=1
 if ! mv "$staged" "$bundle"; then
     exit 1
 fi
-codesign --verify --deep --strict --verbose=2 "$bundle"
+if [ "$unsigned" -eq 0 ]; then
+    codesign --verify --deep --strict --verbose=2 "$bundle"
+fi
 printf 'Built %s\n' "$bundle"
 if [ -n "$previous" ]; then
     printf 'Preserved previous bundle at %s\n' "$previous"
