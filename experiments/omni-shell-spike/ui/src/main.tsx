@@ -71,6 +71,14 @@ async function exerciseBrowser(): Promise<Record<string, unknown>> {
     clickText(".knowledge-ui-title", "探针笔记");
     await waitFor("note body", () => textOf(".knowledge-ui-preview").includes("hello from the fake client"));
     report.noteBody = textOf(".knowledge-ui-preview");
+    // Save on this first read. A later read returns the bumped version and
+    // the save no longer conflicts.
+    clickText("button", "Edit");
+    await waitFor("page body", () => document.body.innerText.includes("Page body"));
+    setControl("Page body", "edited");
+    clickText("button", "Save");
+    await waitFor("conflict", () => document.querySelector(".knowledge-ui-conflict") !== null);
+    report.conflictText = textOf(".knowledge-ui-conflict");
     let earlier = 0;
     while (!textOf(".knowledge-ui").includes("Diagram") && earlier < 3) {
       clickText("button", "Load earlier");
@@ -100,14 +108,6 @@ async function exerciseBrowser(): Promise<Record<string, unknown>> {
     report.pdfHref = link instanceof HTMLAnchorElement ? link.href : "";
     report.previewText = textOf(".knowledge-ui-preview");
     report.previewHasBase64 = report.previewText.toString().includes("base64");
-    clickText(".knowledge-ui-title", "探针笔记");
-    await waitFor("edit", () => Array.from(document.querySelectorAll("button")).some((node) => node.textContent?.trim() === "Edit"));
-    clickText("button", "Edit");
-    await waitFor("page body", () => document.body.innerText.includes("Page body"));
-    setControl("Page body", "edited");
-    clickText("button", "Save");
-    await waitFor("conflict", () => document.querySelector(".knowledge-ui-conflict") !== null);
-    report.conflictText = textOf(".knowledge-ui-conflict");
     setControl("Search", "note");
     clickText("button", "Search pages");
     await waitFor("search hit", () => document.querySelector(".knowledge-ui-snippet") !== null);

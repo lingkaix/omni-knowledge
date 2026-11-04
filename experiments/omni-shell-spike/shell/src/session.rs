@@ -193,6 +193,13 @@ impl Session {
         }
     }
 
+    /// True when the page forwarded a composition commit.
+    fn ime_ended(&self) -> bool {
+        self.ime
+            .iter()
+            .any(|event| event.get("phase").and_then(Value::as_str) == Some("end"))
+    }
+
     /// Whether this mode should write evidence and close.
     pub fn due(&self) -> bool {
         let elapsed = self.started.elapsed();
@@ -202,7 +209,9 @@ impl Session {
                 (self.dom.is_some() && elapsed >= Duration::from_secs(8))
                     || elapsed >= Duration::from_secs(45)
             }
-            Mode::Ime => !self.ime.is_empty() || elapsed >= Duration::from_secs(40),
+            // Stay up long enough for a composition commit. Closing on the
+            // first update cut off the previous run at 2.5s.
+            Mode::Ime => self.ime_ended() || elapsed >= Duration::from_secs(12),
             Mode::Drop => !self.drops.is_empty() || elapsed >= Duration::from_secs(20),
             Mode::Dialog => self.dialog.is_some() || elapsed >= Duration::from_secs(12),
         }

@@ -42,6 +42,9 @@ cleanup() {
   if [[ -n "${ibus_pid:-}" ]]; then
     kill -TERM "$ibus_pid" 2>/dev/null || true
   fi
+  if [[ -n "${openbox_pid:-}" ]]; then
+    kill -TERM "$openbox_pid" 2>/dev/null || true
+  fi
   if [[ -n "${dbus_pid:-}" ]]; then
     kill -TERM "$dbus_pid" 2>/dev/null || true
   fi
@@ -98,6 +101,15 @@ xvfb_pid=$!
 sleep 1
 echo "display=$DISPLAY xvfb_pid=$xvfb_pid" >>"$note"
 
+if command -v openbox >/dev/null; then
+  openbox >"$out_dir/$mode.openbox.log" 2>&1 &
+  openbox_pid=$!
+  sleep 0.5
+  echo "openbox_pid=$openbox_pid" >>"$note"
+else
+  echo "prerequisite missing: openbox" >>"$note"
+fi
+
 if command -v dbus-daemon >/dev/null; then
   dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --nofork --nopidfile --nosyslog >>"$out_dir/$mode.dbus.log" 2>&1 &
   dbus_pid=$!
@@ -114,7 +126,19 @@ if command -v ibus-daemon >/dev/null; then
   sleep 1
   if command -v ibus >/dev/null; then
     ibus list-engine >"$out_dir/$mode.engines.txt" 2>&1 || true
-    ibus engine libpinyin >>"$out_dir/$mode.ibus.log" 2>&1 || echo "ibus engine libpinyin failed" >>"$note"
+    selected=0
+    for _ in 1 2 3 4 5; do
+      if ibus engine libpinyin >>"$out_dir/$mode.ibus.log" 2>&1; then
+        selected=1
+        break
+      fi
+      sleep 0.4
+    done
+    if [[ "$selected" == 1 ]]; then
+      echo "ibus engine=libpinyin" >>"$note"
+    else
+      echo "ibus engine libpinyin failed" >>"$note"
+    fi
   fi
   echo "ibus_pid=${ibus_pid:-absent}" >>"$note"
 else
@@ -175,11 +199,13 @@ else
     ime)
       xdotool mousemove 440 80 click 1 >>"$note" 2>&1 || true
       sleep 0.4
-      key_to_window n i h a o space
+      # XTEST, not XSendEvent. The previous --window send died with BadWindow
+      # when the process closed on the first composition update.
+      xdotool key --delay 120 n i h a o space >>"$note" 2>&1 || echo "xtest key failed: nihao" >>"$note"
       sleep 2
       xdotool mousemove 120 680 click 1 >>"$note" 2>&1 || true
       sleep 0.4
-      key_to_window n i space
+      xdotool key --delay 120 n i space >>"$note" 2>&1 || echo "xtest key failed: native" >>"$note"
       ;;
     drop)
       drop_file="$work/spike-drop.txt"
