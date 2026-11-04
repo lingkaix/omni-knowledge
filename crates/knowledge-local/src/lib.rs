@@ -19,18 +19,22 @@ use knowledge_core::backend::{
 };
 use knowledge_core::data::{BackendKind, ContentDigest, RelativePath};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::fs::File;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Accounting reservation for one retained listing observation, excluding copied strings.
+/// Fixed reservation for one retained observation struct.
+/// Variable path and qualifier copies are added before those copies are allocated.
 /// This is not a measured RSS value.
 const ENTRY_RESERVE: u64 = 256;
-/// Accounting reservation for one held directory frame, excluding its relative prefix.
-/// This is not a file-descriptor or RSS ceiling.
+/// Fixed reservation for one directory stream and its held descriptor.
+/// Checked before the stream is constructed. The relative prefix is added separately.
+/// This is not a file-descriptor or RSS ceiling, and it is not the kernel getdents buffer.
 const FRAME_RESERVE: u64 = 512;
+/// Hex characters retained for one SHA-256 digest. The raw digest is 32 bytes.
+const DIGEST_TEXT: u64 = 64;
 /// Largest hash buffer. A tighter memory budget uses a shorter buffer instead.
 const MAX_CHUNK: usize = 8192;
 
@@ -184,7 +188,7 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
     }
 
     fn list(&self, cursor: Option<&Cursor>, budget: Budget) -> Result<Enumeration, BackendError> {
-        reject_cursor(&self.backend_identity(), cursor)?;
+        reject_cursor(cursor)?;
         let root = self.root()?;
         let admission = match gate(&self.policy, &self.library_id, &self.mount_id)? {
             Gate::Cancel => {
@@ -228,7 +232,19 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
             return Err(BackendError::BudgetExhausted);
         }
         let observation = match observe_path(&root, path) {
-            Ok(observed) => observation_from(self, path, observed),
+            Ok(observed) if observed.kind == native::NodeKind::Unsupported => StatObservation {
+                availability: Availability::Unavailable(Unavailable::Unsupported),
+                snapshot: None,
+            },
+            Ok(observed) => {
+                let charge =
+                    stat_charge(path.as_str(), &observed, &self.library_id, &self.mount_id)
+                        .ok_or(BackendError::BudgetExhausted)?;
+                if charge > budget.max_memory_bytes {
+                    return Err(BackendError::BudgetExhausted);
+                }
+                observation_from(self, path, &observed)
+            }
             Err(BackendError::Unavailable(
                 reason @ (Unavailable::Deleted | Unavailable::Denied | Unavailable::Unsupported),
             )) => StatObservation {
@@ -249,7 +265,7 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
         range: ByteRange,
         budget: Budget,
     ) -> Result<RangeRead, BackendError> {
-        if expected_version.snapshot.backend != self.backend_identity() {
+        if !same_bound_backend(self, &expected_version.snapshot.backend) {
             return Err(BackendError::InvalidRequest);
         }
         let root = self.root()?;
@@ -271,10 +287,6 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
         if observed.kind != native::NodeKind::File {
             return Err(kind_error(observed.kind));
         }
-        let snapshot = snapshot_from(self, path, &observed);
-        if snapshot != expected_version.snapshot {
-            return Err(BackendError::Unavailable(Unavailable::Changed));
-        }
         let file_bytes = observed.size;
         let charged = (path.as_str().len() as u64)
             .checked_add(file_bytes)
@@ -282,11 +294,30 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
         if charged > budget.max_bytes || budget.max_files == 0 {
             return Err(BackendError::BudgetExhausted);
         }
+        let meta = stat_charge(path.as_str(), &observed, &self.library_id, &self.mount_id)
+            .and_then(|charge| charge.checked_add(DIGEST_TEXT))
+            .ok_or(BackendError::BudgetExhausted)?;
+        if meta > budget.max_memory_bytes {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let mut hash_budget = budget;
+        hash_budget.max_memory_bytes = budget.max_memory_bytes - meta;
+        let snapshot = snapshot_from(self, path, &observed);
+        if snapshot != expected_version.snapshot {
+            return Err(BackendError::Unavailable(Unavailable::Changed));
+        }
         if range.offset() > file_bytes {
             // The range is outside the file, but a matching stat can still hide a byte change.
             // Hash before distinguishing an invalid range from drift.
-            let (_bytes, digest) =
-                hash_file(&parent, &name, &observed, range, budget, started, false)?;
+            let (_bytes, digest) = hash_file(
+                &parent,
+                &name,
+                &observed,
+                range,
+                hash_budget,
+                started,
+                false,
+            )?;
             if live(self, &admission)? == Live::Cancelled {
                 return Err(BackendError::Unavailable(Unavailable::Unknown));
             }
@@ -295,12 +326,13 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
             }
             return Err(BackendError::InvalidRequest);
         }
-        let (bytes, digest) = hash_file(&parent, &name, &observed, range, budget, started, true)?;
+        let (bytes, digest) =
+            hash_file(&parent, &name, &observed, range, hash_budget, started, true)?;
         if digest.as_str() != expected_version.digest.as_str() {
             return Err(BackendError::Unavailable(Unavailable::Changed));
         }
         let after = native::observe(&parent, &name).map_err(map_native)?;
-        if snapshot_from(self, path, &after) != snapshot {
+        if !same_content(&snapshot, &after) {
             return Err(BackendError::Unavailable(Unavailable::Changed));
         }
         if live(self, &admission)? == Live::Cancelled {
@@ -325,6 +357,14 @@ fn hash_file(
     started: Instant,
     retain: bool,
 ) -> Result<(Vec<u8>, ContentDigest), BackendError> {
+    let state = size_of::<Sha256>() as u64;
+    if budget.max_memory_bytes <= state {
+        return Err(BackendError::BudgetExhausted);
+    }
+    let budget = Budget {
+        max_memory_bytes: budget.max_memory_bytes - state,
+        ..budget
+    };
     let file_bytes = observed.size;
     let keep = if !retain || range.offset() > file_bytes {
         0
@@ -370,6 +410,8 @@ fn hash_file(
         }
         position = position.checked_add(read as u64).ok_or(BackendError::Io)?;
     }
+    // Scratch ends before the digest text. The digest uses the metadata reservation.
+    drop(buffer);
     if position != file_bytes || !native::same_sample(&file, observed).map_err(map_native)? {
         return Err(BackendError::Unavailable(Unavailable::Changed));
     }
@@ -398,6 +440,13 @@ fn walk<P: LocalReadPolicy>(
     budget: Budget,
     started: Instant,
 ) -> Result<Enumeration, BackendError> {
+    let Some(mut memory) = try_reserve(0, FRAME_RESERVE, budget.max_memory_bytes) else {
+        return Ok(partial(
+            Vec::new(),
+            EnumerationStop::BudgetExhausted,
+            progress(0, 0, started),
+        ));
+    };
     let mut stack = vec![Frame {
         iter: native::read_dir(root).map_err(map_native)?,
         prefix: String::new(),
@@ -406,7 +455,6 @@ fn walk<P: LocalReadPolicy>(
     let mut entries = Vec::new();
     let mut examined = 0u64;
     let mut bytes_read = 0u64;
-    let mut memory = FRAME_RESERVE;
     loop {
         if expired(started, budget.max_millis) {
             return Ok(partial(
@@ -425,7 +473,11 @@ fn walk<P: LocalReadPolicy>(
             FrameStep::Error(error) => {
                 return stop_or_err(entries, examined, bytes_read, started, error);
             }
-            FrameStep::Name { name, prefix } => {
+            FrameStep::Name { name } => {
+                let prefix = stack
+                    .last()
+                    .map(|frame| frame.prefix.as_str())
+                    .ok_or(BackendError::Io)?;
                 if examined >= budget.max_files {
                     return Ok(partial(
                         entries,
@@ -451,7 +503,7 @@ fn walk<P: LocalReadPolicy>(
                         progress(examined, bytes_read, started),
                     ));
                 };
-                let relative = child_path(&prefix, text);
+                let relative = child_path(prefix, text);
                 let Ok(path) = RelativePath::new(relative) else {
                     return Ok(partial(
                         entries,
@@ -478,20 +530,23 @@ fn walk<P: LocalReadPolicy>(
                         progress(examined, bytes_read, started),
                     ));
                 }
-                let charge = observation_charge(
-                    path.as_str(),
-                    &observed,
-                    &mount.library_id,
-                    &mount.mount_id,
-                );
-                if memory.saturating_add(charge) > budget.max_memory_bytes {
+                let Some(charge) =
+                    list_entry_charge(path.as_str(), &observed, &mount.library_id, &mount.mount_id)
+                else {
                     return Ok(partial(
                         entries,
                         EnumerationStop::BudgetExhausted,
                         progress(examined, bytes_read, started),
                     ));
-                }
-                memory += charge;
+                };
+                let Some(next_memory) = try_reserve(memory, charge, budget.max_memory_bytes) else {
+                    return Ok(partial(
+                        entries,
+                        EnumerationStop::BudgetExhausted,
+                        progress(examined, bytes_read, started),
+                    ));
+                };
+                memory = next_memory;
                 let kind = match observed.kind {
                     native::NodeKind::Directory => EntryKind::Directory,
                     native::NodeKind::File => EntryKind::File,
@@ -503,17 +558,29 @@ fn walk<P: LocalReadPolicy>(
                         ));
                     }
                 };
-                let stat = observation_from(mount, &path, observed.clone());
+                let stat = observation_from(mount, &path, &observed);
                 if kind == EntryKind::Directory {
-                    let frame_charge = FRAME_RESERVE.saturating_add(path.as_str().len() as u64);
-                    if memory.saturating_add(frame_charge) > budget.max_memory_bytes {
+                    let Some(frame_charge) =
+                        (path.as_str().len() as u64).checked_add(FRAME_RESERVE)
+                    else {
                         entries.push(ListedEntry { path, kind, stat });
                         return Ok(partial(
                             entries,
                             EnumerationStop::BudgetExhausted,
                             progress(examined, bytes_read, started),
                         ));
-                    }
+                    };
+                    let Some(next_memory) =
+                        try_reserve(memory, frame_charge, budget.max_memory_bytes)
+                    else {
+                        entries.push(ListedEntry { path, kind, stat });
+                        return Ok(partial(
+                            entries,
+                            EnumerationStop::BudgetExhausted,
+                            progress(examined, bytes_read, started),
+                        ));
+                    };
+                    memory = next_memory;
                     let child = {
                         let parent = &stack.last().ok_or(BackendError::Io)?.dir;
                         match native::open_directory(parent, text) {
@@ -542,7 +609,6 @@ fn walk<P: LocalReadPolicy>(
                             return stop_or_err(entries, examined, bytes_read, started, error);
                         }
                     };
-                    memory += frame_charge;
                     entries.push(ListedEntry {
                         path: path.clone(),
                         kind,
@@ -644,7 +710,7 @@ struct Frame {
 enum FrameStep {
     Done,
     Error(native::NativeError),
-    Name { name: CString, prefix: String },
+    Name { name: CString },
 }
 
 fn next_name(stack: &mut Vec<Frame>) -> FrameStep {
@@ -663,8 +729,7 @@ fn next_name(stack: &mut Vec<Frame>) -> FrameStep {
                     continue;
                 }
                 let name = entry.file_name().to_owned();
-                let prefix = frame.prefix.clone();
-                return FrameStep::Name { name, prefix };
+                return FrameStep::Name { name };
             }
         }
     }
@@ -677,7 +742,7 @@ fn duplicate_dir(dir: &File) -> Result<File, BackendError> {
 struct Admission {
     revision: u64,
     ordinary: bool,
-    outside: BTreeSet<String>,
+    outside: Vec<RelativePath>,
 }
 
 enum Gate {
@@ -717,11 +782,7 @@ fn gate<P: LocalReadPolicy>(
             Ok(Gate::Proceed(Admission {
                 revision: admission.revision,
                 ordinary: true,
-                outside: admission
-                    .outside_scope
-                    .iter()
-                    .map(|path| path.as_str().to_string())
-                    .collect(),
+                outside: admission.outside_scope,
             }))
         }
     }
@@ -730,27 +791,45 @@ fn gate<P: LocalReadPolicy>(
 fn same_admission(left: &Admission, right: &Admission) -> bool {
     left.revision == right.revision
         && left.ordinary == right.ordinary
-        && left.outside == right.outside
+        && same_scopes(&left.outside, &right.outside)
 }
 
-fn outside(path: &str, scopes: &BTreeSet<String>) -> bool {
+fn same_scopes(left: &[RelativePath], right: &[RelativePath]) -> bool {
+    left.iter()
+        .all(|path| right.iter().any(|other| other.as_str() == path.as_str()))
+        && right
+            .iter()
+            .all(|path| left.iter().any(|other| other.as_str() == path.as_str()))
+}
+
+fn outside(path: &str, scopes: &[RelativePath]) -> bool {
     scopes.iter().any(|scope| {
+        let scope = scope.as_str();
         path == scope || path.starts_with(scope) && path.as_bytes().get(scope.len()) == Some(&b'/')
     })
 }
 
-fn reject_cursor(identity: &BackendIdentity, cursor: Option<&Cursor>) -> Result<(), BackendError> {
-    match cursor {
-        None => Ok(()),
-        Some(cursor) if &cursor.backend == identity => Err(BackendError::InvalidRequest),
-        Some(_) => Err(BackendError::InvalidRequest),
+fn reject_cursor(cursor: Option<&Cursor>) -> Result<(), BackendError> {
+    if cursor.is_some() {
+        Err(BackendError::InvalidRequest)
+    } else {
+        Ok(())
     }
+}
+
+fn same_bound_backend<P: LocalReadPolicy>(
+    mount: &LocalMount<P>,
+    backend: &BackendIdentity,
+) -> bool {
+    backend.backend == BackendKind::Local
+        && backend.library_id == mount.library_id
+        && backend.mount_id == mount.mount_id
 }
 
 fn observation_from<P: LocalReadPolicy>(
     mount: &LocalMount<P>,
     path: &RelativePath,
-    observed: native::Observed,
+    observed: &native::Observed,
 ) -> StatObservation {
     if observed.kind == native::NodeKind::Unsupported {
         return StatObservation {
@@ -760,7 +839,7 @@ fn observation_from<P: LocalReadPolicy>(
     }
     StatObservation {
         availability: Availability::Available,
-        snapshot: Some(snapshot_from(mount, path, &observed)),
+        snapshot: Some(snapshot_from(mount, path, observed)),
     }
 }
 
@@ -837,21 +916,96 @@ fn kind_error(kind: native::NodeKind) -> BackendError {
     }
 }
 
-fn observation_charge(
+fn list_entry_charge(
     path: &str,
     observed: &native::Observed,
     library_id: &str,
     mount_id: &Option<String>,
-) -> u64 {
-    let mut charge = ENTRY_RESERVE.saturating_add(path.len() as u64);
-    charge = charge.saturating_add(library_id.len() as u64);
-    charge = charge.saturating_add(mount_id.as_ref().map(|value| value.len()).unwrap_or(0) as u64);
-    charge = charge.saturating_add(observed.inode.to_string().len() as u64);
-    charge = charge.saturating_add(observed.device.to_string().len() as u64);
-    if let Some(generation) = &observed.generation {
-        charge = charge.saturating_add(generation.len() as u64);
+) -> Option<u64> {
+    // The entry owns one path and the snapshot owns a second copy.
+    stat_charge(path, observed, library_id, mount_id)?.checked_add(path.len() as u64)
+}
+
+fn stat_charge(
+    path: &str,
+    observed: &native::Observed,
+    library_id: &str,
+    mount_id: &Option<String>,
+) -> Option<u64> {
+    let qual = qualifier_len(library_id, mount_id)?;
+    let mut charge = ENTRY_RESERVE
+        .checked_add(path.len() as u64)?
+        .checked_add(qual)?;
+    if retains_file_id(observed) {
+        charge = charge.checked_add(qual)?;
+        charge = charge.checked_add(decimal_len(observed.inode))?;
+        charge = charge.checked_add(decimal_len(observed.device))?;
+        if let Some(generation) = &observed.generation {
+            charge = charge.checked_add(generation.len() as u64)?;
+        }
     }
-    charge
+    Some(charge)
+}
+
+fn qualifier_len(library_id: &str, mount_id: &Option<String>) -> Option<u64> {
+    (library_id.len() as u64).checked_add(match mount_id {
+        Some(mount) => mount.len() as u64,
+        None => 0,
+    })
+}
+
+fn retains_file_id(observed: &native::Observed) -> bool {
+    observed.birth_ns.is_some() || observed.generation.is_some()
+}
+
+fn try_reserve(used: u64, charge: u64, ceiling: u64) -> Option<u64> {
+    let next = used.checked_add(charge)?;
+    (next <= ceiling).then_some(next)
+}
+
+fn same_content(snapshot: &StatSnapshot, observed: &native::Observed) -> bool {
+    snapshot.size_bytes == observed.size
+        && snapshot.modified_ns == observed.modified_ns
+        && snapshot.changed_ns == observed.changed_ns
+        && same_file_id(&snapshot.file_id, observed)
+}
+
+fn same_file_id(evidence: &Option<FileIdEvidence>, observed: &native::Observed) -> bool {
+    if !retains_file_id(observed) {
+        return evidence.is_none();
+    }
+    let Some(evidence) = evidence else {
+        return false;
+    };
+    evidence.birth_ns == observed.birth_ns
+        && evidence.generation == observed.generation
+        && decimal_eq(&evidence.file_id, observed.inode)
+        && evidence
+            .volume_id
+            .as_deref()
+            .is_some_and(|text| decimal_eq(text, observed.device))
+}
+
+fn decimal_len(value: u64) -> u64 {
+    match value.checked_ilog10() {
+        Some(exp) => u64::from(exp) + 1,
+        None => 1,
+    }
+}
+
+fn decimal_eq(text: &str, value: u64) -> bool {
+    let mut buf = [0u8; 20];
+    let mut rest = value;
+    let mut cursor = buf.len();
+    loop {
+        cursor -= 1;
+        buf[cursor] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    text.as_bytes() == &buf[cursor..]
 }
 
 fn child_path(prefix: &str, name: &str) -> String {
