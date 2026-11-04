@@ -1,15 +1,22 @@
 # Product Requirements
 
-Status: Accepted user requirements.
-Acceptance source: The engineer's request in the Codex conversation on 2026-10-14, with the desktop and ranked-result follow-ups on 2026-10-15.
-This document owns the requested product outcome; implementation defaults below remain replaceable methods under the engineer's instruction to explore and design.
+Status: Accepted product requirements; implementation and verification remain separate.
+Acceptance sources: product decisions on 2026-10-14 and 2026-10-15, and the full-version design with overriding supervisor amendments accepted on 2026-11-04.
+This document owns product scope, retained desktop requirements, delivery boundaries, and acceptance outcomes.
+The [service contract](service.md) owns the public wire surface.
+The full version is one delivery, not an MVP followed by deferred required features.
 
 ## Outcome
 
-Build a personal knowledge library for Apple Silicon Macs with Rust, a GPUI desktop interface, and an agent-friendly CLI.
+Build one local knowledge layer with a GPUI desktop on Apple silicon macOS and the same Rust service on headless Linux.
+Provide GUI, CLI, owner-only local IPC, stdio MCP, and explicitly enabled loopback HTTP/Streamable-HTTP MCP faces.
+Open ordinary unmarked folders without an account, mandatory hand-written configuration, OpenKit owner scope, Policy, Review, or publication receipt.
+Create a visible versioned data manifest through ordinary create, attach, or save actions; opening alone must not initialize a folder.
+A library has one writable home and zero or more reference mounts; attaching a folder does not copy its originals.
+A read-only folder can be attached to a separate writable home.
 Initialize folders with an LLM Wiki workflow and Open Knowledge Format concept documents.
-Include the two requested source articles as the first knowledge content, with original offline snapshots and linked reference concepts.
-Support nested knowledge libraries and identify each root with a configuration file.
+Include the two foundational source articles as first knowledge content, with original offline snapshots, linked reference concepts, and retained provenance.
+Preserve selected nested library boundaries and labelled recursive results; an unmarked subfolder is not automatically a separate library.
 Admit every regular file type, including binary files, into a general metadata search mechanism.
 Provide exact tags, fast grep, indexed BM25, and multimodal retrieval.
 Provide rendered Markdown and HTML, front matter, Mermaid, syntax highlighting, and EPUB viewing and export.
@@ -67,12 +74,14 @@ Keep retained evidence counts separate from these useful display locations, and 
 Clicking line evidence must reveal and highlight its numbered text location; retain formatted document reading separately.
 Preserve search settings, results, and the selected document when opening and closing the guide.
 Keep metadata editing available without reserving a large permanent toolbar row.
-Save editable metadata directly without starting an index build, and show whether the write succeeded.
+Save editable metadata through the service without starting a synchronous index build, and show whether the write succeeded.
+Report pending retrieval reconciliation separately from the saved authored values.
 Present file details with labelled type, readable size, local creation and modification dates, and explicit path-copy actions.
 Show an unavailable date honestly instead of substituting another timestamp.
 Label editable tags and notes separately from source properties and explain that they are saved with the knowledge library without changing the source.
 Identify the saved record's location, make it inspectable, and reload the saved values when the file is selected again.
-Explain that an explicit index refresh makes new tags and notes available to search.
+Explain when reconciliation makes saved tags and notes available to search, and retain an explicit refresh action.
+Automatic bounded tracking supplements explicit refresh; it must not imply that every expensive media job starts immediately.
 Distinguish unsaved changes, saving, saved values, and failures, including edits that return to their saved value.
 Keep preview selection, typing, and metadata inspection responsive while searches or explicit index builds run.
 Read selected-file attributes independently of the complete search index.
@@ -83,8 +92,9 @@ Remove permanent instructional and destination rows below the file tree and dupl
 Keep status-bar diagnostics readable within its layout instead of floating under the native preview.
 Show selected-folder, index, external-tool, and local-model-service status in a compact bottom bar.
 Link dependency problems to their installation or repair instructions.
-Distinguish uninitialized folders, invalid selections, missing indexes, and source changes that need reindexing.
-Check these states in the background without automatically initializing, indexing, installing, or starting a service.
+Distinguish open unmarked folders, pending initialization or migration, invalid selections, missing indexes, source changes, and partial processing coverage.
+Background status checks do not initialize, install tools, or start a model provider.
+The service can run bounded automatic tracking and reuse or start its single-instance daemon under the service contract.
 Provide source-file context actions for copying the file, revealing it in Finder, copying absolute or relative paths, and moving it to the macOS Trash.
 Right-clicking a tree row must select its actual target and open its menu on the first click, including when another row's menu is open.
 Dismiss that menu when the user clicks outside it, including inside the native preview, or presses Escape.
@@ -92,11 +102,14 @@ Require an explicit file action and confirmation before moving a source to Trash
 Group the current knowledge root's name and location in one bottom-bar target that opens its folder.
 Place index freshness beside the index-refresh action at the right end of the bar, separate from library identity.
 Clicking a stale or missing-index state for the opened root must start an explicit index refresh, rather than open documentation.
-If the edited path identifies a different knowledge root or an uninitialized folder, direct the user to open or initialize it before offering indexing.
+If the edited path identifies a different library or an unopened unmarked folder, direct the user to open it before offering indexing.
+Offer initialization separately when durable library data is needed; do not require it merely to browse.
 Never refresh the previously opened library by mistake.
 Treat search as a clearable filter over the file tree and restore the complete browsing view when the filter is cleared.
 Support explicit file drag-and-drop, copy, and paste within the desktop; preserve metadata and reject overwrite collisions.
-Store derived indexes inside the knowledge folder and keep upgraded indexes usable when the whole library moves.
+Store all derivatives and index generations in an app-owned local cache outside every home, mount, and sync folder.
+Bind reusable generations to library/source identities instead of absolute home paths; moving a library must not adopt another library's cache.
+A cache miss or incompatible generation causes truthful missing coverage or a rebuild, not loss of authored content.
 Use native text inputs with consistent focus, Chinese input-method composition, selection, clipboard commands, and standard word-editing shortcuts.
 Open explicit Markdown and HTML links through safe routes for document anchors, contained library files, and the system browser.
 Provide default-application, Finder, Quick Look, and metadata actions for the selected source.
@@ -113,14 +126,67 @@ Search results must identify the source and return line numbers or media time ra
 Local processing is the default; no file content leaves the machine without explicit authorization.
 Do not execute scripts from imported content.
 
-## Implementation Defaults
+## Full-Version Owners And Compatibility
 
-Use `omni-knowledge.json` as the root marker and configuration, `.omni/metadata/` for editable JSON asset descriptions, and `.omni/indexes/` for generated search snapshots.
-Associate each file with its nearest root; parent operations exclude nested roots unless recursive search is requested.
-Use Tantivy BM25, parallel regex verification, conservative literal trigram candidate filtering, and exact local cosine scoring.
-Publish a completed index generation through an atomic pointer and retain the previous published generation after failed work.
-Bound extraction, report unsupported or failed extraction explicitly, and still index file names and metadata.
-Semantic search requires an available compatible local model; lexical search works independently.
+The previous required version-1 marker, hidden annotation sidecars, in-home cache, manual-only change detection, and snapshot-only freshness claims are replaced explicitly.
+Legacy data must remain readable for a migration preview; migration must retain orphan annotations and reject collisions without destroying old authored files.
+Old clients must reject the incompatible new manifest version instead of interpreting it as version 1.
+These accepted requirements do not claim that the legacy implementation already supplies them.
+
+| Responsibility | Full-version requirement and owner |
+| --- | --- |
+| Mutable layout | Visible `omni-knowledge.json`, one `pages/` text root or mapped existing `wiki/`, `sources/<source-id>.md`, inert `AGENTS.md`, ordinary `schema.yaml`, and per-writer `journal/`; storage owns the exact representation. |
+| Mounts and identity | Local, OS-mounted NAS, cloud-synced folder with residency/conflict-copy handling, and Git-server working copies; logical `raw/<mount>/<path>`, no multi-TB copy; source ID differs from digest and backend file ID. |
+| Change tracking | Verify on read, reliable platform events, stat-first bounded reconciliation, and cost-tiered jobs together; offline never means deleted, and placeholders never cause background hydration. |
+| Authored writes | Expected digest/file identity, one home writer, no-clobber creation, competing-version preservation, typed conflict/indeterminate recovery, and read-only originals by default. |
+| Cache | Local external content-addressed derivatives, per-library isolation, explicit budgets, pins and safe retirement; generated ASR is derived, corrected transcripts are authored companions. |
+| Text history | Automatic text-only Git, one durable text operation per commit, SSH signing or explicitly selected unsigned creation mode, outside-sync Git directories, minimal agent proposals and human merge confirmation. |
+| Git-server library | Explicit remote-effect consent, system credential/signing helpers, fetch plus inspected integration and push; no force/reset, silent unsigned fallback, or implied push permission. |
+| Processing | Reuse mature extraction/media/provider behavior with bounded private jobs and original/representation locators; no scripts/macros execute and no direct WeMM audio claim. |
+| Retrieval | Shared pinned lexical kernel, CJK/Japanese and canonical scans, metadata/exact tags, file-level RRF 60, exact disk-backed vectors, stable generations and explicit coverage; no full JSON-vector corpus in RAM. |
+| Frozen packages | One native ZIP/ZIP64 format with frozen, backup, and migration presets, reference-only large mounts, directly searchable compatible STORED indexes, verification and no-clobber restore. |
+| Interoperability | Genuine OpenKit v1 directory/tar mapping is a core-content adapter, not native ZIP, shared permission, or fabricated owner/revision; missing host context causes a precise export refusal. |
+| Exposure | Selected libraries and exclusions checked before delivery and writes; MCP read-only by default; owner-only administration, sensitive-library restrictions, no model root widening, and no account/OAuth stack. |
+| Desktop | Preserve the detailed workspace, preview, file action, guide, environment, input, and accessibility behavior above; all data operations use the same service as CLI/MCP. |
+
+Storage, history, processing, retrieval, and package specifications refine these responsibilities without reducing their scope.
+S3 and cloud delta APIs are later adapter extensions, not required implementations in this delivery.
+OCR, scene-change segmentation, and native Lance FTS replacement remain optional experiments.
+The time-boxed LanceDB vector experiment is inside retrieval work and never blocks feature completeness; retain exact vectors if it loses.
+No OpenKit source change or governed host implementation is part of this delivery.
+
+## Shared Crates And Platform Boundaries
+
+Use a Cargo workspace with shared `knowledge-core`, `knowledge-processing`, `knowledge-retrieval`, and vendored `retrieval-kernel` crates.
+`knowledge-core` owns layout, mounts, journal, safe file operations, text Git, native ZIP, and foreign-format mechanics.
+`knowledge-processing` depends on core and owns extraction, media/ASR, provider validation, and retrieval units.
+`knowledge-retrieval` depends on core, processing interfaces, and the kernel; it owns metadata/tags, vectors, fusion, coverage, and generations.
+`omni-service` orchestrates these owners, libraries, jobs, cache, transports, and exposure.
+`omni-cli` and `omni-gui` depend on the service client; neither owns another write path, parser, or retrieval engine.
+The default Linux CLI/daemon graph must not link GPUI, AppKit, WebKit, Metal, or an embedded model runtime.
+Platform variation uses small known adapters, not a generic plugin registry or a daemon per library.
+Shared crates accept explicit handles, paths, providers, and budgets and return serializable facts without GUI globals or OpenKit governance.
+Vendored kernel seams must be generic and upstreamable; retain the exact upstream revision, notices, dictionaries, lock evidence, and a patch ledger.
+Do not keep the old omni lexical engine alongside the vendored engine permanently.
+
+## Delivery And Qualification
+
+M0 through M8 are internal sequencing within one full delivery.
+M0 freezes owners and DTOs, characterizes preserved behavior, names intended-red new requirements, and proves the kernel downstream build.
+M1 supplies storage/mounts/tracking/cache; M2 history/remote; M3 processing; M4 retrieval/archive reading; M5 packages; M6 service/transports; M7 GUI; M8 integrates all features.
+Each milestone needs direct public-seam evidence; a document or compilation result is not implementation acceptance.
+Independent test authors derive checks from owners and DTOs, not candidate source.
+A coupled-test replacement needs independent OLD-and-NEW passing proof before deletion; a new behavior needs its intended OLD failure and NEW pass.
+Each landing gates the final rebased HEAD; integrated batches account for the complete deterministic suite and artifact smoke.
+
+The first CI workflow must include Linux x86_64 headless tests, lint, release build, and artifact smoke.
+It must also include macOS arm64 headless tests, FSEvents adapter tests, `--features gui` build, and an unsigned `.app` bundle artifact.
+Use modest main-push path filters and manual dispatch, not an expansive matrix.
+Linux arm64 build/smoke is required when its runner/toolchain is available and must be labelled unqualified until observed.
+Missing macOS CI is a blocked requirement, not permission to defer the GUI build to a user.
+Native human qualification covers IME, focus/clipboard/drag/drop, Finder/Quick Look, real OneDrive residency, actual NAS semantics, WeMM GPU/ANE, Keychain prompts, and Gatekeeper.
+CI and synthetic Linux adapters do not certify these effects.
+Use synthetic or licensed fixtures, disposable keys, and local bare Git remotes; never automatically discover personal libraries or credentials.
 
 ## Acceptance Examples
 
@@ -128,7 +194,18 @@ Initialize a nonempty folder without overwriting its existing files.
 Import an unknown binary file, annotate it, and retrieve it by exact tag and description.
 Retrieve English and Chinese Markdown content through BM25 and grep, then show the original file.
 Index modified and deleted files without returning removed content after successful reconciliation.
-Keep parent and child library identity distinct and return both through recursive search.
+Keep selected parent and child library identity distinct and return labelled library groups through recursive search.
 Retrieve an image and a timed video segment with a natural-language query using the local WeMM service.
 Create an EPUB with readable navigation and chapters from Markdown and HTML, then reopen it.
 Report missing parser or embedding dependencies without claiming content extraction or semantic coverage.
+Open and search English, Chinese, and Japanese text without a model, account, OpenKit scope, or hand-written configuration.
+Migrate a version-1 library with orphan sidecars and parsed links without losing annotations, code, prose, or original bytes.
+Use a sensitive Git-backed text wiki, a cloud-synced team wiki, and a separate home with NAS plus cloud media mounts as generic acceptance setups.
+For the Git wiki, preserve unrelated staged work, inspect a signed operation, and confirm an agent proposal without granting model administration.
+For the cloud wiki, observe unknown-origin external batches, conflict copies, placeholders, and in-progress files without hydration or competing-version loss.
+For the media home, discover metadata before hashing, process selected pinned clips, keep originals in place, and keep cache/history outside sync roots.
+Disconnect/reconnect a mount and stop a provider; distinguish unavailable, deleted, stale, pending, partial, and failed coverage.
+Create all three package presets, verify signatures and ZIP64 offsets above 4 GiB, query compatible STORED indexes without extraction, and restore to a new home.
+Refuse OpenKit v1 export when genuine required host context is missing; never invent foreign publication or ownership.
+Run the same headless service through CLI and multiple stdio/HTTP MCP clients; exclusions, read-only defaults, exposure changes, and restart must hold.
+After a forced stop, reopen without duplicate commits, false completed jobs, or automatic replay of uncertain writes.
