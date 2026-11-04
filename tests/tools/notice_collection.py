@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """Characterization tests for the committed license-notice collector CLI.
 
-The subject is the public `scripts/collect-licenses.py` from committed revision f80813f775d23138496750f6753f61d341aaf65b, exported as opaque bytes through `git show` and bound by its SHA-256.
+The subject is the public `scripts/collect-licenses.py`, exported as opaque bytes through `git show` from one selected checkout and bound by the recorded commit and SHA-256 of the exported file.
+The default current mode selects this checkout HEAD, or an explicit `--subject-repo`/`--current-ref`, so a run gates the actual checked-out source; `--legacy` selects the pinned historical characterization with committed revisions f80813f775d23138496750f6753f61d341aaf65b (new side) and a4d77f06fda38f197653ef4ec82425e4df6aa8f3 (old side).
 Expected values never come from reading the subject implementation; they come from the public owner contract and from fixture bytes declared in this file:
 
 - [product licensing](../../docs/specs/product.md) `#project-license`: third-party components keep their original licenses and provenance.
 - [dependency guidance](../../docs/dependencies.md): `Cargo.lock` fixes versions, notices and exact unmodified MPL-2.0 source archives ship with the bundle, and the generated inventory states coverage gaps instead of claiming an audit.
-- Committed revision f80813f `scripts/README.md` (collector section) and `docs/changes/2026-11-04-linux-artifact-notices.md`: default Darwin GUI selection is preserved; `--target <triple> --headless OUTPUT` collects the Linux headless graph; `OUTPUT` must be a new directory; the inventory binds target, selected features, root package, and the exact workspace lock digest; retained upstream notice reuse requires matching crate/version/VCS identity and a valid retained hash; a registry notice gap keeps the exact lock-checksummed original source archive and reports the gap honestly.
+- Committed revision f80813f `scripts/README.md` (collector section) and `docs/changes/2026-11-04-linux-artifact-notices.md`: default Darwin GUI selection is preserved; `--target <triple> --headless OUTPUT` collects the Linux headless graph; `OUTPUT` must be a new directory; the inventory binds target, selected features, root package, and the exact workspace lock digest; retained upstream notice reuse requires matching crate/version/VCS identity and a valid retained hash; a registry notice gap keeps the exact lock-checksummed original source archive and reports the gap honestly; coverage gaps stay explicitly flagged as nonempty classifications rather than exact English sentences.
 
 The external Cargo metadata effect is stood in by a synthetic `cargo` shim that serves a static Cargo-format graph plus a synthetic registry/cache; the real collector CLI, file evidence, hashes, artifact bytes, and deciding assertions remain live.
 These are bounded instrument/regression tests: they do not prove the real Linux dependency graph, macOS bundling, or legal compliance.
 
 Run with: `python3 -B tests/tools/notice_collection.py` (standard library only, Python 3.9+).
-The subject export needs a local checkout that contains the committed revisions; set `NOTICE_COLLECTION_SUBJECT_REPO` to its path, or rely on the default search that includes the sibling lead checkout.
+Current mode resolves the selected ref to one exact commit, records the digest of the exported executed file, and fails on a missing selected ref without fallback; it needs no historical objects, and the legacy-only OLD/NEW parity test is reported as not selected instead of silently skipped.
+`--legacy` additionally needs a checkout holding both pinned revisions; set `NOTICE_COLLECTION_SUBJECT_REPO` or pass `--subject-repo` to name one, otherwise the legacy search tries this checkout and the sibling lead checkout.
 Fixtures are disposable synthetic workspaces under the ignored `temp/notice-collection-tests/admission/` root; the root is removed after a fully successful run and retained otherwise so failing observations stay inspectable.
 """
 
+import argparse
 import gzip
 import hashlib
 import io
@@ -28,6 +31,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from collections import namedtuple
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,12 +40,11 @@ ADMISSION_ROOT = REPO_ROOT / "temp" / "notice-collection-tests" / "admission"
 SUBJECT_REPO_ENV = "NOTICE_COLLECTION_SUBJECT_REPO"
 COLLECTOR_PATH_IN_REPOSITORY = "scripts/collect-licenses.py"
 
-CURRENT_COMMIT = "f80813f775d23138496750f6753f61d341aaf65b"
-CURRENT_SUBJECT_SHA256 = "e3bc710d94b36798f2ac3016dec75c31ad521e0386099ec20b92e60310710376"
-# Unchanged older committed source, used only to confirm the preserved default Darwin GUI selection.
-# No Linux/headless claim is made against it.
-LEGACY_COMMIT = "a4d77f06fda38f197653ef4ec82425e4df6aa8f3"
-LEGACY_SUBJECT_SHA256 = "b813b4e73d85016a0a477ac7b77c363c2ee40569fdc47fb7d3fb3feb6875eb77"
+# Legacy mode pins the previously characterized revisions; they are declared prerequisites of that explicit mode, never the default current subject.
+LEGACY_NEW_COMMIT = "f80813f775d23138496750f6753f61d341aaf65b"
+LEGACY_NEW_SHA256 = "e3bc710d94b36798f2ac3016dec75c31ad521e0386099ec20b92e60310710376"
+LEGACY_OLD_COMMIT = "a4d77f06fda38f197653ef4ec82425e4df6aa8f3"
+LEGACY_OLD_SHA256 = "b813b4e73d85016a0a477ac7b77c363c2ee40569fdc47fb7d3fb3feb6875eb77"
 
 DARWIN_TARGET = "aarch64-apple-darwin"
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
@@ -84,9 +87,8 @@ ROOT_EDGES = [
 # alpha-core pulls gamma-transitive as a normal transitive dependency.
 TRANSITIVE_EDGES = {"alpha-core": [("gamma-transitive", None)]}
 
-GAP_WARNING_NOTICES = "no dedicated upstream notice file found; fallback evidence needs review"
-GAP_WARNING_TEXT = "no upstream license or copyright text discovered; metadata and exact source URL only"
-REUSED_WARNING_NOTICES = GAP_WARNING_NOTICES
+# The OLD/NEW parity case needs both pinned historical revisions; it is selected only with --legacy.
+LEGACY_ONLY_TESTS = frozenset({"test_default_selection_matches_older_committed_source"})
 
 SUBJECT_CACHE = {}
 
@@ -131,25 +133,79 @@ def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def candidate_subject_repositories():
-    """Yield local checkouts that may contain the committed collector revisions."""
-    override = os.environ.get(SUBJECT_REPO_ENV)
-    if override:
-        yield Path(override)
+Subject = namedtuple("Subject", ["repository", "ref", "commit", "sha256", "path"])
+
+SELECTED = {"current": None, "legacy_repo": None}
+
+
+def select_current_subject(subject):
+    """Record the subject that the selected test set executes."""
+    SELECTED["current"] = subject
+
+
+def current_subject():
+    """Return the selected current subject; raise when nothing was selected."""
+    subject = SELECTED["current"]
+    if subject is None:
+        raise RuntimeError("no current subject was selected; run through main() or pass --subject-repo/--current-ref")
+    return subject
+
+
+def git_check_output(repository, arguments, guidance):
+    """Run one read-only git query in the subject repository and return its stdout bytes."""
+    probe = subprocess.run(["git", "-C", str(repository), *arguments], capture_output=True, timeout=30)
+    if probe.returncode != 0:
+        raise RuntimeError("%s\n%s" % (guidance, probe.stderr.decode("utf-8", "replace").strip()))
+    return probe.stdout
+
+
+def write_subject_export(repository, ref, commit, data):
+    """Write the opaque subject bytes and return the identity bound to the written, executed file."""
+    ADMISSION_ROOT.mkdir(parents=True, exist_ok=True)
+    subject = ADMISSION_ROOT / ("collect-%s.py" % commit[:8])
+    subject.write_bytes(data)
+    digest = sha256_bytes(subject.read_bytes())
+    return Subject(repository=str(repository), ref=ref, commit=commit, sha256=digest, path=subject)
+
+
+def resolve_current_subject(repository, ref):
+    """Resolve one exact subject commit from the selected checkout and export its opaque bytes.
+
+    The selected ref must resolve in the selected repository; there is no fallback repository and no pinned substitute.
+    """
+    probe = subprocess.run(["git", "-C", str(repository), "rev-parse", "--git-dir"], capture_output=True, timeout=30)
+    if probe.returncode != 0:
+        raise RuntimeError("%s is not a git checkout; pass --subject-repo naming a checkout that holds the subject" % repository)
+    shown = git_check_output(
+        repository, ["rev-parse", "--verify", "%s^{commit}" % ref],
+        "selected ref %s does not resolve in %s; there is no fallback to another repository or pinned commit" % (ref, repository),
+    )
+    commit = shown.decode("utf-8").strip()
+    data = git_check_output(
+        repository, ["show", "%s:%s" % (commit, COLLECTOR_PATH_IN_REPOSITORY)],
+        "%s does not contain %s at %s" % (repository, COLLECTOR_PATH_IN_REPOSITORY, commit),
+    )
+    return write_subject_export(repository, ref, commit, data)
+
+
+def legacy_search_repositories(explicit):
+    """Yield local checkouts that may contain the pinned legacy revisions."""
+    if explicit:
+        yield Path(explicit)
     yield REPO_ROOT
     yield REPO_ROOT.parents[1] / "lead" / "omni-knowledge"
 
 
-def export_subject(commit, expected_sha256):
-    """Export the committed collector as opaque bytes and bind its identity.
+def export_pinned_subject(commit, expected_sha256, explicit_repository):
+    """Export a pinned legacy revision as opaque bytes and bind its declared identity.
 
-    Returns the path of the exported subject file.
-    Raises with operator guidance when no available checkout contains the commit or the bytes differ from the recorded subject identity.
+    Searches the candidate checkouts and refuses any bytes that differ from the declared digest.
     """
-    if commit in SUBJECT_CACHE:
-        return SUBJECT_CACHE[commit]
+    cached = SUBJECT_CACHE.get(commit)
+    if cached is not None:
+        return cached
     attempts = []
-    for repository in candidate_subject_repositories():
+    for repository in legacy_search_repositories(explicit_repository):
         if not (repository / ".git").exists():
             attempts.append("%s (no checkout)" % repository)
             continue
@@ -160,25 +216,28 @@ def export_subject(commit, expected_sha256):
         if probe.returncode != 0:
             attempts.append("%s (commit or path absent)" % repository)
             continue
-        shown = subprocess.run(
-            ["git", "-C", str(repository), "show", "%s:%s" % (commit, COLLECTOR_PATH_IN_REPOSITORY)],
-            capture_output=True, timeout=30, check=True,
-        )
-        data = shown.stdout
+        data = git_check_output(repository, ["show", "%s:%s" % (commit, COLLECTOR_PATH_IN_REPOSITORY)], "%s lookup failed" % repository)
         actual = sha256_bytes(data)
         if actual != expected_sha256:
             raise RuntimeError(
                 "exported %s from %s has SHA-256 %s, expected %s"
                 % (commit, repository, actual, expected_sha256)
             )
-        ADMISSION_ROOT.mkdir(parents=True, exist_ok=True)
-        subject = ADMISSION_ROOT / ("collect-%s.py" % commit[:8])
-        subject.write_bytes(data)
+        subject = write_subject_export(repository, commit, commit, data)
         SUBJECT_CACHE[commit] = subject
         return subject
     raise RuntimeError(
-        "no local checkout with %s:%s was found; set %s to a repository containing it. Tried: %s"
+        "no local checkout with %s:%s was found; set %s or pass --subject-repo naming one that contains it. Tried: %s"
         % (commit, COLLECTOR_PATH_IN_REPOSITORY, SUBJECT_REPO_ENV, "; ".join(attempts))
+    )
+
+
+def legacy_subjects():
+    """Export both pinned legacy revisions for the explicit OLD/NEW parity characterization."""
+    repository = SELECTED["legacy_repo"]
+    return (
+        export_pinned_subject(LEGACY_NEW_COMMIT, LEGACY_NEW_SHA256, repository),
+        export_pinned_subject(LEGACY_OLD_COMMIT, LEGACY_OLD_SHA256, repository),
     )
 
 
@@ -364,6 +423,7 @@ class Fixture:
     # -- operation ---------------------------------------------------------
 
     def run_collector(self, subject, output, record_name, extra_args=()):
+        """Run the exported subject file as the real collector CLI with the synthetic Cargo effect."""
         record = self.root / record_name
         environment = {
             "PATH": str(self.fake_bin) + os.pathsep + os.environ.get("PATH", ""),
@@ -373,7 +433,7 @@ class Fixture:
             "FAKE_CARGO_METADATA": str(self.workspace / "tools"),
         }
         process = subprocess.run(
-            [sys.executable, "-B", str(subject), *extra_args, str(output)],
+            [sys.executable, "-B", str(subject.path), *extra_args, str(output)],
             env=environment, cwd=str(self.root),
             capture_output=True, text=True, timeout=COLLECT_RUN_TIMEOUT_SECONDS,
         )
@@ -418,11 +478,25 @@ class NoticeCollectorCharacterization(unittest.TestCase):
     def expected_selection(self, names):
         return {(name, CRATES[name][0]) for name in names}
 
+    def assert_nonempty_warning_classification(self, warnings):
+        """Assert the inventory keeps explicit nonempty coverage warnings without binding their English wording."""
+        self.assertTrue(warnings, "coverage gaps must stay explicitly flagged in the inventory")
+        for warning in warnings:
+            self.assertIsInstance(warning, str)
+            self.assertTrue(warning.strip(), "each coverage warning must carry nonempty text")
+
+    def document_section(self, document, crate, version):
+        """Return the notice-document section between the crate header and the next section header."""
+        lines = document.splitlines()
+        start = lines.index("=== %s %s ===" % (crate, version))
+        stop = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("=== ")), len(lines))
+        return "\n".join(lines[start:stop])
+
     # -- explicit Linux/headless binding and selection ----------------------
 
     def test_linux_headless_binds_inventory_and_selects_normal_build(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         process, output, record = fixture.run_collector(
             subject, fixture.root / "out", "calls-linux.jsonl",
             extra_args=["--target", LINUX_TARGET, "--headless"],
@@ -448,7 +522,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_retained_notice_reused_with_matching_identity_and_hash(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         process, output, _ = fixture.run_collector(
             subject, fixture.root / "out", "calls-retained.jsonl",
             extra_args=["--target", LINUX_TARGET, "--headless"],
@@ -460,7 +534,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
             "path": "retained-upstream/retained-gem-0.9.0/LICENSE",
             "text_sha256": fixture.retained_notice_sha256,
         }])
-        self.assertEqual(package["warnings"], [REUSED_WARNING_NOTICES])
+        self.assert_nonempty_warning_classification(package["warnings"])
         self.assertIsNone(package.get("source_archive"))
         artifact_archives = {path.name for path in (Path(output) / "Sources").iterdir()}
         self.assertNotIn("retained-gem-0.9.0.crate", artifact_archives)
@@ -472,7 +546,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_notice_gap_keeps_exact_source_archive_and_reports_honestly(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         process, output, _ = fixture.run_collector(
             subject, fixture.root / "out", "calls-gap.jsonl",
             extra_args=["--target", LINUX_TARGET, "--headless"],
@@ -483,7 +557,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
         expected_digest = fixture.archive_sha256["gamma-transitive"]
         self.assertEqual(package["declared_license"], "MIT")
         self.assertEqual(package["notices"], [])
-        self.assertEqual(package["warnings"], [GAP_WARNING_NOTICES, GAP_WARNING_TEXT])
+        self.assert_nonempty_warning_classification(package["warnings"])
         self.assertEqual(package["source_archive"], {
             "path": "Sources/gamma-transitive-0.5.0.crate",
             "sha256": expected_digest,
@@ -497,13 +571,17 @@ class NoticeCollectorCharacterization(unittest.TestCase):
         document = (Path(output) / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
         self.assertIn("Included unmodified source (upstream_notice_gap_evidence): "
                       "Sources/gamma-transitive-0.5.0.crate (SHA-256 %s)" % expected_digest, document)
-        self.assertIn("Coverage note: %s" % GAP_WARNING_TEXT, document)
+        section = self.document_section(document, "gamma-transitive", "0.5.0")
+        self.assertTrue(
+            any(line[len("Coverage note:"):].strip() for line in section.splitlines() if line.startswith("Coverage note:")),
+            "the notice document must keep an explicit nonempty coverage note in the affected crate section",
+        )
         self.assertNotIn("=== Full upstream text SHA-256 %s ===" % expected_digest, document,
                          "a notice gap must not gain invented upstream text")
 
     def test_mpl_source_obligation_keeps_original_archive(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         process, output, _ = fixture.run_collector(
             subject, fixture.root / "out", "calls-mpl.jsonl",
             extra_args=["--target", LINUX_TARGET, "--headless"],
@@ -530,7 +608,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_default_darwin_gui_selection_preserved(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         process, output, record = fixture.run_collector(subject, fixture.root / "out", "calls-default.jsonl")
         self.assertEqual(process.returncode, 0, process.stderr)
         calls = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
@@ -553,8 +631,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_default_selection_matches_older_committed_source(self):
         fixture = self.fresh_fixture()
-        current = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
-        legacy = export_subject(LEGACY_COMMIT, LEGACY_SUBJECT_SHA256)
+        current, legacy = legacy_subjects()
         new_process, new_output, _ = fixture.run_collector(current, fixture.root / "out-new", "calls-new.jsonl")
         old_process, old_output, old_record = fixture.run_collector(legacy, fixture.root / "out-old", "calls-old.jsonl")
         self.assertEqual(new_process.returncode, 0, new_process.stderr)
@@ -578,7 +655,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_wrong_retained_hash_is_refused(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         wrong_digest = sha256_bytes(TAMPERED_RETAINED_BYTES)
         fixture.redeclare_retained_hash(wrong_digest)
         output = fixture.root / "out"
@@ -593,7 +670,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_lock_checksum_mismatch_is_refused(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         fixture.corrupt_lock_checksum("gamma-transitive", "ab" * 32)
         output = fixture.root / "out"
         process, output, _ = fixture.run_collector(
@@ -607,7 +684,7 @@ class NoticeCollectorCharacterization(unittest.TestCase):
 
     def test_existing_destination_refused_without_overwrite(self):
         fixture = self.fresh_fixture()
-        subject = export_subject(CURRENT_COMMIT, CURRENT_SUBJECT_SHA256)
+        subject = current_subject()
         output = fixture.root / "out"
         output.mkdir()
         sentinel_inventory = b"sentinel inventory bytes\n"
@@ -622,9 +699,50 @@ class NoticeCollectorCharacterization(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in output.iterdir()), ["KEEP.txt", "inventory.json"])
 
 
+def parse_arguments():
+    """Define the subject-selection command line for the characterization run."""
+    parser = argparse.ArgumentParser(description="Characterization tests for the license-notice collector subject.")
+    parser.add_argument(
+        "--legacy", action="store_true",
+        help="run the pinned f80813f/a4d77f0 historical characterization including the OLD/NEW parity test",
+    )
+    parser.add_argument(
+        "--subject-repo", default=os.environ.get(SUBJECT_REPO_ENV),
+        help="checkout holding the subject source; default NOTICE_COLLECTION_SUBJECT_REPO, else this checkout "
+             "(legacy search also tries the sibling lead checkout)",
+    )
+    parser.add_argument(
+        "--current-ref", default=None,
+        help="ref resolved to the current subject commit; default HEAD; not valid with --legacy",
+    )
+    return parser
+
+
 def main():
+    parser = parse_arguments()
+    arguments = parser.parse_args()
+    if arguments.legacy:
+        if arguments.current_ref is not None:
+            parser.error("--current-ref does not apply to legacy mode; legacy pins its declared revisions")
+        SELECTED["legacy_repo"] = arguments.subject_repo
+        subject = export_pinned_subject(LEGACY_NEW_COMMIT, LEGACY_NEW_SHA256, arguments.subject_repo)
+        select_current_subject(subject)
+        print("legacy mode: pinned subject %s sha256 %s from %s" % (subject.commit, subject.sha256, subject.repository))
+    else:
+        repository = Path(arguments.subject_repo) if arguments.subject_repo else REPO_ROOT
+        ref = arguments.current_ref if arguments.current_ref is not None else "HEAD"
+        subject = resolve_current_subject(repository, ref)
+        select_current_subject(subject)
+        print("current mode: repo %s ref %s -> commit %s sha256 %s"
+              % (subject.repository, subject.ref, subject.commit, subject.sha256))
     ADMISSION_ROOT.mkdir(parents=True, exist_ok=True)
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(NoticeCollectorCharacterization)
+    if not arguments.legacy:
+        cases = list(suite)
+        kept = [case for case in cases if case._testMethodName not in LEGACY_ONLY_TESTS]
+        dropped = sorted(case._testMethodName for case in cases if case._testMethodName in LEGACY_ONLY_TESTS)
+        suite = unittest.TestSuite(kept)
+        print("legacy-only tests not selected in current mode: %s" % (", ".join(dropped) if dropped else "(none)"))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.wasSuccessful():
         # Disposable synthetic fixtures; failing runs stay on disk for inspection.
