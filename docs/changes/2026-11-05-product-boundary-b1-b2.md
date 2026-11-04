@@ -38,8 +38,11 @@ The stand-ins cover prompt refusal, a lying success prefix with a canary, early 
 Cleanup has to reap the started pid, and a leftover process fails the controller case.
 The allocator counter delegates to the system allocator and is admitted with an 8 MiB hold and a 4 KiB hold.
 Those controller cases are not MCP or extractor results.
-The ignored `standin_worker` entry is only the re-exec target.
-An ignored result is not a product pass.
+The stand-in is the same `product_boundaries` test with `OMNI_PRODUCT_BOUND_STANDIN` set to `refuse`, `echo`, `early-eof`, or `hang`.
+That child exits in the named observer role and is counted only as a controller case.
+With the variable unset, the test runs admission and the product oracle.
+This target has no ignored test and no empty test.
+The earlier ignored helper remains only on the preserved receipt commit.
 
 ## Case Count
 

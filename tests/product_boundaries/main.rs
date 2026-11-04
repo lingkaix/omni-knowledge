@@ -661,10 +661,9 @@ fn standin(mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
         .arg("--exact")
-        .arg("--ignored")
         .arg("--nocapture")
         .arg("--test-threads=1")
-        .arg("standin_worker")
+        .arg("product_boundaries")
         .env("OMNI_PRODUCT_BOUND_STANDIN", mode)
         .process_group(0);
     command
@@ -1199,50 +1198,8 @@ fn run_product(cases: &mut Vec<Outcome>) {
     }
 }
 
-#[test]
-fn product_boundaries() {
-    println!(
-        "PRERECORD frame_limit={MCP_FRAME_LIMIT} overshoot={FRAME_OVERSHOOT} caller_limit={CALLER_LIMIT} shared_len={SHARED_LEN} references={REFERENCE_COUNT} expansion={REFERENCED_EXPANSION} factor={WORKING_FACTOR} host_copy_stop={HOST_COPY_STOP} max_text_bytes={}",
-        omni_knowledge::MAX_TEXT_BYTES
-    );
-    println!("BINARY {}", env!("CARGO_BIN_EXE_omni"));
-    if let Err(error) = run_admission() {
-        panic!("instrument admission failed: {error}");
-    }
-    let mut cases = Vec::new();
-    run_product(&mut cases);
-    let pass = cases.iter().filter(|case| case.state == "PASS").count();
-    let fail = cases.iter().filter(|case| case.state == "FAIL").count();
-    let not_run = cases.iter().filter(|case| case.state == "NOT_RUN").count();
-    println!("SUMMARY product_pass={pass} product_fail={fail} product_not_run={not_run}");
-    let failed = cases
-        .iter()
-        .filter(|case| case.state == "FAIL")
-        .map(|case| format!("{}:{}:{}", case.kind, case.name, case.detail))
-        .collect::<Vec<_>>()
-        .join(",");
-    let blocked = cases
-        .iter()
-        .filter(|case| case.state == "NOT_RUN")
-        .map(|case| format!("{}:{}:{}", case.kind, case.name, case.detail))
-        .collect::<Vec<_>>()
-        .join(",");
-    if !failed.is_empty() {
-        panic!("product boundary cases failed: {failed}");
-    }
-    if !blocked.is_empty() {
-        panic!("setup blocked product cases: {blocked}");
-    }
-}
-
-#[test]
-#[ignore = "stand-in instrument entry; not a product result"]
-fn standin_worker() {
-    let mode = match std::env::var("OMNI_PRODUCT_BOUND_STANDIN") {
-        Ok(mode) => mode,
-        Err(_) => std::process::exit(78),
-    };
-    match mode.as_str() {
+fn run_standin_mode(mode: &str) -> ! {
+    match mode {
         "refuse" => {
             let _ = std::io::stdout().write_all(b"refused\n");
             let _ = std::io::stdout().flush();
@@ -1281,5 +1238,44 @@ fn standin_worker() {
             std::process::exit(0);
         }
         _ => std::process::exit(78),
+    }
+}
+
+#[test]
+fn product_boundaries() {
+    if let Ok(mode) = std::env::var("OMNI_PRODUCT_BOUND_STANDIN") {
+        run_standin_mode(&mode);
+    }
+    println!(
+        "PRERECORD frame_limit={MCP_FRAME_LIMIT} overshoot={FRAME_OVERSHOOT} caller_limit={CALLER_LIMIT} shared_len={SHARED_LEN} references={REFERENCE_COUNT} expansion={REFERENCED_EXPANSION} factor={WORKING_FACTOR} host_copy_stop={HOST_COPY_STOP} max_text_bytes={}",
+        omni_knowledge::MAX_TEXT_BYTES
+    );
+    println!("BINARY {}", env!("CARGO_BIN_EXE_omni"));
+    if let Err(error) = run_admission() {
+        panic!("instrument admission failed: {error}");
+    }
+    let mut cases = Vec::new();
+    run_product(&mut cases);
+    let pass = cases.iter().filter(|case| case.state == "PASS").count();
+    let fail = cases.iter().filter(|case| case.state == "FAIL").count();
+    let not_run = cases.iter().filter(|case| case.state == "NOT_RUN").count();
+    println!("SUMMARY product_pass={pass} product_fail={fail} product_not_run={not_run}");
+    let failed = cases
+        .iter()
+        .filter(|case| case.state == "FAIL")
+        .map(|case| format!("{}:{}:{}", case.kind, case.name, case.detail))
+        .collect::<Vec<_>>()
+        .join(",");
+    let blocked = cases
+        .iter()
+        .filter(|case| case.state == "NOT_RUN")
+        .map(|case| format!("{}:{}:{}", case.kind, case.name, case.detail))
+        .collect::<Vec<_>>()
+        .join(",");
+    if !failed.is_empty() {
+        panic!("product boundary cases failed: {failed}");
+    }
+    if !blocked.is_empty() {
+        panic!("setup blocked product cases: {blocked}");
     }
 }
