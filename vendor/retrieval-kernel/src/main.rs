@@ -386,18 +386,39 @@ fn cpu_limit() -> Result<()> {
 }
 /// Preserve stricter inherited limits. Failure to install a limit is an explicit startup failure.
 fn set_limit(resource: Resource, ceiling: u64) -> Result<()> {
+    let name = match resource {
+        libc::RLIMIT_AS => "RLIMIT_AS",
+        libc::RLIMIT_FSIZE => "RLIMIT_FSIZE",
+        libc::RLIMIT_CPU => "RLIMIT_CPU",
+        _ => "unknown",
+    };
     // SAFETY: getrlimit/setrlimit receive valid initialized resource structures.
     let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
     if unsafe { libc::getrlimit(resource, &mut limit) } != 0 {
-        return Err(error("unavailable", "process resource limits unavailable"));
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        return Err(error(
+            "unavailable",
+            &format!(
+                "process resource limits unavailable: getrlimit({name}/{resource}) errno={errno:?} ceiling={ceiling}"
+            ),
+        ));
     }
+    let inherited_soft = limit.rlim_cur;
+    let inherited_hard = limit.rlim_max;
     limit.rlim_cur = if resource == libc::RLIMIT_CPU {
         ceiling.min(limit.rlim_max)
     } else {
         ceiling.min(limit.rlim_cur).min(limit.rlim_max)
     };
     if unsafe { libc::setrlimit(resource, &limit) } != 0 {
-        return Err(error("unavailable", "process resource enforcement failed"));
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        return Err(error(
+            "unavailable",
+            &format!(
+                "process resource enforcement failed: setrlimit({name}/{resource}) errno={errno:?} inherited_soft={inherited_soft} inherited_hard={inherited_hard} requested_soft={} requested_hard={} ceiling={ceiling}",
+                limit.rlim_cur, limit.rlim_max,
+            ),
+        ));
     }
     Ok(())
 }
