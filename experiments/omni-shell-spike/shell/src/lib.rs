@@ -16,6 +16,7 @@ use nsh_core::desktop::{MenuRole, WindowFrame};
 use nsh_core::element::desktop::{
     MenuItem, close_window, set_application_menu, set_frame, set_title,
 };
+use nsh_core::element::input;
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 

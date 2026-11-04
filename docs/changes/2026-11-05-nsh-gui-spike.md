@@ -46,3 +46,5 @@ The Linux x86_64 job failed while compiling this experiment's build script, befo
 `rustc` reported `E0716` at `experiments/omni-shell-spike/shell/build.rs`: `OUT_DIR` was borrowed from a temporary `String`.
 That is a compile error in this spike, not an NSH messaging, build, or IME failure, and not a reason to switch to Tauri.
 The following commit binds `OUT_DIR` for the life of the script. It does not claim that the corrected package succeeds.
+
+Run `41894360411` at `2c9b61a` reached the shell library and stopped with `E0425`: `input` is not in `nsh_core::prelude`. The constructor is `nsh_core::element::input`. No window ran. The import fix does not claim a CI result.
