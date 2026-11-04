@@ -1,0 +1,7 @@
+{
+  "name": "Omni Shell Spike",
+  "id": "dev.omniknowledge.shell-spike",
+  "rust": ".",
+  "root": "Shell",
+  "appearance": "light"
+}

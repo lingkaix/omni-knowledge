@@ -1,0 +1,19 @@
+{
+  "name": "omni-shell-spike-ui",
+  "private": true,
+  "type": "module",
+  "description": "WebView host for the vendored @openkit/knowledge-ui package. The host is not a second browser.",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-aria-components": "1.19.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "5.1.0",
+    "esbuild": "0.25.12",
+    "vite": "7.1.12"
+  }
+}

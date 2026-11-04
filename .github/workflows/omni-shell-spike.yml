@@ -1,0 +1,272 @@
+name: Omni shell spike
+
+on:
+  push:
+    branches: [omni-nsh-spike]
+    paths:
+      - 'experiments/omni-shell-spike/**'
+      - '.github/workflows/omni-shell-spike.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omni-shell-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: '1'
+
+jobs:
+  linux:
+    name: Linux x86_64 NSH spike
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check the runner and install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          uname -a
+          unset CARGO_TARGET_DIR
+          rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
+          rustup toolchain install "$rust" --profile minimal
+          rustup override set "$rust"
+          rustc --version
+          cargo --version
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgtk-4-dev clang libclang-dev pkg-config libwebkitgtk-6.0-dev \
+            xvfb xdotool ibus ibus-libpinyin python3-gi gir1.2-gtk-4.0 \
+            libxkbcommon-dev ca-certificates curl xz-utils
+      - name: Install Node 22 when the runner Node is older
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 - <<'PY'
+          import shutil, subprocess, sys
+          node = shutil.which("node")
+          if not node:
+              sys.exit(1)
+          raw = subprocess.check_output([node, "-v"], text=True).strip().lstrip("v")
+          parts = [int(x) for x in raw.split(".")[:2]]
+          ok = parts[0] > 22 or (parts[0] == 22 and parts[1] >= 12) or (parts[0] == 20 and parts[1] >= 19)
+          sys.exit(0 if ok else 1)
+          PY
+          then
+            node -v
+            exit 0
+          fi
+          version=v22.21.0
+          curl -fsSL -o "$RUNNER_TEMP/node-SHASUMS256.txt" "https://nodejs.org/dist/$version/SHASUMS256.txt"
+          curl -fsSL -o "$RUNNER_TEMP/node.tar.xz" "https://nodejs.org/dist/$version/node-$version-linux-x64.tar.xz"
+          (cd "$RUNNER_TEMP" && grep "node-$version-linux-x64.tar.xz" node-SHASUMS256.txt | sha256sum -c)
+          tar -xJf "$RUNNER_TEMP/node.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-$version-linux-x64/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/node-$version-linux-x64/bin/node" -v
+      - name: Install pinned NSH 0.4.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o "$RUNNER_TEMP/nsh.tar.gz" \
+            https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-linux-x86_64.tar.gz
+          echo "8806121aebf40bb51f8fb6aa703722fbb01253f9a435759c18d53beece1ec976  $RUNNER_TEMP/nsh.tar.gz" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/nsh"
+          tar -xzf "$RUNNER_TEMP/nsh.tar.gz" -C "$RUNNER_TEMP/nsh"
+          bin=$(find "$RUNNER_TEMP/nsh" -type f -name nsh | head -n 1)
+          test -n "$bin"
+          chmod +x "$bin"
+          echo "$(dirname "$bin")" >> "$GITHUB_PATH"
+          "$bin" --version
+      - name: Build the WebView host
+        shell: bash
+        working-directory: experiments/omni-shell-spike/ui
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          test -f dist/index.html
+          test -f dist/main.js
+          grep -q "knowledge-ui" dist/main.js
+          grep -q "Load earlier" dist/main.js
+      - name: Package the Linux spike
+        shell: bash
+        working-directory: experiments/omni-shell-spike/shell
+        run: |
+          set -euo pipefail
+          unset CARGO_TARGET_DIR
+          nsh package --target linux
+          test -f ".nsh/out/Omni Shell Spike.tar.gz"
+          test -x ".nsh/out/Omni Shell Spike/OmniShellSpike"
+          file ".nsh/out/Omni Shell Spike/OmniShellSpike"
+      - name: Record Linux artifact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/spike-linux"
+          mkdir -p "$stage"
+          cp "experiments/omni-shell-spike/shell/.nsh/out/Omni Shell Spike.tar.gz" "$stage/OmniShellSpike-linux-x86_64.tar.gz"
+          cp experiments/omni-shell-spike/NOTICES.md "$stage/NOTICES.md"
+          cp experiments/omni-shell-spike/vendor/NSH-LICENSE-APACHE-2.0 "$stage/NSH-LICENSE-APACHE-2.0"
+          cp experiments/omni-shell-spike/vendor/openkit-2f031885/LICENSE "$stage/OPENKIT-LICENSE"
+          tar -tzf "$stage/OmniShellSpike-linux-x86_64.tar.gz" > "$stage/tar-listing.txt"
+          python3 - <<'PY'
+          import hashlib, pathlib
+          stage = pathlib.Path("dist/spike-linux")
+          lines = []
+          for path in sorted(stage.iterdir()):
+              if not path.is_file():
+                  continue
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              lines.append(f"{digest}  {path.name}  {path.stat().st_size}")
+          (stage / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+          print((stage / "SHA256SUMS").read_text())
+          PY
+      - name: Observe probe, IME, drop, and dialog under Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset DISPLAY || true
+          export OMNI_SHELL_SPIKE_OBSERVE=1
+          bin="$PWD/experiments/omni-shell-spike/shell/.nsh/out/Omni Shell Spike/OmniShellSpike"
+          fail=0
+          for mode in probe ime drop dialog; do
+            if ! bash experiments/omni-shell-spike/scripts/linux-observe.sh "$mode" "$bin" "$RUNNER_TEMP/spike-evidence"; then
+              echo "mode $mode returned non-zero"
+              fail=1
+            fi
+          done
+          mkdir -p dist/spike-linux/evidence
+          cp -a "$RUNNER_TEMP/spike-evidence/." dist/spike-linux/evidence/
+          exit "$fail"
+      - name: Upload Linux spike archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omni-shell-spike-linux-x86_64-${{ github.sha }}
+          path: dist/spike-linux/
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS ARM64 NSH spike
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check the runner and install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          uname -a
+          unset CARGO_TARGET_DIR
+          rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
+          rustup toolchain install "$rust" --profile minimal
+          rustup override set "$rust"
+          rustc --version
+          cargo --version
+      - name: Install Node 22 when the runner Node is older
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 - <<'PY'
+          import shutil, subprocess, sys
+          node = shutil.which("node")
+          if not node:
+              sys.exit(1)
+          raw = subprocess.check_output([node, "-v"], text=True).strip().lstrip("v")
+          parts = [int(x) for x in raw.split(".")[:2]]
+          ok = parts[0] > 22 or (parts[0] == 22 and parts[1] >= 12) or (parts[0] == 20 and parts[1] >= 19)
+          sys.exit(0 if ok else 1)
+          PY
+          then
+            node -v
+            exit 0
+          fi
+          version=v22.21.0
+          curl -fsSL -o "$RUNNER_TEMP/node-SHASUMS256.txt" "https://nodejs.org/dist/$version/SHASUMS256.txt"
+          curl -fsSL -o "$RUNNER_TEMP/node.tar.gz" "https://nodejs.org/dist/$version/node-$version-darwin-arm64.tar.gz"
+          (cd "$RUNNER_TEMP" && grep "node-$version-darwin-arm64.tar.gz" node-SHASUMS256.txt | shasum -a 256 -c)
+          tar -xzf "$RUNNER_TEMP/node.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-$version-darwin-arm64/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/node-$version-darwin-arm64/bin/node" -v
+      - name: Install pinned NSH 0.4.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o "$RUNNER_TEMP/nsh.tar.gz" \
+            https://github.com/longbridge/nsh/releases/download/v0.4.0/nsh-macos-arm64.tar.gz
+          echo "f63c3d57c31b28c9b34227aac81f099d1e0e61f1db552a6ec5127d114eaf59cb  $RUNNER_TEMP/nsh.tar.gz" | shasum -a 256 -c
+          mkdir -p "$RUNNER_TEMP/nsh"
+          tar -xzf "$RUNNER_TEMP/nsh.tar.gz" -C "$RUNNER_TEMP/nsh"
+          bin=$(find "$RUNNER_TEMP/nsh" -type f -name nsh | head -n 1)
+          test -n "$bin"
+          chmod +x "$bin"
+          echo "$(dirname "$bin")" >> "$GITHUB_PATH"
+          "$bin" --version
+      - name: Build the WebView host
+        shell: bash
+        working-directory: experiments/omni-shell-spike/ui
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          test -f dist/index.html
+          test -f dist/main.js
+          grep -q "knowledge-ui" dist/main.js
+          grep -q "Load earlier" dist/main.js
+      - name: Package the macOS spike and an unsigned disk image
+        shell: bash
+        working-directory: experiments/omni-shell-spike/shell
+        run: |
+          set -euo pipefail
+          unset CARGO_TARGET_DIR
+          nsh package --target macos
+          test -d ".nsh/out/Omni Shell Spike.app"
+          file ".nsh/out/Omni Shell Spike.app/Contents/MacOS/OmniShellSpike"
+          # nsh ad-hoc signs the app. This disk image is not notarized.
+          hdiutil create \
+            -volname "Omni Shell Spike" \
+            -srcfolder ".nsh/out/Omni Shell Spike.app" \
+            -ov -format UDZO \
+            "$RUNNER_TEMP/OmniShellSpike-macos-arm64-unsigned-adhoc.dmg"
+      - name: Record macOS artifact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/spike-macos"
+          mkdir -p "$stage"
+          ditto "experiments/omni-shell-spike/shell/.nsh/out/Omni Shell Spike.app" "$stage/Omni Shell Spike.app"
+          cp "$RUNNER_TEMP/OmniShellSpike-macos-arm64-unsigned-adhoc.dmg" "$stage/OmniShellSpike-macos-arm64-unsigned-adhoc.dmg"
+          cp experiments/omni-shell-spike/NOTICES.md "$stage/NOTICES.md"
+          cp experiments/omni-shell-spike/vendor/NSH-LICENSE-APACHE-2.0 "$stage/NSH-LICENSE-APACHE-2.0"
+          cp experiments/omni-shell-spike/vendor/openkit-2f031885/LICENSE "$stage/OPENKIT-LICENSE"
+          python3 - <<'PY'
+          import hashlib, pathlib
+          stage = pathlib.Path("dist/spike-macos")
+          lines = []
+          for path in sorted(stage.rglob("*")):
+              if not path.is_file():
+                  continue
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              lines.append(f"{digest}  {path.relative_to(stage)}  {path.stat().st_size}")
+          (stage / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+          print((stage / "SHA256SUMS").read_text())
+          PY
+          codesign -dv --verbose=2 "dist/spike-macos/Omni Shell Spike.app" || true
+      - name: Upload macOS spike archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omni-shell-spike-macos-arm64-${{ github.sha }}
+          path: dist/spike-macos/
+          if-no-files-found: error
+          retention-days: 14

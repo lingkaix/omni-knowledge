@@ -1,0 +1,12 @@
+[package]
+name = "omni-shell-fake"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Synthetic KnowledgeClient fixture for the NSH shell spike. Not a service."
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+serde_json = "1"

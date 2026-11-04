@@ -1,0 +1,93 @@
+{
+  "upstream": "https://github.com/lingkaix/openkit",
+  "commit": "2f031885c45c68f1a5674f4ec94430f5ac831eb6",
+  "retrievedBy": "git fetch --depth 1 origin 2f031885c45c68f1a5674f4ec94430f5ac831eb6",
+  "license": "Apache-2.0",
+  "licenseFile": "LICENSE",
+  "package": "packages/knowledge-ui",
+  "note": "Exact tree bytes. The host resolves packages/knowledge-ui/src/index.ts. No file in this snapshot is rewritten.",
+  "contractSha256": {
+    "packages/knowledge-ui/src/client.ts": "64a1cbbed707fe01aea259f6d42b957ced16c3a1d7d348fd73221dfcd4e20d8c",
+    "packages/knowledge-ui/README.md": "7cf170f4e1f389e6deab02dec8dee39c796929d43d2a4acbd67cd514f3b562d1"
+  },
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "gitBlobSha1": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64"
+    },
+    {
+      "path": "packages/knowledge-ui/README.md",
+      "bytes": 1502,
+      "sha256": "7cf170f4e1f389e6deab02dec8dee39c796929d43d2a4acbd67cd514f3b562d1",
+      "gitBlobSha1": "f35d160f88fcbcc89f14b9762833cbb09ce6b3d9"
+    },
+    {
+      "path": "packages/knowledge-ui/package.json",
+      "bytes": 1003,
+      "sha256": "53db64faec747b38890ad980a70066bffbbe68e952f4b5c1f39fddc16eeb4ffa",
+      "gitBlobSha1": "e9de65266a57f3fc9fc8dda8ea978bf8eb2a9a80"
+    },
+    {
+      "path": "packages/knowledge-ui/src/KnowledgeBrowser.test.tsx",
+      "bytes": 10424,
+      "sha256": "65cc91ff2196f758d47db776b4341f214bd2880f80174312949735435de87094",
+      "gitBlobSha1": "d532e5ebd829b360a1689270fb0923c1c49a7366"
+    },
+    {
+      "path": "packages/knowledge-ui/src/KnowledgeBrowser.tsx",
+      "bytes": 9684,
+      "sha256": "32f025c25fe83dd351075b6927d8f28bb1f940188928763b178052e2f2eb5af1",
+      "gitBlobSha1": "0089c54de3cf794b6b88d0d016e6d27b43cb0b09"
+    },
+    {
+      "path": "packages/knowledge-ui/src/boundary.test.ts",
+      "bytes": 4185,
+      "sha256": "676970fc1ae653de318e07e57a6aa6fbfe9f8d96991ee25ebf1ef1106fede8f2",
+      "gitBlobSha1": "feb75db4b39c5e3c4af600b00f61c28eaf512a15"
+    },
+    {
+      "path": "packages/knowledge-ui/src/client.ts",
+      "bytes": 1993,
+      "sha256": "64a1cbbed707fe01aea259f6d42b957ced16c3a1d7d348fd73221dfcd4e20d8c",
+      "gitBlobSha1": "6037af457039190dd93b7d4ba2de09e0c478e18f"
+    },
+    {
+      "path": "packages/knowledge-ui/src/css.d.ts",
+      "bytes": 24,
+      "sha256": "da5bf71d48cf909584a01c80b445f730507068f5b34c920f352e2bfcf0315e4c",
+      "gitBlobSha1": "35306c6fc9aed088a742e2337d44bbf877c6ae8e"
+    },
+    {
+      "path": "packages/knowledge-ui/src/index.ts",
+      "bytes": 355,
+      "sha256": "7d9f32bca2c859574a9ec2cf859e7959ee865715a9528ad388343ac806663208",
+      "gitBlobSha1": "e9a95f1532b655b5dee1c5f13193145f9f6167b4"
+    },
+    {
+      "path": "packages/knowledge-ui/src/knowledge.css",
+      "bytes": 1539,
+      "sha256": "b0520547c23a54ab23aeb30d039eb9db2af397800226e1282b7a754e4840fa4b",
+      "gitBlobSha1": "0358f1a9c569b20a5bdcbee620f92ec7c465438d"
+    },
+    {
+      "path": "packages/knowledge-ui/tsconfig.build.json",
+      "bytes": 355,
+      "sha256": "a92a37c599e90cea3fba87be7baa1be521eeae37b4e5e1fa6dd8c6b6b081ede7",
+      "gitBlobSha1": "bbd924a5263b2f997e47a627482c191c679b2286"
+    },
+    {
+      "path": "packages/knowledge-ui/tsconfig.json",
+      "bytes": 273,
+      "sha256": "60025b9405a3b8ae2926112e7401754109f1571e820fb13c3971d6cec2228955",
+      "gitBlobSha1": "d63a42fc0d81ad37f2c7fd2b17af710ebe50d126"
+    },
+    {
+      "path": "packages/knowledge-ui/vitest.config.ts",
+      "bytes": 380,
+      "sha256": "b5fa2a2dcaccec61e9148a83d44f5201942fa9e8fe5d8d8dd5c808033776084c",
+      "gitBlobSha1": "f9bfb6b399d29e29eb84a48d56c2a60f8c79b8cc"
+    }
+  ]
+}

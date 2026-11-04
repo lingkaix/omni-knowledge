@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Omni shell spike</title>
+    <style>
+      :root {
+        --text-color-default: #17211b;
+        --text-color-primary: #10261c;
+        --text-color-secondary: #3d5248;
+        --surface-page: #f4f7f4;
+        --surface-card: #ffffff;
+        --border-color-default: #c5d1c8;
+        --separator-color: #d5e0d8;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #f4f7f4;
+        color: #17211b;
+        font-family: sans-serif;
+      }
+      .spike-ime {
+        display: block;
+        padding: 8px 12px;
+        background: #e7f0e8;
+        border-bottom: 1px solid #c5d1c8;
+      }
+      #webview-ime {
+        min-width: 16rem;
+        min-height: 2.5rem;
+        font-size: 1.1rem;
+      }
+      #root {
+        min-height: calc(100% - 3.5rem);
+      }
+      #spike-status {
+        margin: 8px 12px;
+        color: #3d5248;
+      }
+    </style>
+  </head>
+  <body>
+    <label class="spike-ime">
+      WebView IME
+      <input id="webview-ime" autocomplete="off" />
+    </label>
+    <p id="spike-status">Waiting for the native bridge.</p>
+    <div id="root"></div>
+    <script>
+      window.__spikeQueue = [];
+      window.addEventListener("message", function (event) {
+        var data = typeof event.data === "string" ? event.data : "";
+        if (!data) return;
+        if (window.__spikeOnMessage) window.__spikeOnMessage(data);
+        else window.__spikeQueue.push(data);
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
