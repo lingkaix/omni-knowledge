@@ -1380,6 +1380,20 @@ fn expected_segment(identity: &ModelIdentity, rows: &[VectorRow]) -> Result<Stri
     Ok(format!("{:x}", hash.finalize()))
 }
 
+impl ModelIdentity {
+    /// Apply the SAME dimension/finite/nonzero/declared-normalization oracle used by disk rows.
+    /// Native producers call this before exposing a provider vector; identity facts grant nothing.
+    pub fn check_vector(&self, vector: &[f32]) -> Result<(), VectorError> {
+        if valid_vector(self, vector) {
+            Ok(())
+        } else {
+            Err(VectorError::Identity(
+                "provider vector/model normalization".into(),
+            ))
+        }
+    }
+}
+
 fn valid_vector(identity: &ModelIdentity, vector: &[f32]) -> bool {
     if vector.len() != identity.dimension || vector.iter().any(|v| !v.is_finite()) {
         return false;

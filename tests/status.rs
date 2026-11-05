@@ -491,6 +491,27 @@ fn native_publication_gate_is_checked_without_waiting() {
 /// Shared admission pressure means unknown freshness, not broken state or always-current fallback.
 #[test]
 fn status_memory_contention_is_checking_and_recovers() {
+    // This oracle deliberately drains ALL otherwise-free credit. Unrelated parallel tests
+    // can release prior loans (or receive real Waiting), invalidating that pressure premise.
+    // Keep ONE account in its own instrument process; preserve every assertion below.
+    if std::env::var_os("OMNI_STATUS_PRESSURE_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "status_memory_contention_is_checking_and_recovers",
+                "--nocapture",
+            ])
+            .env("OMNI_STATUS_PRESSURE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated pressure instrument: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use knowledge_core::{
         admission::{Account, Decision, Origin},
         jobs::Reservation,

@@ -78,6 +78,51 @@ struct Selected {
 #[derive(Clone)]
 pub struct Selection(Arc<Mutex<Selected>>);
 
+/// Read-only native selection/current-configuration guard issued ONLY by that actual owner.
+/// Not source/path, destination/write or transport authority; never construct it from DTOs.
+#[derive(Clone)]
+pub struct SelectionLease {
+    selection: Selection,
+    revision: u64,
+}
+impl SelectionLease {
+    fn check_locked(&self, selected: &Selected) -> Result<(), ErrorCode> {
+        if selected.revision != self.revision || !selected.active {
+            return Err(ErrorCode::NotExposed);
+        }
+        let metadata = selected
+            .root
+            .metadata()
+            .map_err(|_| ErrorCode::NotExposed)?;
+        if !metadata.is_dir()
+            || (metadata.dev(), metadata.ino()) != selected.identity
+            || selected
+                .current_context
+                .as_ref()
+                .is_some_and(|check| !check(&selected.root))
+        {
+            return Err(ErrorCode::NotExposed);
+        }
+        Ok(())
+    }
+    /// Check actual retained root/namespace/configuration epoch, not a label/hash/boolean.
+    pub fn check(&self) -> Result<(), ErrorCode> {
+        let selected = self.selection.0.lock().map_err(|_| ErrorCode::Internal)?;
+        self.check_locked(&selected)
+    }
+    /// Require the SAME opaque selection AND epoch in the live actual-command Permit.
+    /// Equal library IDs in another authority/selection never substitute for this native owner.
+    pub fn check_permit(&self, permit: &Permit) -> Result<(), ErrorCode> {
+        permit.check()?;
+        if !permit.revisions.iter().any(|(selection, revision)| {
+            Arc::ptr_eq(&selection.0, &self.selection.0) && *revision == self.revision
+        }) {
+            return Err(ErrorCode::NotExposed);
+        }
+        self.check()
+    }
+}
+
 /// Authority instance shared only with its separately retained native owner capability.
 #[derive(Clone)]
 pub struct NativeAuthority {
@@ -190,6 +235,38 @@ impl NativeAuthority {
 }
 
 impl Owner {
+    /// Pin the current native selection for a host-owned configuration/package guard.
+    /// This gives no transport effect or arbitrary path authority. Caller prepays retained metadata.
+    pub fn pin_selection(&self, selection: &Selection) -> Result<SelectionLease, ErrorCode> {
+        selection.require_owner(&self.instance)?;
+        let selected = selection.0.lock().map_err(|_| ErrorCode::Internal)?;
+        let lease = SelectionLease {
+            selection: selection.clone(),
+            revision: selected.revision,
+        };
+        lease.check_locked(&selected)?;
+        Ok(lease)
+    }
+    /// Commit one native owner's ALREADY VALIDATED configuration choice, compare-and-advancing
+    /// the same selection epoch without copying/resetting current policy/exclusions. Failed model
+    /// preparation leaves the previous epoch untouched. Old permits/guards cannot resurrect.
+    pub fn revise_selection(&self, expected: &SelectionLease) -> Result<SelectionLease, ErrorCode> {
+        expected.selection.require_owner(&self.instance)?;
+        let mut selected = expected
+            .selection
+            .0
+            .lock()
+            .map_err(|_| ErrorCode::Internal)?;
+        expected.check_locked(&selected)?;
+        selected.revision = selected
+            .revision
+            .checked_add(1)
+            .ok_or(ErrorCode::Internal)?;
+        Ok(SelectionLease {
+            selection: expected.selection.clone(),
+            revision: selected.revision,
+        })
+    }
     /// Bind an actual selected directory descriptor and explicit current local policy.
     /// ID is a label only; the descriptor, instance and owner capability establish the selection.
     pub fn select(&self, id: Id, root: File, policy: LocalPolicy) -> Result<Selection, ErrorCode> {

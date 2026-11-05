@@ -36,7 +36,10 @@ impl NativeSource {
         };
         anyhow::ensure!(
             library_id == &self.library
-                && *recipe == wire::ProcessRecipe::Extract
+                && matches!(
+                    *recipe,
+                    wire::ProcessRecipe::Extract | wire::ProcessRecipe::Embed
+                )
                 && source_ids
                     .iter()
                     .any(|id| id.as_str().strip_prefix("source-") == Some(self.source.as_str())),
@@ -51,6 +54,28 @@ impl NativeSource {
                 && actual.max_memory_bytes <= budget.max_memory_bytes.get(),
             "native processing exceeds the actual admitted request budget"
         );
+        Ok(())
+    }
+    pub(super) fn embedding_scope(&self, claim: &Claim) -> Result<()> {
+        self.indexed_extract_scope(claim, 0)?;
+        anyhow::ensure!(
+            matches!(
+                self.permit.admitted_command().map_err(refused_error)?,
+                wire::Command::Process {
+                    recipe: wire::ProcessRecipe::Embed,
+                    ..
+                }
+            ),
+            "actual Process/Embed intention required before transmitting source text"
+        );
+        Ok(())
+    }
+    pub(super) fn check_model_selection(
+        &self,
+        lease: &omni_service::authority::SelectionLease,
+    ) -> Result<()> {
+        self.check()?;
+        lease.check_permit(&self.permit).map_err(refused_error)?;
         Ok(())
     }
     pub(super) fn open(
@@ -226,6 +251,9 @@ impl NativeSource {
         fingerprint.update(include_bytes!("source.rs"));
         fingerprint.update(include_bytes!("extraction.rs"));
         fingerprint.update(include_bytes!("held.rs"));
+        fingerprint.update(include_bytes!("models.rs"));
+        fingerprint.update(include_bytes!("../../crates/omni-service/src/authority.rs"));
+        fingerprint.update(include_bytes!("../../crates/omni-service/src/runtime.rs"));
         fingerprint.update(include_bytes!(
             "../../crates/knowledge-processing/src/held.rs"
         ));
@@ -240,7 +268,7 @@ impl NativeSource {
         })
     }
 }
-fn refused_error(code: wire::ErrorCode) -> anyhow::Error {
+pub(super) fn refused_error(code: wire::ErrorCode) -> anyhow::Error {
     anyhow::anyhow!("native source refused: {code:?}")
 }
 

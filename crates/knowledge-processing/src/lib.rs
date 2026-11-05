@@ -7,6 +7,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod admission;
+pub mod embedding;
 pub mod epub;
 pub mod extract;
 pub mod funding;
