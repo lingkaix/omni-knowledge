@@ -390,9 +390,9 @@ fn alias_capacity_is_bounded_and_retirement_forgets_every_alias() {
     assert_ne!(fresh.job, base.job, "retired job generation is not reused");
 }
 
-// Oversized borrowed metadata is refused before queue-owned text is retained.
+// Oversized borrowed metadata is refused without additional retained queue text.
 #[test]
-fn descriptor_capacity_refuses_borrowed_metadata_before_copying() {
+fn descriptor_capacity_refuses_oversized_metadata_without_retaining_text() {
     let facts = Facts::new("ctx", "lib", None, "source");
     let closed = Queue::new(limits(1, 1, 64, 4, 4_096, 4_096)).expect("bounds valid");
     assert_eq!(
@@ -608,7 +608,11 @@ fn offline_settlement_waits_for_explicit_bounded_reconnect() {
     let now = Instant::now();
 
     let submitted = queue
-        .submit(attempts(submission(&facts, "op", "job"), 2))
+        .submit(reserving(
+            attempts(submission(&facts, "op", "job"), 2),
+            200,
+            100,
+        ))
         .expect("work admitted");
     assert_eq!(
         queue
@@ -626,7 +630,11 @@ fn offline_settlement_waits_for_explicit_bounded_reconnect() {
     assert_eq!(usage.pending, 0);
     assert_eq!(usage.unsettled, 0);
     assert_eq!(usage.waiting_offline, 1);
-    assert_eq!(usage.reserved, no_reservation());
+    assert_eq!(
+        usage.reserved,
+        no_reservation(),
+        "the first offline settlement released its charges"
+    );
 
     queue
         .reconnect(submitted.job, facts.key())
@@ -635,20 +643,48 @@ fn offline_settlement_waits_for_explicit_bounded_reconnect() {
 
     let second = queue.claim(now).expect("usable").expect("reconnected job");
     assert_eq!(
+        queue.usage().expect("usable").reserved,
+        Reservation {
+            memory_bytes: 200,
+            temporary_bytes: 100,
+        },
+        "the reconnected claim holds its promise"
+    );
+    assert_eq!(
         settle_state(&queue, &second, &facts, Outcome::Offline),
-        State::WaitingOffline
+        State::Finished(Outcome::Offline),
+        "the final permitted attempt is terminal"
     );
     let snapshot = queue.status(submitted.job, facts.key()).expect("retained");
+    assert_eq!(snapshot.state, State::Finished(Outcome::Offline));
     assert_eq!(snapshot.attempts, 2, "attempts are counted per claim");
+    let usage = queue.usage().expect("usable");
+    assert_eq!(usage.pending, 0);
+    assert_eq!(usage.unsettled, 0);
+    assert_eq!(
+        usage.waiting_offline, 0,
+        "exhausted offline work is not waiting"
+    );
+    assert_eq!(
+        usage.reserved,
+        no_reservation(),
+        "final settlement released the charged reservation"
+    );
+
     assert!(
         queue.reconnect(submitted.job, facts.key()).is_err(),
         "reconnect cannot exceed the finite attempt bound"
     );
     assert_eq!(
-        queue.usage().expect("usable").waiting_offline,
-        1,
+        queue.usage().expect("usable"),
+        usage,
         "a refused reconnect changes no accounting"
     );
+    let snapshot_after = queue.status(submitted.job, facts.key()).expect("retained");
+    assert_eq!(snapshot_after.state, snapshot.state);
+    assert_eq!(snapshot_after.attempts, snapshot.attempts);
+    assert_eq!(snapshot_after.reservation, snapshot.reservation);
+    assert_eq!(snapshot_after.deadline, snapshot.deadline);
 }
 
 // Invalid models are terminal and cannot be retried through reconnect.
