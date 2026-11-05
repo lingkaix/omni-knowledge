@@ -7,7 +7,10 @@ use knowledge_core::data::ContentDigest;
 use knowledge_core::data::RelativePath;
 use serde_json::{Map, Number, Value};
 
-pub(crate) fn emit(manifest: &Manifest) -> Result<Vec<u8>, Error> {
+pub(crate) fn emit(manifest: &Manifest, work: &mut crate::Work<'_>) -> Result<Vec<u8>, Error> {
+    let bound = crate::metadata::manifest(manifest).bound()?;
+    let _scratch = crate::preallocate(work, bound)?;
+    crate::charge_fresh(work, bound, 0)?;
     let mut map = Map::new();
     map.insert("capture_window".into(), window(&manifest.window)?);
     map.insert("coverage".into(), coverage(&manifest.coverage)?);
@@ -81,10 +84,11 @@ pub(crate) fn emit(manifest: &Manifest) -> Result<Vec<u8>, Error> {
     canonical_bytes(&Value::Object(map))
 }
 
-pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest, Error> {
-    if bytes.is_empty() || bytes.len() > 1_048_576 {
+pub(crate) fn parse(bytes: &[u8], work: &mut crate::Work<'_>) -> Result<Manifest, Error> {
+    if bytes.is_empty() {
         return Err(Error::Invalid);
     }
+    let _scratch = crate::metadata::parsing(bytes, work)?;
     let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
     if value_depth(&value) > 32 {
         return Err(Error::Invalid);

@@ -16,13 +16,20 @@ Dropping a holding releases nothing. This crate does not `finish` the caller's h
 `apply` calls `SafeApply::apply_text_change` for core text and `SafeApply::install_new` for original bytes.
 Those are the storage-owner operations. This workspace does not contain a committed `knowledge-storage` crate, so this crate does not link `Store::install` and does not write the destination.
 Conflicts and indeterminate results stop the call. Already saved paths are not rolled back here.
+The breaking Rust handoff is `apply(staged, storage, history, work)`.
+Both `SafeApply` methods accept `&mut VerifiedSource` and `&mut Work`, not a staged path.
+Owners must copy with `VerifiedSource::copy_to` into private output and publish only after exact-stream digest/version verification and their own destination authority checks.
+`Staged` retains its directory descriptor and snapshot/operation/conflict binding privately.
+`PLAN` cannot supply new paths or digests: recovery compares it incrementally to a freshly hashed and parsed `MANIFEST`.
+Unknown files, incomplete generations, stale input, and old generations without the binding are preserved on refusal.
 
 ## Git
 
 Consume only the history seam fixed in `2c86db6`: `prepare`, `publish`, `inspect`, and `prepare_confirmation`.
 Publication in that commit checks the confirmed proposal inside the native transaction.
 This crate does not run `git` and does not add a second history engine.
-`GitTransactions::admit_inert_bundle` hands the staged bundle path to that owner.
+`GitTransactions::admit_inert_bundle` hands the verified native source capability and the same `Work` to that owner.
+The owner must copy with `VerifiedSource::copy_to` into its private candidate before any admission effect; a mutable path is no longer source proof.
 `2c86db6` still has no `git bundle verify`. `GitAdmit::Inert` is not a verified import.
 Bundle verification remains required. It is unfinished until history exposes that check on `2c86db6`.
 
@@ -38,6 +45,20 @@ Search of STORED generations and exact float32 vectors remains required. It is u
 `docs/specs/package.md` keeps EPUB as a processing operation, not a snapshot preset.
 The required preset path is `knowledge_processing::read_epub` and `export_epub` at frozen `9a807f9`, in this workspace, without a second writer or a second account.
 That call is unfinished here.
+
+## Concrete Cross-Owner Binding Tasks
+
+These tasks remain obligations, not waivers or claims of a complete M5 delivery.
+Only `knowledge-package` is edited in this change.
+
+| Source owner | Required binding and acceptance |
+| --- | --- |
+| M1 storage owner | Implement `SafeApply::{apply_text_change, install_new}` against its real installation authority, consuming `VerifiedSource::copy_to` with the shared `Work` before the native transaction publishes. Prove destination version/conflict and cancellation with actual `Store::install` when the storage crate is committed; this clone has no such crate. |
+| History owner, seam `2c86db6` | Implement the updated `GitTransactions::admit_inert_bundle` capability handoff and expose genuine bundle verification before import. Keep hooks/filters/remotes inert and preserve unrelated repositories. The current package port does not claim bundle verification. |
+| Signer-policy integration owner | Bind `inspect` signature observations to user/system SSHSIG trust verification over the decoded snapshot digest with namespace `omni-knowledge.snapshot.v1`; do not promote `Unverified` to trust. |
+| Retrieval integration owner | Connect `IndexSet` STORED generations to the kernel Directory provider with first-use digest/version checks and exact float32 query evidence; retain the explicit `kernel_not_wired` fallback until then. |
+| Compatibility integration owner | Replace `v1_import_plan` refusal only when genuine foreign owner/revision/profile inventory and truthful export context exist; prove mappings without invented context. |
+| Processing owner, seam `9a807f9` | Bind `read_epub`/`export_epub` to the service preset operation on P1 admission `d51cdde`, without another writer or account. |
 
 ## Still required
 

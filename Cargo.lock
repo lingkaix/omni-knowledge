@@ -4152,6 +4152,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "knowledge-core",
+ "rustix 1.1.5",
  "serde_json",
  "serde_json_canonicalizer",
  "sha2 0.10.9",

@@ -1,3 +1,5 @@
+mod residual;
+
 use crc32fast::Hasher;
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
@@ -8,7 +10,8 @@ use knowledge_core::jobs::Reservation;
 use knowledge_package::{
     ApplyOutcome, ApplyState, Availability, Bounds, Capture, DigestState, Error, ExternalRef,
     GitAdmit, GitTransactions, IndexCoverage, Input, Method, Preset, Quotas, Role, SafeApply,
-    V1HostContext, V1State, Window, Work, apply, capture, inspect, stage, v1_import_plan,
+    V1HostContext, V1State, VerifiedSource, Window, Work, apply, capture, inspect, stage,
+    v1_import_plan,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -84,30 +87,38 @@ impl SafeApply for Home {
         _: &str,
         path: &RelativePath,
         _: Option<&ContentDigest>,
-        candidate: &Path,
+        candidate: &mut VerifiedSource,
+        work: &mut Work<'_>,
     ) -> Result<ApplyOutcome, Error> {
         self.calls.push(path.as_str().to_owned());
-        place(&self.root, path, candidate, true)
+        place(&self.root, path, candidate, work)
     }
     fn install_new(
         &mut self,
         _: &str,
         path: &RelativePath,
-        candidate: &Path,
+        candidate: &mut VerifiedSource,
+        work: &mut Work<'_>,
     ) -> Result<ApplyOutcome, Error> {
         self.calls.push(path.as_str().to_owned());
-        place(&self.root, path, candidate, false)
+        place(&self.root, path, candidate, work)
     }
 }
 struct HistorySpy {
     calls: u32,
 }
 impl GitTransactions for HistorySpy {
-    fn admit_inert_bundle(&mut self, _: &str, bundle: &Path) -> Result<GitAdmit, Error> {
+    fn admit_inert_bundle(
+        &mut self,
+        _: &str,
+        bundle: &mut VerifiedSource,
+        work: &mut Work<'_>,
+    ) -> Result<GitAdmit, Error> {
         self.calls += 1;
-        let mut file = File::open(bundle).map_err(|_| Error::Io)?;
+        let mut bytes = Vec::new();
+        bundle.copy_to(&mut bytes, work)?;
         let mut header = [0u8; 4];
-        file.read_exact(&mut header).map_err(|_| Error::Io)?;
+        header.copy_from_slice(bytes.get(..4).ok_or(Error::Io)?);
         assert_eq!(&header, b"PACK");
         Ok(GitAdmit::Inert)
     }
@@ -116,10 +127,9 @@ impl GitTransactions for HistorySpy {
 fn place(
     root: &Path,
     path: &RelativePath,
-    candidate: &Path,
-    replace_absent_only: bool,
+    candidate: &mut VerifiedSource,
+    work: &mut Work<'_>,
 ) -> Result<ApplyOutcome, Error> {
-    let _ = replace_absent_only;
     let dest = root.join(path.as_str());
     if dest.exists() {
         return Ok(ApplyOutcome::Conflict);
@@ -127,13 +137,17 @@ fn place(
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|_| Error::Io)?;
     }
-    let bytes = fs::read(candidate).map_err(|_| Error::Io)?;
+    let pending = dest.with_extension("package-pending");
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(dest)
+        .open(&pending)
         .map_err(|_| Error::Io)?;
-    output.write_all(&bytes).map_err(|_| Error::Io)?;
+    candidate.copy_to(&mut output, work)?;
+    output.sync_all().map_err(|_| Error::Io)?;
+    fs::hard_link(&pending, dest).map_err(|_| Error::Io)?;
+    drop(output);
+    fs::remove_file(pending).map_err(|_| Error::Io)?;
     Ok(ApplyOutcome::Saved)
 }
 
@@ -181,6 +195,19 @@ impl<T> std::ops::Deref for Held<T> {
 }
 
 impl<T> Held<T> {
+    /// Use the same retained holding for recovery and native owner copies without another account lock.
+    fn with_work<R>(
+        &mut self,
+        limits: &Bounds,
+        cancel: &AtomicBool,
+        body: impl FnOnce(&T, &mut Work<'_>) -> R,
+    ) -> R {
+        let value = self.value.as_ref().expect("value");
+        let session = self.session.as_mut().expect("session");
+        let mut job = work(limits, &mut session.holding, cancel);
+        body(value, &mut job)
+    }
+
     fn account_open(&self) -> bool {
         self.session
             .as_ref()
@@ -321,7 +348,7 @@ fn roundtrip_preserves_bytes_and_skips_history_index_and_conflicts() {
         }));
     }
     let mut archive = File::open(&dest).unwrap();
-    let staged = run(&limits, &cancel, |job| {
+    let mut staged = run(&limits, &cancel, |job| {
         stage(
             &mut archive,
             job,
@@ -336,7 +363,11 @@ fn roundtrip_preserves_bytes_and_skips_history_index_and_conflicts() {
         calls: vec![],
     };
     let mut git = HistorySpy { calls: 0 };
-    let applied = apply(&staged, &mut home_apply, &mut git).expect("apply");
+    let applied = staged
+        .with_work(&limits, &cancel, |s, job| {
+            apply(s, &mut home_apply, &mut git, job)
+        })
+        .expect("apply");
     assert_eq!(applied.state, ApplyState::Conflict);
     assert_eq!(fs::read(home.join("pages/note.md")).unwrap(), text);
     assert_eq!(fs::read(home.join("pages/keep.md")).unwrap(), b"keep");
@@ -779,7 +810,7 @@ fn stale_complete_generation_is_not_reused() {
             .starts_with(&snapshot)
     );
     let mut archive = File::open(&first).unwrap();
-    let staged = run(&limits, &cancel, |job| {
+    let mut staged = run(&limits, &cancel, |job| {
         stage(&mut archive, job, &private, "op", &[rel("pages/a.md")]).expect("reuse")
     });
     assert_eq!(staged.conflicts.len(), 1);
@@ -798,7 +829,11 @@ fn stale_complete_generation_is_not_reused() {
     };
     fs::create_dir_all(&home.root).unwrap();
     let mut git = HistorySpy { calls: 0 };
-    let applied = apply(&staged, &mut home, &mut git).expect("apply");
+    let applied = staged
+        .with_work(&limits, &cancel, |s, job| {
+            apply(s, &mut home, &mut git, job)
+        })
+        .expect("apply");
     assert_eq!(applied.state, ApplyState::Refused);
     assert!(home.calls.is_empty());
     assert_eq!(fs::read(&core).unwrap(), b"tampered");

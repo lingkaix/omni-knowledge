@@ -8,8 +8,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
-use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipWriter};
 
 const SCRATCH: usize = 8192;
 const WINDOW: u64 = 64 * 1024;
@@ -42,7 +40,17 @@ pub(crate) fn list(file: &mut File, work: &mut Work<'_>) -> Result<Vec<Member>, 
         return Err(Error::Quota);
     }
     note_file(work)?;
+    charge_fresh(
+        work,
+        eocd.entries
+            .checked_mul(std::mem::size_of::<Member>() as u64)
+            .ok_or(Error::TooLarge)?,
+        0,
+    )?;
     let mut members = Vec::new();
+    members
+        .try_reserve_exact(usize::try_from(eocd.entries).map_err(|_| Error::TooLarge)?)
+        .map_err(|_| Error::TooLarge)?;
     let mut cursor = eocd.cd_offset;
     let cd_end = eocd
         .cd_offset
@@ -105,23 +113,8 @@ pub(crate) fn stream(
     if work.expanded > work.bounds.quotas.max_total_expanded {
         return Err(Error::Quota);
     }
+    charge_fresh(work, 64, 0)?;
     Ok(hex(&sha.finalize()))
-}
-
-pub(crate) fn write_zip<W: Write + Seek>(
-    file: W,
-    parts: &[(&str, Method, &[u8])],
-) -> Result<W, Error> {
-    let mut zip = ZipWriter::new(file);
-    for (name, method, bytes) in parts {
-        let options = SimpleFileOptions::default().compression_method(match method {
-            Method::Stored => CompressionMethod::Stored,
-            Method::Deflate => CompressionMethod::Deflated,
-        });
-        zip.start_file(*name, options).map_err(|_| Error::Io)?;
-        zip.write_all(bytes).map_err(|_| Error::Io)?;
-    }
-    zip.finish().map_err(|_| Error::Io)
 }
 
 fn stream_stored(
@@ -222,13 +215,24 @@ fn deliver(work: &mut Work<'_>, out: &mut Out<'_>, chunk: &[u8]) -> Result<(), E
         Out::Drop => Ok(()),
         Out::Keep(buffer) => {
             charge_fresh(work, chunk.len() as u64, 0)?;
+            buffer
+                .try_reserve_exact(chunk.len())
+                .map_err(|_| Error::TooLarge)?;
             buffer.extend_from_slice(chunk);
             Ok(())
         }
         Out::Disk(file) => {
             account(work, 0, chunk.len() as u64)?;
-            file.write_all(chunk).map_err(|_| Error::Io)?;
-            note_written(work, chunk.len() as u64)?;
+            let mut remaining = chunk;
+            while !remaining.is_empty() {
+                gate(work)?;
+                let n = file.write(remaining).map_err(|_| Error::Io)?;
+                if n == 0 {
+                    return Err(Error::Io);
+                }
+                note_written(work, n as u64)?;
+                remaining = &remaining[n..];
+            }
             Ok(())
         }
     }
@@ -393,7 +397,7 @@ fn read_central(file: &mut File, work: &mut Work<'_>, cursor: &mut u64) -> Resul
         return Err(Error::Hostile);
     }
     charge_fresh(work, name_len as u64, 0)?;
-    let _extra_scratch = preallocate(work, extra_len as u64)?;
+    let _extra_scratch = preallocate(work, extra_len as u64 + name_len as u64 * 8)?;
     let mut name = vec![0u8; name_len];
     let mut extra = vec![0u8; extra_len];
     read_exact_at(
@@ -474,7 +478,7 @@ fn bind_local(
     if name_len > work.bounds.quotas.max_path_bytes {
         return Err(Error::Hostile);
     }
-    let _name_scratch = preallocate(work, (name_len + extra_len) as u64)?;
+    let _name_scratch = preallocate(work, (name_len * 8 + extra_len) as u64)?;
     let mut name = vec![0u8; name_len];
     let mut extra = vec![0u8; extra_len];
     let name_at = member.local_offset.checked_add(30).ok_or(Error::Hostile)?;
@@ -511,6 +515,10 @@ fn bind_local(
 }
 
 fn reject_layout(members: &[Member], cd_offset: u64, work: &Work<'_>) -> Result<(), Error> {
+    let _scratch = preallocate(
+        work,
+        members.iter().map(|m| m.name.len() as u64 * 3 + 128).sum(),
+    )?;
     let mut names = Vec::new();
     let mut spans = Vec::new();
     for member in members {
@@ -532,7 +540,7 @@ fn reject_layout(members: &[Member], cd_offset: u64, work: &Work<'_>) -> Result<
         }
         spans.push((member.local_offset, end));
     }
-    names.sort();
+    names.sort_unstable();
     for index in 0..names.len() {
         for next in index + 1..names.len() {
             let left = names[index].trim_end_matches('/');
@@ -565,7 +573,7 @@ fn normalize_name(bytes: &[u8], flags: u16, work: &Work<'_>) -> Result<String, E
         return Err(Error::Hostile);
     }
     let name = std::str::from_utf8(bytes).map_err(|_| Error::Hostile)?;
-    if name.nfc().collect::<String>() != name || name.len() > work.bounds.quotas.max_path_bytes {
+    if !name.nfc().eq(name.chars()) || name.len() > work.bounds.quotas.max_path_bytes {
         return Err(Error::Hostile);
     }
     let logical = name.trim_end_matches('/');

@@ -12,8 +12,9 @@
 //! This crate does not mark those calls done and does not start a second Git engine or writer.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![doc = include_str!("../README.md")]
 
-use archive::{Member, Out, hex, method_of, stream, write_zip};
+use archive::{Member, Out, hex, method_of, stream};
 use knowledge_core::admission::{Account, Decision, Error as AdmissionError, Holding, Origin};
 use knowledge_core::backend::Budget;
 use knowledge_core::data::{ContentDigest, RelativePath};
@@ -22,7 +23,7 @@ use manifest::operation_id;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -30,7 +31,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 mod archive;
+mod capturing;
+mod gated;
 mod manifest;
+mod metadata;
+mod native;
+mod restoring;
+mod source;
+
+pub use capturing::capture;
+pub use restoring::{apply, stage};
+pub use source::VerifiedSource;
 
 /// Format identifier stored in `manifest.json`.
 pub const FORMAT: &str = "omni.knowledge-package";
@@ -38,6 +49,8 @@ pub const FORMAT: &str = "omni.knowledge-package";
 /// Storage no-clobber apply. `apply_text_change` is the storage owner operation.
 ///
 /// `install_new` is the exclusive create for original bytes. Neither method may delete unrelated files.
+/// Owners must use `VerifiedSource::copy_to` into a private candidate, then perform their
+/// destination authority/version checks before publication. A copy failure forbids publication.
 pub trait SafeApply {
     /// Install authored text when `expected` still matches, or create it when `expected` is absent.
     fn apply_text_change(
@@ -45,14 +58,16 @@ pub trait SafeApply {
         operation_id: &str,
         path: &RelativePath,
         expected: Option<&ContentDigest>,
-        candidate: &Path,
+        candidate: &mut VerifiedSource,
+        work: &mut Work<'_>,
     ) -> Result<ApplyOutcome, Error>;
     /// Create one original file only when the destination name is absent.
     fn install_new(
         &mut self,
         operation_id: &str,
         path: &RelativePath,
-        candidate: &Path,
+        candidate: &mut VerifiedSource,
+        work: &mut Work<'_>,
     ) -> Result<ApplyOutcome, Error>;
 }
 
@@ -62,8 +77,14 @@ pub trait SafeApply {
 /// `prepare_confirmation` at `2c86db6`. That seam has no `git bundle verify`.
 /// This crate does not invoke Git, hooks, or network operations.
 pub trait GitTransactions {
-    /// Record one staged bundle for a later history-owner admission.
-    fn admit_inert_bundle(&mut self, operation_id: &str, bundle: &Path) -> Result<GitAdmit, Error>;
+    /// Copy the held bundle with `VerifiedSource::copy_to` before history-owner admission.
+    /// A path is not source proof. This method does not certify `git bundle verify`.
+    fn admit_inert_bundle(
+        &mut self,
+        operation_id: &str,
+        bundle: &mut VerifiedSource,
+        work: &mut Work<'_>,
+    ) -> Result<GitAdmit, Error>;
 }
 
 /// What the storage owner observed. This crate does not reinterpret it.
@@ -240,6 +261,10 @@ impl<'a> Work<'a> {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(bounds.budget.max_millis))
             .ok_or(Error::Invalid)?;
+        let retained = holding.remaining().map_err(admission_error)?.memory_bytes;
+        if retained > bounds.budget.max_memory_bytes {
+            return Err(Error::TooLarge);
+        }
         Ok(Self {
             bounds,
             holding,
@@ -248,15 +273,16 @@ impl<'a> Work<'a> {
             read_bytes: 0,
             expanded: 0,
             files: 0,
-            live: Rc::new(Cell::new(0)),
+            live: Rc::new(Cell::new(retained)),
             temporary_total: 0,
         })
     }
 
     /// Grow `holding` before the caller allocates or writes.
     ///
-    /// Freed scratch stays charged until the host finishes the holding, so a dropped
-    /// buffer cannot release another caller's bytes. Waiting leaves the holding unchanged.
+    /// Retained allocations stay charged until the host finishes this holding.
+    /// Local scratch has a separate same-account capability and finishes only after its buffers drop.
+    /// Waiting leaves the holding unchanged.
     /// A need above the whole account is [`Error::TooLarge`].
     pub fn charge(&mut self, memory_bytes: u64, temporary_bytes: u64) -> Result<(), Error> {
         charge_fresh(self, memory_bytes, temporary_bytes)
@@ -589,6 +615,8 @@ pub struct Staged {
     pub journal: Option<PathBuf>,
     /// False when required features refuse installation.
     pub installable: bool,
+    /// Held native generation and private snapshot/operation binding.
+    authority: std::sync::Arc<restoring::StageAuthority>,
 }
 
 /// Result of calling the storage and history owners.
@@ -664,7 +692,7 @@ pub fn inspect(
     existing: &[RelativePath],
 ) -> Result<Preview, Error> {
     let opened = open_verified(archive, work)?;
-    let conflicts = conflicts_for(&opened.manifest.entries, existing);
+    let conflicts = conflicts_for(&opened.manifest.entries, existing, work)?;
     let estimated_bytes = opened
         .manifest
         .entries
@@ -683,334 +711,6 @@ pub fn inspect(
     })
 }
 
-/// Stream selected inputs into a private archive and link it only if the destination is absent.
-pub fn capture(
-    capture: &mut Capture<'_>,
-    inputs: &mut [Input<'_>],
-    work: &mut Work<'_>,
-) -> Result<Captured, Error> {
-    operation_id(capture.operation_id)?;
-    prepare_dir(capture.private_dir)?;
-    let private_final = capture
-        .private_dir
-        .join(format!("{}.zip", capture.operation_id));
-    let partial = capture
-        .private_dir
-        .join(format!("{}.partial", capture.operation_id));
-    if private_final.exists() || partial.exists() {
-        return Err(Error::Conflict);
-    }
-    let mut digested = Vec::new();
-    for input in inputs.iter_mut() {
-        if manifest::forbidden(input.path.as_str()) {
-            return Err(Error::Forbidden);
-        }
-        let method = method_for(input.role)?;
-        let bytes = read_source(input.reader, work)?;
-        let digest = digest_bytes(&bytes)?;
-        if input
-            .expected
-            .as_ref()
-            .is_some_and(|expected| expected.as_str() != digest.as_str())
-        {
-            return Err(Error::Drift);
-        }
-        if input.role == Role::Original && (input.mount_id.is_none() || input.source_id.is_none()) {
-            return Err(Error::Invalid);
-        }
-        digested.push(Digested {
-            path: input.path.clone(),
-            role: input.role,
-            method,
-            mount_id: input.mount_id.clone(),
-            source_id: input.source_id.clone(),
-            digest,
-            bytes,
-        });
-    }
-    digested.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
-    if digested.windows(2).any(|pair| pair[0].path == pair[1].path) {
-        return Err(Error::Invalid);
-    }
-    let coverage = coverage_for(
-        digested.len() as u64,
-        capture.omitted,
-        &capture.external,
-        digested.iter().any(|item| item.role == Role::Index),
-    );
-    if capture.require_complete
-        && (coverage.unverified > 0 || coverage.pending > 0 || coverage.unavailable > 0)
-    {
-        return Err(Error::RequireComplete);
-    }
-    let manifest = Manifest {
-        version: 1,
-        library_id: capture.library_id.to_owned(),
-        name: capture.name.to_owned(),
-        text_root: capture.text_root.to_owned(),
-        preset: capture.preset,
-        required_features: capture.required_features.clone(),
-        mounts: capture.mounts.clone(),
-        entries: digested
-            .iter()
-            .map(|item| EntryRecord {
-                path: item.path.clone(),
-                size_bytes: item.bytes.len() as u64,
-                sha256: item.digest.clone(),
-                method: item.method,
-                role: item.role,
-                mount_id: item.mount_id.clone(),
-                source_id: item.source_id.clone(),
-            })
-            .collect(),
-        external: {
-            let mut external = capture.external.clone();
-            external.sort_by(|left, right| {
-                (left.source_id.as_str(), left.path.as_str())
-                    .cmp(&(right.source_id.as_str(), right.path.as_str()))
-            });
-            external
-        },
-        indexes: index_set(&digested),
-        history: blob_for(&digested, Role::History),
-        journal: blob_for(&digested, Role::Journal),
-        window: capture.window.clone(),
-        coverage,
-        extra: Map::new(),
-    };
-    let canonical = manifest::emit(&manifest)?;
-    let mut parts: Vec<(String, Method, Vec<u8>)> = digested
-        .into_iter()
-        .map(|item| (item.path.as_str().to_owned(), item.method, item.bytes))
-        .collect();
-    parts.push(("manifest.json".into(), Method::Stored, canonical));
-    let mut refs: Vec<(&str, Method, &[u8])> = Vec::new();
-    for part in &parts {
-        refs.push((part.0.as_str(), part.1, part.2.as_slice()));
-    }
-    let bound = zip_memory_bound(&parts);
-    account_memory(work, bound)?;
-    let rendered = write_zip(std::io::Cursor::new(Vec::new()), &refs)?.into_inner();
-    if rendered.len() as u64 > bound {
-        return Err(Error::Quota);
-    }
-    account_temporary(work, rendered.len() as u64)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&partial)
-        .map_err(|_| Error::Io)?;
-    file.write_all(&rendered).map_err(|_| Error::Io)?;
-    file.sync_all().map_err(|_| Error::Io)?;
-    note_written(work, rendered.len() as u64)?;
-    drop(rendered);
-    drop(parts);
-    let mut check = File::open(&partial).map_err(|_| Error::Io)?;
-    let verified = open_verified(&mut check, work)?;
-    fs::rename(&partial, &private_final).map_err(|_| Error::Io)?;
-    if fs::symlink_metadata(capture.destination).is_ok() {
-        return Ok(Captured {
-            snapshot_id: verified.snapshot_id,
-            private_path: private_final,
-            installed: None,
-            linked: false,
-        });
-    }
-    match fs::hard_link(&private_final, capture.destination) {
-        Ok(()) => Ok(Captured {
-            snapshot_id: verified.snapshot_id,
-            private_path: private_final,
-            installed: Some(capture.destination.to_path_buf()),
-            linked: true,
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(Captured {
-            snapshot_id: verified.snapshot_id,
-            private_path: private_final,
-            installed: None,
-            linked: false,
-        }),
-        Err(_) => Err(Error::Indeterminate),
-    }
-}
-
-/// Verify an archive into a new private generation. An incomplete generation for the same operation is left unchanged.
-pub fn stage(
-    archive: &mut File,
-    work: &mut Work<'_>,
-    private_dir: &Path,
-    operation_id_value: &str,
-    existing: &[RelativePath],
-) -> Result<Staged, Error> {
-    operation_id(operation_id_value)?;
-    prepare_dir(private_dir)?;
-    let generation = private_dir.join(operation_id_value);
-    if generation.join("INCOMPLETE").exists() && !generation.join("COMPLETE").exists() {
-        return Err(Error::Interrupted);
-    }
-    let opened = open_verified(archive, work)?;
-    if !opened.installable {
-        return Err(Error::Unsupported);
-    }
-    if generation.join("COMPLETE").exists() {
-        return reuse_generation(&generation, &opened, existing);
-    }
-    fs::create_dir(&generation).map_err(|_| Error::Io)?;
-    lock_down(&generation)?;
-    File::create(generation.join("INCOMPLETE")).map_err(|_| Error::Io)?;
-    let mut files = Vec::new();
-    for entry in &opened.manifest.entries {
-        let member = opened
-            .members
-            .iter()
-            .find(|member| member.name == entry.path.as_str())
-            .ok_or(Error::Disagreement)?;
-        let relative = staged_name(entry);
-        let destination = generation.join(&relative);
-        if let Some(parent) = destination.parent() {
-            create_parents(&generation, parent)?;
-        }
-        if fs::symlink_metadata(&destination).is_ok() {
-            return Err(Error::Conflict);
-        }
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map_err(|_| Error::Io)?;
-        let digest = stream(archive, member, work, &mut Out::Disk(&mut output))?;
-        if digest != entry.sha256.as_str() {
-            return Err(Error::Checksum);
-        }
-        output.sync_all().map_err(|_| Error::Io)?;
-        files.push(StagedFile {
-            path: entry.path.clone(),
-            role: entry.role,
-            digest: entry.sha256.clone(),
-            staged: destination,
-        });
-        if work.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Interrupted);
-        }
-    }
-    let staged = Staged {
-        operation_id: operation_id_value.to_owned(),
-        snapshot_id: opened.snapshot_id,
-        generation: generation.clone(),
-        files,
-        conflicts: conflicts_for(&opened.manifest.entries, existing),
-        history: None,
-        journal: None,
-        installable: true,
-    };
-    let staged = attach_roles(staged);
-    write_plan(&staged)?;
-    File::create(generation.join("COMPLETE")).map_err(|_| Error::Io)?;
-    fs::remove_file(generation.join("INCOMPLETE")).map_err(|_| Error::Io)?;
-    Ok(staged)
-}
-
-/// Call storage and history owners. Paths inside `conflicts` are not sent to an owner.
-pub fn apply(
-    staged: &Staged,
-    install: &mut dyn SafeApply,
-    git: &mut dyn GitTransactions,
-) -> Result<Applied, Error> {
-    if !staged.generation.join("COMPLETE").is_file()
-        || staged.generation.join("INCOMPLETE").exists()
-    {
-        return Ok(Applied {
-            state: ApplyState::Interrupted,
-            applied: Vec::new(),
-            conflicts: staged.conflicts.clone(),
-        });
-    }
-    if !staged.installable {
-        return Ok(Applied {
-            state: ApplyState::Refused,
-            applied: Vec::new(),
-            conflicts: staged.conflicts.clone(),
-        });
-    }
-    let mut applied = Vec::new();
-    let mut conflicts = staged.conflicts.clone();
-    for file in &staged.files {
-        if file.role == Role::Index || file.role == Role::Journal || file.role == Role::History {
-            continue;
-        }
-        if !staged_digest_matches(&staged.generation, file)? {
-            return Ok(Applied {
-                state: ApplyState::Refused,
-                applied,
-                conflicts,
-            });
-        }
-        if conflicts
-            .iter()
-            .any(|path| path.as_str().to_lowercase() == file.path.as_str().to_lowercase())
-        {
-            continue;
-        }
-        let outcome = if file.role == Role::Core {
-            install.apply_text_change(&staged.operation_id, &file.path, None, &file.staged)?
-        } else {
-            install.install_new(&staged.operation_id, &file.path, &file.staged)?
-        };
-        match outcome {
-            ApplyOutcome::Saved => applied.push(file.path.clone()),
-            ApplyOutcome::Conflict => {
-                conflicts.push(file.path.clone());
-                return Ok(Applied {
-                    state: ApplyState::Conflict,
-                    applied,
-                    conflicts,
-                });
-            }
-            ApplyOutcome::Indeterminate => {
-                return Ok(Applied {
-                    state: ApplyState::Indeterminate,
-                    applied,
-                    conflicts,
-                });
-            }
-        }
-    }
-    if let Some(bundle) = &staged.history {
-        let history = staged
-            .files
-            .iter()
-            .find(|file| file.role == Role::History)
-            .ok_or(Error::Disagreement)?;
-        if !staged_digest_matches(&staged.generation, history)? {
-            return Ok(Applied {
-                state: ApplyState::Refused,
-                applied,
-                conflicts,
-            });
-        }
-        match git.admit_inert_bundle(&staged.operation_id, bundle)? {
-            GitAdmit::Inert => {}
-            GitAdmit::Refused => {
-                return Ok(Applied {
-                    state: ApplyState::Conflict,
-                    applied,
-                    conflicts,
-                });
-            }
-        }
-    }
-    let state = if conflicts.is_empty() {
-        ApplyState::Completed
-    } else {
-        ApplyState::Conflict
-    };
-    Ok(Applied {
-        state,
-        applied,
-        conflicts,
-    })
-}
-
 /// Hash a foreign directory and refuse compatibility. Symlinks are not followed.
 pub fn v1_import_plan(
     root: &Path,
@@ -1022,7 +722,8 @@ pub fn v1_import_plan(
     }) {
         return Err(Error::Invalid);
     }
-    let mut manifest_file = File::open(root.join("manifest.json")).map_err(|_| Error::Invalid)?;
+    let root_fd = native::bind(root)?;
+    let mut manifest_file = native::file(&root_fd, Path::new("manifest.json"), false)?;
     let bytes = read_source(&mut manifest_file, work)?;
     if !std::str::from_utf8(&bytes)
         .unwrap_or("")
@@ -1032,7 +733,7 @@ pub fn v1_import_plan(
     }
     let _ = host;
     let mut files = Vec::new();
-    walk_v1(root, root, work, &mut files, 0)?;
+    walk_v1(&root_fd, Path::new(""), work, &mut files, 0)?;
     files.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
     Ok(V1Plan {
         state: V1State::CompatibilityRefused,
@@ -1041,6 +742,7 @@ pub fn v1_import_plan(
     })
 }
 
+/// Retained source inventory only; payload bytes stay on the native streaming path.
 struct Digested {
     path: RelativePath,
     role: Role,
@@ -1048,19 +750,23 @@ struct Digested {
     mount_id: Option<String>,
     source_id: Option<String>,
     digest: ContentDigest,
-    bytes: Vec<u8>,
+    size: u64,
 }
 
+/// Verified framing, canonical bytes, and semantic inventory under the caller holding.
 struct Opened {
     manifest: Manifest,
     snapshot_id: ContentDigest,
     signature: Signature,
     installable: bool,
     members: Vec<Member>,
+    canonical: Vec<u8>,
 }
 
+/// Verify every real payload and bind its digest/method/size to the canonical inventory.
 fn open_verified(archive: &mut File, work: &mut Work<'_>) -> Result<Opened, Error> {
-    let members = archive::list(archive, work)?;
+    let mut members = archive::list(archive, work)?;
+    members.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     let mut canonical = None;
     let mut manifest_sha = None;
     let mut signature = Signature::Unsigned;
@@ -1077,6 +783,8 @@ fn open_verified(archive: &mut File, work: &mut Work<'_>) -> Result<Opened, Erro
             signature = signature_bytes(archive, member, work)?;
         } else {
             let digest = stream(archive, member, work, &mut Out::Drop)?;
+            charge_fresh(work, member.name.len() as u64 + 256, 0)?;
+            hashes.try_reserve_exact(1).map_err(|_| Error::TooLarge)?;
             hashes.push((
                 member.name.clone(),
                 digest,
@@ -1086,17 +794,17 @@ fn open_verified(archive: &mut File, work: &mut Work<'_>) -> Result<Opened, Erro
         }
     }
     let canonical = canonical.ok_or(Error::Invalid)?;
-    charge_fresh(work, canonical.len() as u64, 0)?;
-    let parsed = manifest::parse(&canonical)?;
+    let parsed = manifest::parse(&canonical, work)?;
     let snapshot = digest_bytes(&canonical)?;
     if snapshot.as_str() != manifest_sha.ok_or(Error::Invalid)? {
         return Err(Error::Checksum);
     }
+    hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     for entry in &parsed.entries {
-        let found = hashes
-            .iter()
-            .find(|item| item.0 == entry.path.as_str())
-            .ok_or(Error::Disagreement)?;
+        gate(work)?;
+        let found = &hashes[hashes
+            .binary_search_by(|item| item.0.as_str().cmp(entry.path.as_str()))
+            .map_err(|_| Error::Disagreement)?];
         if found.2 != entry.method || found.3 != entry.size_bytes {
             return Err(Error::Disagreement);
         }
@@ -1104,14 +812,8 @@ fn open_verified(archive: &mut File, work: &mut Work<'_>) -> Result<Opened, Erro
             return Err(Error::Checksum);
         }
     }
-    for (name, _, _, _) in &hashes {
-        if !parsed
-            .entries
-            .iter()
-            .any(|entry| entry.path.as_str() == name)
-        {
-            return Err(Error::Hostile);
-        }
+    if hashes.len() != parsed.entries.len() {
+        return Err(Error::Hostile);
     }
     let installable = parsed.required_features.is_empty();
     Ok(Opened {
@@ -1120,9 +822,11 @@ fn open_verified(archive: &mut File, work: &mut Work<'_>) -> Result<Opened, Erro
         signature,
         installable,
         members,
+        canonical,
     })
 }
 
+/// Classify inert signature framing without making a signer-trust claim.
 fn signature_bytes(
     archive: &mut File,
     member: &Member,
@@ -1131,6 +835,7 @@ fn signature_bytes(
     if member.uncompressed == 0 || member.uncompressed > 65_536 {
         return Ok(Signature::Invalid);
     }
+    let _text_scratch = preallocate(work, member.uncompressed * 3)?;
     let mut bytes = Vec::new();
     stream(archive, member, work, &mut Out::Keep(&mut bytes))?;
     let text = String::from_utf8_lossy(&bytes);
@@ -1141,17 +846,52 @@ fn signature_bytes(
     }
 }
 
-fn conflicts_for(entries: &[EntryRecord], existing: &[RelativePath]) -> Vec<RelativePath> {
-    entries
+/// Admit folded-name workspace and output clones before case-insensitive conflict matching.
+fn conflicts_for(
+    entries: &[EntryRecord],
+    existing: &[RelativePath],
+    work: &mut Work<'_>,
+) -> Result<Vec<RelativePath>, Error> {
+    let names = entries
         .iter()
-        .filter(|entry| matches!(entry.role, Role::Core | Role::Original))
-        .filter(|entry| {
+        .map(|e| e.path.as_str().len() as u64)
+        .sum::<u64>()
+        .checked_add(
             existing
                 .iter()
-                .any(|path| path.as_str().to_lowercase() == entry.path.as_str().to_lowercase())
-        })
-        .map(|entry| entry.path.clone())
-        .collect()
+                .map(|p| p.as_str().len() as u64)
+                .sum::<u64>(),
+        )
+        .ok_or(Error::TooLarge)?;
+    let _scratch = preallocate(
+        work,
+        names
+            .checked_mul(3)
+            .and_then(|n| n.checked_add(existing.len() as u64 * 32))
+            .ok_or(Error::TooLarge)?,
+    )?;
+    charge_fresh(
+        work,
+        entries
+            .iter()
+            .map(|e| e.path.as_str().len() as u64 + 64)
+            .sum(),
+        0,
+    )?;
+    let mut folded: Vec<_> = existing.iter().map(|p| p.as_str().to_lowercase()).collect();
+    folded.sort_unstable();
+    let mut conflicts = Vec::new();
+    for entry in entries {
+        gate(work)?;
+        if matches!(entry.role, Role::Core | Role::Original)
+            && folded
+                .binary_search(&entry.path.as_str().to_lowercase())
+                .is_ok()
+        {
+            conflicts.push(entry.path.clone());
+        }
+    }
+    Ok(conflicts)
 }
 
 fn role_token(role: Role) -> &'static str {
@@ -1164,17 +904,6 @@ fn role_token(role: Role) -> &'static str {
     }
 }
 
-fn role_from(value: &str) -> Result<Role, Error> {
-    match value {
-        "core" => Ok(Role::Core),
-        "original" => Ok(Role::Original),
-        "index" => Ok(Role::Index),
-        "history" => Ok(Role::History),
-        "journal" => Ok(Role::Journal),
-        _ => Err(Error::Indeterminate),
-    }
-}
-
 fn method_for(role: Role) -> Result<Method, Error> {
     match role {
         Role::Core => Ok(Method::Deflate),
@@ -1182,6 +911,7 @@ fn method_for(role: Role) -> Result<Method, Error> {
     }
 }
 
+/// Read one bounded metadata input under the caller holding with exact-capacity growth.
 fn read_source(reader: &mut dyn Read, work: &mut Work<'_>) -> Result<Vec<u8>, Error> {
     let _scratch = preallocate(work, 8192)?;
     let mut bytes = Vec::new();
@@ -1201,6 +931,7 @@ fn read_source(reader: &mut dyn Read, work: &mut Work<'_>) -> Result<Vec<u8>, Er
             return Err(Error::Quota);
         }
         account_memory(work, n as u64)?;
+        bytes.try_reserve_exact(n).map_err(|_| Error::TooLarge)?;
         bytes.extend_from_slice(&buf[..n]);
         work.read_bytes = work.read_bytes.checked_add(n as u64).ok_or(Error::Quota)?;
         if work.read_bytes > work.bounds.budget.max_bytes {
@@ -1346,10 +1077,6 @@ fn account_memory(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
     charge_fresh(work, bytes, 0)
 }
 
-fn account_temporary(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
-    charge_fresh(work, 0, bytes)
-}
-
 pub(crate) fn charge_fresh(
     work: &mut Work<'_>,
     memory_bytes: u64,
@@ -1407,42 +1134,6 @@ pub(crate) fn note_written(work: &mut Work<'_>, bytes: u64) -> Result<(), Error>
         .map_err(|_| Error::Indeterminate)
 }
 
-fn prepare_dir(path: &Path) -> Result<(), Error> {
-    let meta = fs::symlink_metadata(path).map_err(|_| Error::Io)?;
-    if !meta.is_dir() || meta.file_type().is_symlink() {
-        return Err(Error::Hostile);
-    }
-    Ok(())
-}
-
-fn lock_down(path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| Error::Io)?;
-    }
-    let _ = path;
-    Ok(())
-}
-
-fn create_parents(root: &Path, path: &Path) -> Result<(), Error> {
-    if path == root {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        create_parents(root, parent)?;
-    }
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(Error::Hostile),
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(Error::Conflict),
-        Err(_) => {
-            fs::create_dir(path).map_err(|_| Error::Io)?;
-            lock_down(path)
-        }
-    }
-}
-
 fn staged_name(entry: &EntryRecord) -> PathBuf {
     match entry.role {
         Role::Index => PathBuf::from("indexes").join(entry.path.as_str()),
@@ -1466,140 +1157,10 @@ fn attach_roles(mut staged: Staged) -> Staged {
     staged
 }
 
-fn zip_memory_bound(parts: &[(String, Method, Vec<u8>)]) -> u64 {
-    let mut total = 22u64;
-    for (name, _, bytes) in parts {
-        let name_len = name.len() as u64;
-        let body = bytes.len() as u64;
-        total = total.saturating_add(30 + name_len + body + (body / 16) + 64 + 46 + name_len);
-    }
-    total
-}
-
-fn reuse_generation(
-    generation: &Path,
-    opened: &Opened,
-    existing: &[RelativePath],
-) -> Result<Staged, Error> {
-    let prior = read_staged(generation)?;
-    if prior.snapshot_id.as_str() != opened.snapshot_id.as_str() {
-        return Err(Error::Conflict);
-    }
-    if prior.files.len() != opened.manifest.entries.len() {
-        return Err(Error::Conflict);
-    }
-    for entry in &opened.manifest.entries {
-        let file = prior
-            .files
-            .iter()
-            .find(|file| file.path.as_str() == entry.path.as_str())
-            .ok_or(Error::Conflict)?;
-        if file.role != entry.role || file.digest.as_str() != entry.sha256.as_str() {
-            return Err(Error::Conflict);
-        }
-        if !staged_digest_matches(generation, file)? {
-            return Err(Error::Checksum);
-        }
-    }
-    let mut staged = prior;
-    staged.conflicts = conflicts_for(&opened.manifest.entries, existing);
-    staged.installable = opened.installable;
-    Ok(attach_roles(staged))
-}
-
-fn staged_digest_matches(generation: &Path, file: &StagedFile) -> Result<bool, Error> {
-    let meta = fs::symlink_metadata(&file.staged).map_err(|_| Error::Io)?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err(Error::Hostile);
-    }
-    if !file.staged.starts_with(generation) {
-        return Err(Error::Hostile);
-    }
-    let mut input = File::open(&file.staged).map_err(|_| Error::Io)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let count = input.read(&mut buf).map_err(|_| Error::Io)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buf[..count]);
-    }
-    Ok(archive::hex(&hasher.finalize()) == file.digest.as_str())
-}
-
-fn write_plan(staged: &Staged) -> Result<(), Error> {
-    let mut lines = String::new();
-    lines.push_str(staged.snapshot_id.as_str());
-    lines.push('\n');
-    for file in &staged.files {
-        lines.push_str(file.path.as_str());
-        lines.push('\n');
-        lines.push_str(role_token(file.role));
-        lines.push('\n');
-        lines.push_str(file.digest.as_str());
-        lines.push('\n');
-    }
-    let mut plan = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(staged.generation.join("PLAN"))
-        .map_err(|_| Error::Io)?;
-    plan.write_all(lines.as_bytes()).map_err(|_| Error::Io)?;
-    plan.sync_all().map_err(|_| Error::Io)
-}
-
-fn read_staged(generation: &Path) -> Result<Staged, Error> {
-    let text = fs::read_to_string(generation.join("PLAN")).map_err(|_| Error::Indeterminate)?;
-    let mut lines = text.lines();
-    let snapshot_id =
-        ContentDigest::new(lines.next().unwrap_or("")).map_err(|_| Error::Indeterminate)?;
-    let mut files = Vec::new();
-    while let Some(path) = lines.next() {
-        let role = role_from(lines.next().ok_or(Error::Indeterminate)?)?;
-        let digest = lines.next().ok_or(Error::Indeterminate)?;
-        let path = RelativePath::new(path).map_err(|_| Error::Indeterminate)?;
-        let digest = ContentDigest::new(digest).map_err(|_| Error::Indeterminate)?;
-        let staged_path = generation.join(staged_name(&EntryRecord {
-            path: path.clone(),
-            size_bytes: 0,
-            sha256: digest.clone(),
-            method: Method::Stored,
-            role,
-            mount_id: None,
-            source_id: None,
-        }));
-        let meta = fs::symlink_metadata(&staged_path).map_err(|_| Error::Indeterminate)?;
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(Error::Hostile);
-        }
-        files.push(StagedFile {
-            path,
-            role,
-            digest,
-            staged: staged_path,
-        });
-    }
-    let operation_id = generation
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(Error::Invalid)?
-        .to_owned();
-    Ok(attach_roles(Staged {
-        operation_id,
-        snapshot_id,
-        generation: generation.to_path_buf(),
-        files,
-        conflicts: Vec::new(),
-        history: None,
-        journal: None,
-        installable: true,
-    }))
-}
-
+/// Hash foreign regular files through descriptor-relative traversal with finite work.
 fn walk_v1(
-    root: &Path,
-    dir: &Path,
+    root: &File,
+    prefix: &Path,
     work: &mut Work<'_>,
     files: &mut Vec<V1File>,
     depth: usize,
@@ -1607,42 +1168,86 @@ fn walk_v1(
     if depth > work.bounds.quotas.max_depth {
         return Err(Error::Quota);
     }
-    let entries = fs::read_dir(dir).map_err(|_| Error::Io)?;
-    for entry in entries {
+    let _scratch = preallocate(work, 32_768 + 8192)?;
+    let mut entries = rustix::fs::Dir::read_from(root).map_err(|_| Error::Io)?;
+    while let Some(entry) = entries.read() {
+        gate(work)?;
         let entry = entry.map_err(|_| Error::Io)?;
-        let path = entry.path();
-        let meta = fs::symlink_metadata(&path).map_err(|_| Error::Io)?;
-        if meta.file_type().is_symlink() {
-            return Err(Error::Hostile);
-        }
-        let name = entry.file_name();
-        let name = name.to_str().ok_or(Error::Hostile)?;
-        if name == ".git" || name == ".omni" {
+        let name = entry.file_name().to_str().map_err(|_| Error::Hostile)?;
+        if matches!(name, "." | ".." | ".git" | ".omni") {
             continue;
         }
-        if meta.is_dir() {
-            walk_v1(root, &path, work, files, depth + 1)?;
-            continue;
-        }
-        if !meta.is_file() {
-            return Err(Error::Hostile);
-        }
-        let relative = path.strip_prefix(root).map_err(|_| Error::Hostile)?;
-        let text = relative.to_str().ok_or(Error::Hostile)?.replace('\\', "/");
-        if text == "manifest.json" {
-            continue;
-        }
-        let relative_path = manifest::path(&text)?;
-        let mut file = File::open(&path).map_err(|_| Error::Io)?;
-        let bytes = read_source(&mut file, work)?;
-        files.push(V1File {
-            path: relative_path,
-            sha256: digest_bytes(&bytes)?,
-            size: bytes.len() as u64,
-        });
-        if files.len() as u64 > work.bounds.quotas.max_entries {
+        let stat = rustix::fs::statat(root, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| Error::Io)?;
+        let _path_scratch = preallocate(work, (prefix.as_os_str().len() + name.len() + 1) as u64)?;
+        let path = prefix.join(name);
+        let text = path.to_str().ok_or(Error::Hostile)?;
+        if text.len() > work.bounds.quotas.max_path_bytes {
             return Err(Error::Quota);
         }
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::Directory => {
+                let dir = native::directory(root, Path::new(name), false)?;
+                walk_v1(&dir, &path, work, files, depth + 1)?;
+            }
+            rustix::fs::FileType::RegularFile => {
+                if text == "manifest.json" {
+                    continue;
+                }
+                if files.len() as u64 >= work.bounds.quotas.max_entries
+                    || work.files >= work.bounds.budget.max_files
+                {
+                    return Err(Error::Quota);
+                }
+                work.files += 1;
+                charge_fresh(work, text.len() as u64 * 4 + 512, 0)?;
+                let relative = manifest::path(text)?;
+                let mut input = native::file(root, Path::new(name), false)?;
+                let mut sha = Sha256::new();
+                let mut size = 0u64;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    gate(work)?;
+                    let n = input.read(&mut buffer).map_err(|_| Error::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    size = size.checked_add(n as u64).ok_or(Error::Quota)?;
+                    if size > work.bounds.quotas.max_entry_expanded {
+                        return Err(Error::Quota);
+                    }
+                    note_read(work, n as u64)?;
+                    sha.update(&buffer[..n]);
+                }
+                files.try_reserve_exact(1).map_err(|_| Error::TooLarge)?;
+                files.push(V1File {
+                    path: relative,
+                    sha256: ContentDigest::new(hex(&sha.finalize())).map_err(|_| Error::Invalid)?,
+                    size,
+                });
+            }
+            _ => return Err(Error::Hostile),
+        }
+    }
+    Ok(())
+}
+
+/// Check cooperative cancellation and deadline before CPU or native I/O work.
+pub(crate) fn gate(work: &Work<'_>) -> Result<(), Error> {
+    if work.cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    if Instant::now() >= work.deadline {
+        return Err(Error::Deadline);
+    }
+    Ok(())
+}
+
+/// Charge actual read bytes against the call, never a declared source length.
+pub(crate) fn note_read(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
+    work.read_bytes = work.read_bytes.checked_add(bytes).ok_or(Error::Quota)?;
+    if work.read_bytes > work.bounds.budget.max_bytes {
+        return Err(Error::Quota);
     }
     Ok(())
 }
