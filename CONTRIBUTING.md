@@ -30,6 +30,8 @@ Inspect the final diff and affected consumers. Run the checks required by the ch
 
 Use independent review for governing documents and consequential results. The reviewer checks actual artifacts, retained criteria, safety, correctness, simplicity, and evidence. Resolve in-scope findings before claiming completion.
 
+The engineer direction of 2026-11-05 01:05 applies the adopted risk rules to this repository. Independent review is required for durability (no-clobber apply and recovery, and Git transactions), the hostile ZIP parser, MCP or HTTP authority and exposure, and the admission or reservation seam. Ordinary work uses builder tests, the maintained gate, and a forward landing. It does not open an OLD/NEW frozen-carrier loop or a second review of a closed item. An ordinary closeout report is at most six lines. This does not waive a security, durability, or retained-format guarantee, and it does not authorize a coordinator waiver of those guarantees.
+
 ## Commit Authorized Work
 
 Commit only with user authorization. Stage exact paths and inspect the staged diff. Keep each commit coherent and reviewable. There is no required number of commits per feature.

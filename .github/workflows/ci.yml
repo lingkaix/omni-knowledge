@@ -57,16 +57,15 @@ jobs:
         run: python3 -B tests/tools/notice_collection.py --subject-repo "$PWD" --current-ref "$GITHUB_SHA"
       - name: Full headless workspace gate
         run: python3 scripts/gate.py headless
-      - name: Stage Linux artifact
+      - name: Stage Linux headless artifact
         run: |
-          mkdir -p dist/linux-x86_64
-          cp target/release/omni LICENSE dist/linux-x86_64/
-          python3 -B scripts/collect-licenses.py --target x86_64-unknown-linux-gnu --headless dist/linux-x86_64/ThirdParty
+          python3 -B tests/tools/headless_stage.py
+          python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage dist/linux-x86_64
           tar -czf dist/omni-linux-x86_64.tar.gz -C dist/linux-x86_64 .
           mkdir temp/artifact-smoke
           tar -xzf dist/omni-linux-x86_64.tar.gz -C temp/artifact-smoke
           python3 scripts/gate.py smoke --binary temp/artifact-smoke/omni --evidence-dir temp/ci-evidence/archived-smoke
-          python3 -c 'import hashlib,json,pathlib; p=pathlib.Path("temp/artifact-smoke/ThirdParty"); i=json.loads((p/"inventory.json").read_text()); assert i["target"]=="x86_64-unknown-linux-gnu" and i["features"]==[]; assert i["lockfile_sha256"]==hashlib.sha256(pathlib.Path("Cargo.lock").read_bytes()).hexdigest(); assert (p/"THIRD_PARTY_NOTICES.txt").is_file(); assert any(x["name"]=="tantivy" and x["notices"] for x in i["packages"])'
+          python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage temp/artifact-smoke --verify
           sha256sum dist/omni-linux-x86_64.tar.gz
       - name: Upload Linux artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -85,7 +84,7 @@ jobs:
           retention-days: 14
 
   macos:
-    name: macOS ARM64 GUI and headless
+    name: macOS ARM64 headless
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -106,20 +105,21 @@ jobs:
         run: python3 scripts/gate.py self-test
       - name: Full headless workspace gate (includes available FSEvents tests)
         run: python3 scripts/gate.py headless
-      - name: GUI lint/tests, unsigned bundle and bundled CLI smoke
-        run: python3 scripts/gate.py gui
-      - name: Archive unsigned app without losing bundle permissions
+      - name: Stage macOS headless artifact
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "dist/Omni Knowledge.app" dist/omni-macos-arm64-unsigned.zip
+          python3 -B tests/tools/headless_stage.py
+          python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage dist/macos-arm64-headless
+          tar -czf dist/omni-macos-arm64-headless.tar.gz -C dist/macos-arm64-headless .
           mkdir temp/artifact-smoke
-          ditto -x -k dist/omni-macos-arm64-unsigned.zip temp/artifact-smoke
-          python3 scripts/gate.py smoke --binary "temp/artifact-smoke/Omni Knowledge.app/Contents/MacOS/omni" --evidence-dir temp/ci-evidence/archived-smoke
-          shasum -a 256 dist/omni-macos-arm64-unsigned.zip
-      - name: Upload unsigned macOS app
+          tar -xzf dist/omni-macos-arm64-headless.tar.gz -C temp/artifact-smoke
+          python3 scripts/gate.py smoke --binary temp/artifact-smoke/omni --evidence-dir temp/ci-evidence/archived-smoke
+          python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage temp/artifact-smoke --verify
+          shasum -a 256 dist/omni-macos-arm64-headless.tar.gz
+      - name: Upload macOS headless artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: omni-macos-arm64-unsigned-${{ github.sha }}
-          path: dist/omni-macos-arm64-unsigned.zip
+          name: omni-macos-arm64-headless-${{ github.sha }}
+          path: dist/omni-macos-arm64-headless.tar.gz
           if-no-files-found: error
           retention-days: 14
       - name: Upload macOS evidence

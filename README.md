@@ -14,6 +14,10 @@ No new GPUI investment happens beyond that duty until GUI technology is confirme
 These accepted contracts are not claims that every feature is already implemented or qualified.
 The compatibility commands and storage description below describe the retained first-version implementation while the migration is in progress.
 Linux headless builds and macOS GUI builds have separate gates; native platform effects require their actual platform observations.
+The current delivery gate is headless. GUI milestone M7 is deferred and does not block the headless Linux or macOS archive.
+[First usable version](first-usable-version.md) stays in progress until final Linux and macOS CI, milestone authority, durability, ZIP admission, and the actual entry points pass.
+Trunk `faab733` already contains the integrated core, cache, wire, local, jobs, public-test, B1/B2, and kernel self-VM work. That presence is not milestone acceptance.
+`python3 -B scripts/bundle-headless.py` stages `omni`, the project license, and the existing notice snapshot. It does not add a worker Cargo did not select.
 
 ## Try The Retained First Version
 

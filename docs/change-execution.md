@@ -66,3 +66,11 @@ Recompute verification from the final diff. Report changed behavior or documents
 Inspect actual files or named execution output before acceptance. A producer can repair its work but cannot provide independent acceptance of its own governing document or consequential result. Use a separate reviewer for that judgment.
 
 Keep records accurate: planned, active, blocked, and complete describe actual work. Report implementation completion separately from engineer approval or a reserved release gate.
+
+## Risk-Based Review
+
+The engineer direction of 2026-11-05 01:05 adopts process-review rules R1, R4, and R5 for this repository and overrides the broader ordinary-review chain above where they conflict.
+
+Independent review remains required for durability, including no-clobber apply, recovery, and Git transactions; for the hostile ZIP parser; for MCP or HTTP authority and exposure; and for the admission or reservation seam. Ordinary implementation, test correction, and documentation use builder tests, the maintained gate, and a forward landing. A separate test-author agent, an OLD/NEW frozen carrier, and another review round are not required for that ordinary work. A newly unexplained relevant failure still blocks its slice.
+
+A coordinator is required only for an ownership conflict or abandoned claim, a change outside agreed scope or to a shared contract, extra hosted budget or another scarce shared resource, or an unresolved relevant failure that needs an exception. Routine promotion and permission relays are not required. Ordinary reports stay within six lines. The coordinator cannot waive a security, durability, or retained-format guarantee.

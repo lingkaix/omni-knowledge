@@ -113,7 +113,8 @@ struct Fixture {
 impl Fixture {
     /// Initialize through public History::init, never handwrite owner state.
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let parent = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::Builder::new().tempdir_in(parent).unwrap();
         fs::create_dir(root.path().join("home")).unwrap();
         let admission = Admission::new();
         let history = History::init(

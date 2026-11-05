@@ -1,6 +1,7 @@
 //! Human and agent command-line entry point with structured output and explicit failures.
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use knowledge_daemon::UnboundHandler;
 use omni_knowledge::{
     IndexOptions, KnowledgeBase, SearchMode, SearchOptions, embedding, epub, extract,
 };
@@ -137,18 +138,40 @@ enum Operation {
     },
     /// Serve agent tools over newline-delimited MCP JSON-RPC on stdin/stdout.
     ServeMcp,
+    /// Serve the frozen command codec once a native handler is bound.
+    Serve {
+        /// Serve MCP 2025-11-25 on stdin and stdout.
+        #[arg(long)]
+        stdio: bool,
+        /// Serve opt-in loopback HTTP.
+        #[arg(long)]
+        http: bool,
+    },
+    /// Proxy MCP stdio to a loopback daemon IPC address.
+    Mcp {
+        /// Read MCP from stdin and write MCP to stdout.
+        #[arg(long)]
+        stdio: bool,
+        /// `127.0.0.1:port` of a daemon IPC listener. The address is not a grant.
+        #[arg(long)]
+        daemon: Option<String>,
+    },
 }
 
 /// Runs one operation and writes machine-readable errors without hiding failure exits.
 fn main() {
     let arguments = Arguments::parse();
     if let Err(error) = run(&arguments) {
+        let unbound = error.downcast_ref::<UnboundHandler>().is_some();
         if arguments.json {
             eprintln!("{}", serde_json::json!({"error":format!("{error:#}")}));
+        } else if unbound {
+            eprintln!("{}", omni_knowledge::status::format_process_account(None));
+            eprintln!("native authority handler is not bound");
         } else {
             eprintln!("Error: {error:#}");
         }
-        std::process::exit(1);
+        std::process::exit(if unbound { 3 } else { 1 });
     }
 }
 
@@ -164,6 +187,31 @@ fn run(arguments: &Arguments) -> Result<()> {
     }
     if matches!(arguments.command, Operation::ServeMcp) {
         return omni_knowledge::mcp::serve(&arguments.root);
+    }
+    if let Operation::Serve { stdio, http } = &arguments.command {
+        if !stdio && !http {
+            bail!("choose serve --stdio or serve --http");
+        }
+        return Err(UnboundHandler.into());
+    }
+    if let Operation::Mcp { stdio, daemon } = &arguments.command {
+        if !stdio {
+            bail!("mcp requires --stdio");
+        }
+        let Some(daemon) = daemon else {
+            return Err(UnboundHandler.into());
+        };
+        let address: std::net::SocketAddr = daemon
+            .parse()
+            .context("daemon address must be 127.0.0.1:port")?;
+        if !address.ip().is_loopback() {
+            bail!("daemon address must be loopback");
+        }
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        return knowledge_daemon::proxy_mcp(&mut input, &mut output, address).map_err(Into::into);
     }
     if let Operation::Doctor { embeddings: false } = arguments.command {
         let runtime = omni_knowledge::runtime::detect_runtime();
@@ -335,9 +383,11 @@ fn run(arguments: &Arguments) -> Result<()> {
                 arguments.json,
             )
         }
-        Operation::Init { .. } | Operation::ServeMcp | Operation::Doctor { embeddings: false } => {
-            unreachable!()
-        }
+        Operation::Init { .. }
+        | Operation::ServeMcp
+        | Operation::Serve { .. }
+        | Operation::Mcp { .. }
+        | Operation::Doctor { embeddings: false } => unreachable!(),
     }
 }
 

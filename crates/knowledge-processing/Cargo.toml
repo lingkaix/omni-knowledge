@@ -1,0 +1,31 @@
+[package]
+name = "knowledge-processing"
+version = "0.1.0"
+edition = "2024"
+description = "Mature bounded extraction, EPUB, media, and local ASR adapters"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+ammonia = "4"
+html2text = "0.16"
+knowledge-core = { path = "../knowledge-core" }
+mime_guess = "2"
+pdf-extract = "0.12.1"
+pulldown-cmark = "0.13"
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tempfile = "3"
+walkdir = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "=1.1.5", features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
