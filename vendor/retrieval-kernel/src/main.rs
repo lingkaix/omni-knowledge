@@ -359,6 +359,10 @@ fn valid_id(value: &Value) -> bool {
     value.is_number() || value.as_str().is_some_and(|s| s.len() <= 256)
 }
 /// Enforce the executable's memory and individual derived-file ceilings before untrusted input.
+///
+/// One self virtual-size and resident-size summary is written to stderr after
+/// those limits are installed. A failed install puts that one summary in the
+/// error instead. The summary is not a ceiling and does not change enforcement.
 fn process_limits() -> Result<()> {
     // Convert the file-growth ceiling to EFBIG so publication can refuse it without a core dump.
     // SAFETY: SIG_IGN installs no handler and changes only this executable's signal disposition.
@@ -370,14 +374,22 @@ fn process_limits() -> Result<()> {
     }
     set_limit(libc::RLIMIT_AS, 2 * 1024 * 1024 * 1024)?;
     set_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024)?;
-    cpu_limit()
+    cpu_limit()?;
+    eprintln!("{}", self_vm_summary("installed"));
+    Ok(())
 }
 /// Give each foreground request 65 CPU seconds; the cooperative wall ceiling is 60 seconds.
 fn cpu_limit() -> Result<()> {
     // SAFETY: getrusage initializes a correctly sized caller-owned structure.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
-        return Err(error("unavailable", "CPU resource enforcement unavailable"));
+        return Err(error(
+            "unavailable",
+            &format!(
+                "CPU resource enforcement unavailable {}",
+                self_vm_summary("getrusage")
+            ),
+        ));
     }
     set_limit(
         libc::RLIMIT_CPU,
@@ -399,7 +411,8 @@ fn set_limit(resource: Resource, ceiling: u64) -> Result<()> {
         return Err(error(
             "unavailable",
             &format!(
-                "process resource limits unavailable: getrlimit({name}/{resource}) errno={errno:?} ceiling={ceiling}"
+                "process resource limits unavailable: getrlimit({name}/{resource}) errno={errno:?} ceiling={ceiling} {}",
+                self_vm_summary("getrlimit"),
             ),
         ));
     }
@@ -415,12 +428,141 @@ fn set_limit(resource: Resource, ceiling: u64) -> Result<()> {
         return Err(error(
             "unavailable",
             &format!(
-                "process resource enforcement failed: setrlimit({name}/{resource}) errno={errno:?} inherited_soft={inherited_soft} inherited_hard={inherited_hard} requested_soft={} requested_hard={} ceiling={ceiling}",
-                limit.rlim_cur, limit.rlim_max,
+                "process resource enforcement failed: setrlimit({name}/{resource}) errno={errno:?} inherited_soft={inherited_soft} inherited_hard={inherited_hard} requested_soft={} requested_hard={} ceiling={ceiling} {}",
+                limit.rlim_cur,
+                limit.rlim_max,
+                self_vm_summary("setrlimit"),
             ),
         ));
     }
     Ok(())
+}
+
+/// Report this process's virtual and resident sizes at one named install point.
+///
+/// Linux copies `VmSize` and `VmRSS` from one bounded `/proc/self/status` read.
+/// proc(5) defines those `kB` tokens as 1024-byte units; the token itself is copied.
+/// macOS reads `mach_task_basic_info.virtual_size` and `resident_size`, which
+/// `task_info.h` defines in bytes. A missing read or return code stays unavailable.
+fn self_vm_summary(point: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        linux_self_vm(point)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_self_vm(point)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        format!("self_vm point={point} source=none unavailable reason=unsupported")
+    }
+}
+
+/// Read `VmSize` and `VmRSS` for this process. The read is one 4096-byte buffer.
+#[cfg(target_os = "linux")]
+fn linux_self_vm(point: &str) -> String {
+    let mut file = match std::fs::File::open("/proc/self/status") {
+        Ok(file) => file,
+        Err(error) => {
+            return format!(
+                "self_vm point={point} source=/proc/self/status unavailable errno={:?}",
+                error.raw_os_error()
+            );
+        }
+    };
+    let mut buffer = [0u8; 4096];
+    let size = match std::io::Read::read(&mut file, &mut buffer) {
+        Ok(size) => size,
+        Err(error) => {
+            return format!(
+                "self_vm point={point} source=/proc/self/status unavailable errno={:?}",
+                error.raw_os_error()
+            );
+        }
+    };
+    let text = String::from_utf8_lossy(&buffer[..size]);
+    let vm_size = match proc_status_field(&text, "VmSize") {
+        Ok(field) => field,
+        Err(reason) => {
+            return format!(
+                "self_vm point={point} source=/proc/self/status unavailable field=VmSize reason={reason}"
+            );
+        }
+    };
+    let vm_rss = match proc_status_field(&text, "VmRSS") {
+        Ok(field) => field,
+        Err(reason) => {
+            return format!(
+                "self_vm point={point} source=/proc/self/status unavailable field=VmRSS reason={reason}"
+            );
+        }
+    };
+    format!(
+        "self_vm point={point} source=/proc/self/status VmSize={} VmSize_unit={} VmRSS={} VmRSS_unit={}",
+        vm_size.0, vm_size.1, vm_rss.0, vm_rss.1
+    )
+}
+
+/// Parse one `Key:\tvalue unit` line. The unit token is returned unchanged.
+#[cfg(target_os = "linux")]
+fn proc_status_field(text: &str, key: &str) -> std::result::Result<(u64, String), &'static str> {
+    let prefix = format!("{key}:");
+    let Some(line) = text.lines().find(|line| line.starts_with(&prefix)) else {
+        return Err("missing");
+    };
+    let mut parts = line[prefix.len()..].split_whitespace();
+    let Some(raw) = parts.next() else {
+        return Err("missing-value");
+    };
+    let Ok(value) = raw.parse::<u64>() else {
+        return Err("unparsed-value");
+    };
+    let Some(unit) = parts.next() else {
+        return Err("missing-unit");
+    };
+    if parts.next().is_some() {
+        return Err("extra-token");
+    }
+    Ok((value, unit.to_string()))
+}
+
+/// Read this task's `MACH_TASK_BASIC_INFO` sizes. Units are bytes.
+///
+/// `task_info` returns `kern_return_t`. `KERN_SUCCESS` is 0. The count is in
+/// `natural_t` words. Both 8-byte fields are read only when that count covers them.
+#[cfg(target_os = "macos")]
+fn macos_self_vm(point: &str) -> String {
+    let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+    let mut count: libc::mach_msg_type_number_t = libc::MACH_TASK_BASIC_INFO_COUNT;
+    // SAFETY: mach_task_self is this task. task_info writes the caller-owned info
+    // and count. libc 0.2.190 exposes this Mach call; mach2 is not a dependency.
+    #[allow(deprecated)]
+    let task = unsafe { libc::mach_task_self() };
+    let result = unsafe {
+        libc::task_info(
+            task,
+            libc::MACH_TASK_BASIC_INFO,
+            (&raw mut info).cast::<libc::integer_t>(),
+            &raw mut count,
+        )
+    };
+    if result != libc::KERN_SUCCESS {
+        return format!(
+            "self_vm point={point} source=mach_task_basic_info unavailable kern_return={result}"
+        );
+    }
+    let needed = (std::mem::size_of::<u64>() * 2 / std::mem::size_of::<libc::natural_t>()) as u32;
+    if count < needed {
+        return format!(
+            "self_vm point={point} source=mach_task_basic_info unavailable kern_return={result} count={count}"
+        );
+    }
+    let virtual_size = unsafe { std::ptr::addr_of!(info.virtual_size).read_unaligned() };
+    let resident_size = unsafe { std::ptr::addr_of!(info.resident_size).read_unaligned() };
+    format!(
+        "self_vm point={point} source=mach_task_basic_info virtual_size={virtual_size} resident_size={resident_size} unit=bytes"
+    )
 }
 
 /// libc uses different resource identifier types on Linux and other Unix targets.
