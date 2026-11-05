@@ -734,7 +734,9 @@ fn native_cursor_follows_inventory_and_restart_never_assumes_continuity() {
         replay
             .observations
             .iter()
-            .any(|o| o.stat.path.as_str() == "pages/gap-old.md" && o.change == ChangeKind::Deleted)
+            .any(|o| o.stat.path.as_str() == "pages/gap-old.md" && o.change == ChangeKind::Deleted),
+        "actual controlled native replay after loss: {:#?}",
+        replay.observations
     );
     assert!(
         replay

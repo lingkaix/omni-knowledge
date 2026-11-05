@@ -68,7 +68,7 @@ const O_NONBLOCK: i32 = 0o4000;
 const SIGKILL: i32 = 9;
 
 unsafe extern "C" {
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
     fn close(fd: i32) -> i32;
 }
@@ -257,13 +257,20 @@ fn group_kill(pid: u32) -> Result<(), String> {
 }
 
 fn set_nonblocking(fd: i32) -> Result<(), String> {
-    let flags = unsafe { fcntl(fd, F_GETFL, 0) };
+    // fcntl IS variadic. In particular, Apple arm64 passes variadic arguments
+    // differently from three fixed C parameters; a fixed-signature redeclaration
+    // can appear successful while leaving a pipe blocking.
+    let flags = unsafe { fcntl(fd, F_GETFL) };
     if flags < 0 {
         return Err(format!("fcntl read flags failed on {fd}"));
     }
     let updated = unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) };
     if updated < 0 {
         return Err(format!("fcntl nonblocking failed on {fd}"));
+    }
+    let actual = unsafe { fcntl(fd, F_GETFL) };
+    if actual < 0 || actual & O_NONBLOCK == 0 {
+        return Err(format!("native nonblocking flags did not stick on {fd}"));
     }
     Ok(())
 }
