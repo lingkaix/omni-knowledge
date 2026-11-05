@@ -5,7 +5,7 @@ use fs2::FileExt;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -76,7 +76,7 @@ struct SearchCacheKey {
 /// One completely validated owned snapshot; it contains no file handles or historical reader leases.
 struct SearchCacheEntry {
     key: SearchCacheKey,
-    snapshot: Arc<Snapshot>,
+    snapshot: Arc<ResidentSnapshot>,
 }
 
 /// Small process-local LRU shared by ordinary CLI, GUI, and MCP search calls.
@@ -87,7 +87,7 @@ struct SearchSnapshotCache {
 
 impl SearchSnapshotCache {
     /// Return matching validated facts and promote their root without retaining the cache mutex.
-    fn get(&mut self, key: &SearchCacheKey) -> Option<Arc<Snapshot>> {
+    fn get(&mut self, key: &SearchCacheKey) -> Option<Arc<ResidentSnapshot>> {
         let position = self.entries.iter().position(|entry| &entry.key == key)?;
         let entry = self.entries.remove(position)?;
         let snapshot = entry.snapshot.clone();
@@ -96,13 +96,98 @@ impl SearchSnapshotCache {
     }
 
     /// Replace a root's obsolete generation and evict the least recently queried root above the bound.
-    fn insert(&mut self, key: SearchCacheKey, snapshot: Arc<Snapshot>) {
+    fn insert_admitted(&mut self, key: SearchCacheKey, snapshot: Arc<ResidentSnapshot>) {
         self.entries.retain(|entry| entry.key.root != key.root);
         self.entries.push_front(SearchCacheEntry { key, snapshot });
         self.entries.truncate(SEARCH_CACHE_ROOTS);
     }
 }
 
+/// One immutable allocation owner; every cloned query Arc retains this SAME-account memory promise.
+pub(crate) struct ResidentSnapshot {
+    /// Exact owned derived data, destroyed before its reservation is settled.
+    value: Option<Snapshot>,
+    /// Independent reader/cache pin, never a worker execution mount slot.
+    _memory: JsonResources,
+}
+impl std::ops::Deref for ResidentSnapshot {
+    type Target = Snapshot;
+    /// Borrow immutable data; the only absent state is inaccessible exclusive final destruction.
+    fn deref(&self) -> &Snapshot {
+        self.value.as_ref().expect("live resident snapshot")
+    }
+}
+impl Drop for ResidentSnapshot {
+    /// Last actual Arc drops all data before the resource guard settles; cache eviction alone is not release.
+    fn drop(&mut self) {
+        drop(self.value.take());
+    }
+}
+/// Admit complete decode/container growth and ownership before allocating a cold resident snapshot.
+fn snapshot_memory(encoded: u64) -> Result<JsonResources> {
+    use knowledge_core::{
+        admission::{Decision, Origin},
+        jobs::Reservation,
+    };
+    let bytes = encoded
+        .checked_mul(64)
+        .and_then(|n| n.checked_add(2 * 1024 * 1024))
+        .context("snapshot memory plan overflow")?;
+    match native_account()?.reserve(
+        Reservation {
+            memory_bytes: bytes,
+            temporary_bytes: 0,
+        },
+        Origin::BeforeVerification,
+    )? {
+        Decision::Ready(h) => Ok(JsonResources(h)),
+        Decision::Waiting(w) => Err(knowledge_storage::Error::Waiting(w).into()),
+    }
+}
+/// Native startup reuse for retained callers; never create a second pool or silently reset overrides.
+fn native_account() -> Result<&'static knowledge_core::admission::Account> {
+    use knowledge_core::admission::{Account, Error};
+    match Account::current() {
+        Ok(a) => Ok(a),
+        Err(Error::NotStarted) => {
+            let parent = std::env::temp_dir().canonicalize()?;
+            let mut ancestor = Some(parent.as_path());
+            while let Some(directory) = ancestor {
+                if fs::symlink_metadata(directory.join(CONFIG_FILE)).is_ok() {
+                    bail!(
+                        "native cache parent is inside a library; explicit external startup required"
+                    )
+                }
+                ancestor = directory.parent();
+            }
+            Ok(knowledge_storage::start_resources(&parent)?)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+#[cfg(test)]
+impl SearchSnapshotCache {
+    /// Retained fixture input is already caller-owned; admit BEFORE cloning its independent resident copy.
+    fn insert(&mut self, key: SearchCacheKey, snapshot: Arc<Snapshot>) {
+        let mut size = knowledge_storage::JsonSize {
+            bytes: 0,
+            limit: native_account()
+                .expect("native fixture account")
+                .policy()
+                .memory_bytes
+                / 64,
+        };
+        serde_json::to_writer(&mut size, snapshot.as_ref()).expect("finite fixture metadata");
+        let memory = snapshot_memory(size.bytes).expect("admitted native fixture copy");
+        self.insert_admitted(
+            key,
+            Arc::new(ResidentSnapshot {
+                value: Some((*snapshot).clone()),
+                _memory: memory,
+            }),
+        );
+    }
+}
 /// Resident entries are only accessed briefly; filesystem, decoding, search, and provider work stay outside this mutex.
 static SEARCH_SNAPSHOTS: OnceLock<Mutex<SearchSnapshotCache>> = OnceLock::new();
 
@@ -117,7 +202,7 @@ struct SnapshotSource {
 /// Borrow validated immutable records while retaining this query's own reader lease through retrieval.
 /// Dropping this value releases its lease; resident cache entries never delay later publication.
 pub(crate) struct SearchSnapshot {
-    pub snapshot: Arc<Snapshot>,
+    pub snapshot: Arc<ResidentSnapshot>,
     pub directory: PathBuf,
     pub config: Config,
     _readers: File,
@@ -126,6 +211,16 @@ pub(crate) struct SearchSnapshot {
 /// Treats any marker entry as a root boundary without following symlinks or hiding inspection failures.
 /// Malformed markers remain boundaries until repaired; opening them performs separate schema validation.
 pub(crate) fn has_marker(directory: &Path) -> Result<bool> {
+    // The retained enumerator uses this boundary seam for internal directories too.
+    // Recognized native journal bookkeeping is not a source tree or an ancestor-opening fallback.
+    if directory.file_name().is_some_and(|n| n == "journal")
+        && fs::symlink_metadata(directory.join(".write.lock")).is_ok_and(|m| m.is_file())
+        && directory
+            .parent()
+            .is_some_and(|p| fs::symlink_metadata(p.join(CONFIG_FILE)).is_ok())
+    {
+        return Ok(true);
+    }
     match fs::symlink_metadata(directory.join(CONFIG_FILE)) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -238,15 +333,181 @@ pub(crate) fn check_components(root: &Path, relative: &Path, required: bool) -> 
     Ok(())
 }
 
-/// Atomically serializes JSON in the destination directory and synchronizes the new file.
+/// Native legacy metadata owner: compare current approved before/after documents, never infer a grant from them.
+struct LegacyMetadataOwner {
+    /// Already selected canonical native root, not a supplied manifest location.
+    root: PathBuf,
+    /// Actual configuration admitted by the retained caller before effects.
+    before: serde_json::Value,
+    /// Exact explicitly approved identity-upgrade result, when the marker itself is selected.
+    after: Option<serde_json::Value>,
+    /// Local operation qualifier only; not a portable permission or discovered source identity.
+    library: String,
+}
+impl knowledge_storage::WritePolicy for LegacyMetadataOwner {
+    /// Recheck the current native marker/context for this private retained adapter on every effect boundary.
+    fn current(
+        &self,
+    ) -> std::result::Result<knowledge_storage::WriteContext, knowledge_storage::Error> {
+        let path = self.root.join(CONFIG_FILE);
+        let own_marker_gap = self.after.is_some()
+            && fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        if !own_marker_gap {
+            let now: serde_json::Value =
+                read_json(&path).map_err(|_| knowledge_storage::Error::Context)?;
+            if now != self.before && self.after.as_ref() != Some(&now) {
+                return Err(knowledge_storage::Error::Context);
+            }
+        }
+        // Native caller authority is independent of authored marker presence. The auxiliary writer
+        // still proves expected bytes before displacement and installs exclusively, so only its
+        // explicitly approved marker-update gap is tolerated; replacement/parse/permission failures refuse.
+        Ok(knowledge_storage::WriteContext {
+            library_id: self.library.clone(),
+            revision: 0,
+            text_root: "wiki".into(),
+            writable: true,
+            raw_original_writes: false,
+            outside_scope: vec![],
+        })
+    }
+}
+/// Synchronous owned scratch; later declared buffers/handles drop before its actual settlement.
+struct JsonResources(knowledge_core::admission::Holding);
+impl Drop for JsonResources {
+    /// All owned serialization/native I/O has ended; this never proves a detached worker stopped.
+    fn drop(&mut self) {
+        let _ = self.0.finish();
+    }
+}
+/// Serialize through the actual native no-clobber/recovery writer, never unconditional persist/rename.
+/// This retained metadata adapter does NOT claim v2 text/Git saved_local; new authored callers use Store::apply.
 pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path.parent().context("JSON destination has no parent")?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(&mut temporary, value)?;
-    temporary.write_all(b"\n")?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    File::open(parent)?.sync_all()?;
+    write_json_using(path, value, None)
+}
+/// Reuse an actual enclosing build promise when present; do not double-charge the same generated output.
+fn write_json_using<T: Serialize>(
+    path: &Path,
+    value: &T,
+    admitted: Option<&knowledge_core::admission::Holding>,
+) -> Result<()> {
+    use knowledge_core::{
+        admission::{Decision, Origin},
+        backend::Budget,
+        jobs::Reservation,
+    };
+    let account = native_account()?;
+    let mut size = knowledge_storage::JsonSize {
+        bytes: 0,
+        limit: account.policy().memory_bytes / 64,
+    };
+    serde_json::to_writer_pretty(&mut size, value)?;
+    let mut root = path
+        .parent()
+        .context("JSON destination has no parent")?
+        .to_path_buf();
+    while !fs::symlink_metadata(root.join(CONFIG_FILE)).is_ok() {
+        if !root.pop() {
+            bail!("native JSON destination has no selected library")
+        }
+    }
+    let relative = path
+        .strip_prefix(&root)?
+        .to_str()
+        .context("JSON destination is not UTF-8")?;
+    let old_len = fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0);
+    let marker_len = fs::metadata(root.join(CONFIG_FILE))?.len();
+    let bytes = size
+        .bytes
+        .checked_add(1)
+        .context("JSON size overflow")?
+        .max(old_len)
+        .max(marker_len)
+        .max(8192);
+    let memory = bytes
+        .checked_mul(64)
+        .and_then(|n| n.checked_add(2 * 1024 * 1024))
+        .context("JSON memory plan overflow")?;
+    let derived = relative.starts_with(".omni/indexes/") || relative == ".omni/current.json";
+    let mut resources = if admitted.is_none() {
+        Some(JsonResources(
+            match account.reserve(
+                Reservation {
+                    memory_bytes: memory,
+                    temporary_bytes: if derived { size.bytes + 1 } else { 0 },
+                },
+                Origin::BeforeVerification,
+            )? {
+                Decision::Ready(h) => h,
+                Decision::Waiting(w) => return Err(knowledge_storage::Error::Waiting(w).into()),
+            },
+        ))
+    } else {
+        None
+    };
+    let holding = match admitted {
+        Some(h) => h,
+        None => {
+            &resources
+                .as_ref()
+                .context("native JSON resource owner missing")?
+                .0
+        }
+    };
+    if holding.remaining()?.memory_bytes < memory {
+        bail!("native enclosing JSON memory plan is insufficient")
+    }
+    let before: serde_json::Value = read_json(&root.join(CONFIG_FILE))?;
+    let library = before
+        .get("library_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("legacy-{}", root.display()));
+    let after = if relative == CONFIG_FILE {
+        Some(serde_json::to_value(value)?)
+    } else {
+        None
+    };
+    let store = knowledge_storage::Store::open(
+        &root,
+        &library,
+        &format!("legacy-{}", std::process::id()),
+        LegacyMetadataOwner {
+            root: root.clone(),
+            before,
+            after,
+            library: library.clone(),
+        },
+    )?;
+    let preflight = knowledge_storage::Preflight {
+        holding,
+        budget: Budget {
+            max_files: 1,
+            max_bytes: bytes,
+            max_millis: 60000,
+            max_memory_bytes: memory,
+        },
+    };
+    let expected = store.observe_auxiliary(relative, &preflight)?;
+    let operation = uuid::Uuid::new_v4().to_string();
+    let started = std::time::Instant::now();
+    let installed = loop {
+        match store.write_auxiliary_json(&operation, relative, expected.as_ref(), value, &preflight)
+        {
+            // Auxiliary Busy is only its entry lock, BEFORE intent/candidate/payload effects.
+            // Keep the exact expected version and operation; never replay any other failure class.
+            Err(knowledge_storage::Error::Busy)
+                if started.elapsed()
+                    < std::time::Duration::from_millis(preflight.budget.max_millis) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(2))
+            }
+            result => break result?,
+        }
+    };
+    if derived && let Some(resources) = resources.as_mut() {
+        resources.0.written(installed.length)?;
+    }
     Ok(())
 }
 
@@ -257,6 +518,42 @@ pub(crate) fn publish(kb: &KnowledgeBase, snapshot: &Snapshot) -> Result<(String
     {
         bail!("index version or library identity mismatch; rebuild this library's index");
     }
+    // Retained input Snapshot belongs to the admitted caller; reserve complete local build/runtime
+    // and new generated-byte promises BEFORE Tantivy/candidate allocation on the actual selected volume.
+    let account = native_account()?;
+    #[cfg(unix)]
+    if account.generated_directory()?.metadata()?.dev() != fs::metadata(&kb.root)?.dev() {
+        bail!("legacy generated volume differs from the selected native account");
+    }
+    let mut size = knowledge_storage::JsonSize {
+        bytes: 0,
+        limit: account.policy().memory_bytes / 64,
+    };
+    serde_json::to_writer(&mut size, snapshot)?;
+    let scale = size
+        .bytes
+        .checked_mul(64)
+        .context("index resource plan overflow")?;
+    let memory = scale
+        .checked_add(128 * 1024 * 1024)
+        .context("index memory plan overflow")?;
+    let storage = scale
+        .checked_add(16 * 1024 * 1024)
+        .context("index storage plan overflow")?;
+    let mut build = JsonResources(
+        match account.reserve(
+            knowledge_core::jobs::Reservation {
+                memory_bytes: memory,
+                temporary_bytes: storage,
+            },
+            knowledge_core::admission::Origin::BeforeVerification,
+        )? {
+            knowledge_core::admission::Decision::Ready(h) => h,
+            knowledge_core::admission::Decision::Waiting(w) => {
+                return Err(knowledge_storage::Error::Waiting(w).into());
+            }
+        },
+    );
     let parent = kb.root.join(".omni/indexes");
     let temporary = tempfile::Builder::new()
         .prefix("build-")
@@ -264,7 +561,11 @@ pub(crate) fn publish(kb: &KnowledgeBase, snapshot: &Snapshot) -> Result<(String
     let index_path = temporary.path().join("tantivy");
     fs::create_dir(&index_path)?;
     search::build_bm25(&index_path, &snapshot.records)?;
-    write_json_atomic(&temporary.path().join("manifest.json"), snapshot)?;
+    write_json_using(
+        &temporary.path().join("manifest.json"),
+        snapshot,
+        Some(&build.0),
+    )?;
     let mut owned_paths = vec![];
     for entry in WalkDir::new(temporary.path())
         .min_depth(1)
@@ -281,7 +582,24 @@ pub(crate) fn publish(kb: &KnowledgeBase, snapshot: &Snapshot) -> Result<(String
         );
     }
     owned_paths.sort();
-    write_json_atomic(&temporary.path().join("owned-files.json"), &owned_paths)?;
+    write_json_using(
+        &temporary.path().join("owned-files.json"),
+        &owned_paths,
+        Some(&build.0),
+    )?;
+    let mut written = 0u64;
+    for entry in WalkDir::new(temporary.path()).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            written = written
+                .checked_add(entry.metadata()?.len())
+                .context("generated byte count overflow")?;
+        }
+    }
+    if written > storage {
+        bail!("generated native plan exceeded; unpublished candidate retained by owned cleanup");
+    }
+    build.0.written(written)?;
     let random = temporary
         .path()
         .file_name()
@@ -307,7 +625,11 @@ pub(crate) fn publish(kb: &KnowledgeBase, snapshot: &Snapshot) -> Result<(String
     } else {
         None
     };
-    write_json_atomic(&kb.root.join(".omni/current.json"), &generation)?;
+    write_json_using(
+        &kb.root.join(".omni/current.json"),
+        &generation,
+        Some(&build.0),
+    )?;
     let warnings = retire_generations(kb, &generation, previous.as_deref());
     Ok((generation, warnings))
 }
@@ -438,12 +760,16 @@ fn load_search_using(
     let snapshot = match cached {
         Some(snapshot) => snapshot,
         None => {
-            let snapshot = Arc::new(decode_snapshot(&mut source)?);
+            let memory = snapshot_memory(source.key.manifest.length)?;
+            let snapshot = Arc::new(ResidentSnapshot {
+                value: Some(decode_snapshot(&mut source)?),
+                _memory: memory,
+            });
             if cfg!(unix) {
                 cache
                     .lock()
                     .map_err(|_| anyhow::anyhow!("search snapshot cache is unavailable"))?
-                    .insert(source.key.clone(), snapshot.clone());
+                    .insert_admitted(source.key.clone(), snapshot.clone());
             }
             snapshot
         }

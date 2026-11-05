@@ -80,7 +80,9 @@ impl Fixture {
             )
             .unwrap(),
         };
-        let parent = tempfile::tempdir().unwrap();
+        let parent = tempfile::Builder::new()
+            .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
+            .unwrap();
         fs::create_dir(parent.path().join("home")).unwrap();
         fs::write(parent.path().join("home/omni-knowledge.json"),b"{\"version\":2,\"library_id\":\"lib\",\"name\":\"fixture\",\"text_root\":\"pages\",\"mounts\":[],\"convention_version\":\"0.2\",\"exposure\":{\"mode\":\"off\",\"sensitive\":false,\"excluded_paths\":[],\"transports\":[]}}").unwrap();
         let mut pre = match account

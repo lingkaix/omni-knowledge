@@ -102,6 +102,9 @@ impl<P: LocalReadPolicy> LocalMount<P> {
     /// Establish bounded actual Linux inotify hints; no per-root pool or background polling thread.
     /// Partial enumeration/watch-limit exhaustion remains incomplete coverage and forces reconciliation.
     pub fn watch(&self, budget: Budget) -> Result<HintWatch<'_, P>, WatchError> {
+        if self.kind == BackendKind::Nas {
+            return Err(WatchError::Unsupported);
+        }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = budget;
@@ -139,7 +142,7 @@ impl<P: LocalReadPolicy> LocalMount<P> {
                 Enumeration::Complete { entries, .. } => (entries, true),
                 Enumeration::Partial { entries, .. } => (entries, false),
             };
-            let admission = match gate(&self.policy, &self.library_id, &self.mount_id)
+            let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)
                 .map_err(WatchError::Backend)?
             {
                 Gate::Proceed(a) => a,

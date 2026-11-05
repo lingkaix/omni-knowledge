@@ -18,6 +18,8 @@ Use `Account::submit` for typed TooLargeMemory/TooLargeStorage before verified-k
 Use `job_status` for a coherent native waiting reason and the current execution-owned portion; the frozen Snapshot retains admitted intent.
 `Account::queue()` is exactly the existing owner for claim/cancel/settle, not a parallel resource controller.
 `reserve(need, Origin::BeforeVerification)` reserves real read/hash/inspection work without constructing any verified digest or cache key; Startup and current Job origins cover the other actual costs.
+`generated_directory` duplicates the actual selected-volume descriptor for qualified generated writers; it does not authorize a source location or establish cache placement outside source trees.
+Native owners validate actual placement, qualify private namespaces, prepay generated writes and reconcile newly confirmed bytes against that same Account.
 Decision::Waiting(Memory) means current contention, not an impossible job or an instruction to spin; a whole-limit excess is a distinct typed refusal.
 
 `split_claim` atomically moves part of the already charged claim into a non-cloneable Holding; total charge never drops or doubles.

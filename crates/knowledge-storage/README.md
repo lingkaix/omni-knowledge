@@ -64,6 +64,34 @@ Qualified birth/generation/volume identity can support continuity; equal digests
 Previous complete generations and live pins remain the cache owner's responsibility; this module never evicts them to obtain capacity.
 Builder checks use actual private files, competing native destinations, interrupted/reopened operations and real Git; they are not independent admission/durability acceptance.
 The local adapter now supplies admitted full-source verification, admitted stat-first enumeration and caller-driven Linux inotify hints.
-Durable inventory/event replay, legacy migration inventory and Root storage.rs cutover are unfinished; this is a coherent native writer boundary, not complete M1 delivery.
-Native macOS execution and unavailable platform compilation remain separate qualification gaps; FSEvents is not yet implemented.
-See the [M1 change record](../../docs/changes/2026-11-05-m1-storage.md) for exact gates and the retained positive-watch ENOSPC setup RED.
+## Durable Inventory And Replay
+
+Store::reconcile_local streams eager metadata with finite working memory, optionally verifies actual bodies, and appends version-1 observations to the selected writer journal.
+Observations contain source_id, qualified backend/native root, actual stat and nullable verified Version, separate Verification pending/budget/failed/unsupported outcomes, change class and identity ambiguity.
+Equal content never merges source IDs; rename continuity requires qualified reuse-resistant identity, absent old path and no hard-link ambiguity.
+Complete scoped scans append durable Checkpoint records with actual read-policy revision/exclusion fingerprint, UTC time and explicit startup/change/quiet/daily/manual Schedule.
+Partial or failed scans preserve observations and never infer absence from quiet, denial, unavailable storage or omitted coverage.
+Checkpoint fingerprints and declared scopes are correlation evidence, not approvals.
+M6 owns when caller-driven checks run; no background scheduler or event-replay claim is invented.
+
+The external selected-volume projection is disposable and qualified by root, mount/backend and writer.
+Every reused projection frame binds an exact actual visible journal proof; rebuild replays bounded lines sequentially without retaining whole inventory in RAM.
+Eviction does not lose source identities or annotation authority; replay reports exact byte cursors, bounded progress and malformed tails without truncation.
+Large histories require explicit sufficient replay/work budgets; budget refusal is not a corpus-size prohibition or empty success.
+Generated projection bytes reserve and reconcile through the same Account before publication.
+Generated state must be outside both the home and selected source tree; actual descriptor ancestry is checked.
+
+## Retained Root Adapter And Migration
+
+Root storage.rs now routes JSON writes through native expected-version/no-clobber installation, and resident snapshots retain same-account memory through the last Arc reader.
+Actual index builds reserve complete working memory and generated-volume promises before construction, and reconcile completed output bytes.
+Enclosing builds lend their actual holding to JSON writes rather than double-charge the same generated output.
+Authored metadata recovery remains visible; derived index JSON recovery is outside the home on the selected same native volume.
+The retained v1 index layout is not silently converted, and auxiliary JSON publication does not claim v2 Git saved_local.
+Read-only migration_inventory reports Core marker interpretation, pages/wiki conflicts, known legacy indexes/sidecars and unknown preserved state.
+It performs no migration, deletion, secret lookup, configuration/account action or unknown-state adoption.
+
+The composed Git seam includes correction 2c86db624bc705343e51483b70f087588b29ad4a; the native writer's earlier frozen seam remains historical evidence.
+Native FSEvents now has an explicit locked macOS binding and a real native-only delivery test.
+Native macOS compilation/execution and consequential independent review remain qualification gaps, not Linux-derived successes.
+See the [M1 change record](../../docs/changes/2026-11-05-m1-storage.md) for exact gates, remaining integration ownership, historical ENOSPC receipts and later actual positive Linux event/resource-lifetime passes without limit changes.

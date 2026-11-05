@@ -76,8 +76,24 @@ Only the native owner may acknowledge a completed durable relevant scan at an un
 New/incomplete directory coverage cannot be repaired by a quiet interval or acknowledgement; rebuild the watch after reconciliation.
 Native watch/instance/descriptor exhaustion is `WatchError::Exhausted`, never empty success or evidence of absence.
 Drop closes the exact native descriptor and destroys owned policy metadata before settling its independent holding; execution mount slots are not retained.
-No native FSEvents binding is implemented yet: macOS watch returns Unsupported, with reconciliation still available.
+monitor uses the actual notify 7 FSEvents binding on macOS; watch remains the Linux-only hint primitive and returns Unsupported on macOS.
+FSEvents callback faults and gaps require reconciliation; its exact watcher stops and joins before runtime/policy memory holdings settle.
+The native-only delivery/resource test requires actual macOS execution; Linux compilation does not qualify that binding.
 The frozen backend reliable_watch capability remains false; these hints do not claim durable replay or end-to-end tracking qualification.
+
+## Streaming, OS-Mounted NAS And Explicit Fallback
+
+visit delivers bounded eager metadata directly to an admitted callback instead of retaining whole trees in RAM.
+It checks current policy, dynamic child markers and native mount-device boundaries, and preserves explicit partial/error stops.
+read_scope fingerprints actual native admission revision/exclusions; contains_directory checks actual source/cache descriptor ancestry without granting permission.
+open_os_mount requires the native owner's explicit OsMountedNas premise; it does not discover credentials, log in, hydrate, or infer remote-version capabilities.
+NAS reports reduced capabilities and refuses native watches rather than treating local stat success as reliable remote event evidence.
+
+monitor exposes Inotify/FSEvents/Polling mode, native failure, hint epoch, coverage and durable_event_replay false.
+Polling is permitted only by explicit MonitorPolicy approval, with a prepaid metadata budget and finite caller-driven interval; it is never an automatic response to ENOSPC.
+A partial scan or unacknowledged hint remains dirty until the trusted owner acknowledges an actual complete durable reconciliation at the same epoch.
+Quiet polls cannot establish absence, repair lost native coverage, claim full text/vector completeness or replay an event cursor.
+No independent controller/thread is added for polling; actual native failure remains visible when fallback is approved.
 
 ## Budgets And Cancellation
 
@@ -99,11 +115,11 @@ It checks confinement, exclusion, stat without a large-file body read on Linux, 
 
 ## Limits Still Open
 
-Inner mount points are not detected or refused.
+Streaming visit detects child marker boundaries and mount-device crossings; the frozen list path retains its documented caller-supplied exclusions.
 macOS source is compiled behind `cfg(target_os = "macos")` for birth time and generation. This Linux build does not execute it.
 Other targets compile an empty crate because the module is limited to Linux and macOS.
 Cooperative budgets do not bound a single kernel call.
 Descriptor checks do not make a same-user directory swap atomic against a privileged remount.
-No write backend, durable inventory controller, GC, package, service, or MCP cutover is included.
-The [M1 change record](../../docs/changes/2026-11-05-m1-storage.md) tracks the positive-watch ENOSPC setup RED and native qualification debt.
-Resolve that gap with actual available native-watch evidence, not altered limits, bypassed checks, fake events or a false success carrier.
+No write backend, GC, package, service, or MCP cutover is included; durable reconciliation belongs to knowledge-storage.
+The [M1 change record](../../docs/changes/2026-11-05-m1-storage.md) preserves the historical ENOSPC receipts and later actual positive Linux event/close/settlement passes.
+No limits were changed and no positive case was skipped; native macOS qualification and independent review remain separate obligations.

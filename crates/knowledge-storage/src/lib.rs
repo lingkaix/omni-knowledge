@@ -2,7 +2,16 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+mod auxiliary;
 mod bootstrap;
+mod migration;
+mod tracking;
+pub use auxiliary::{JsonSize, start_resources};
+pub use migration::{MigrationInventory, MigrationItem, MigrationKind};
+pub use tracking::{
+    ChangeKind, Checkpoint, Observation, ReconcileOptions, Reconciled, Replay, Schedule,
+    Verification,
+};
 mod journal;
 mod native;
 pub use bootstrap::{ImportResult, InitOutcome, Preflight, Seed};
@@ -46,6 +55,10 @@ pub enum Error {
     Indeterminate,
     /// The one existing process resource account refused admission.
     Admission(knowledge_core::admission::Error),
+    /// Actual source backend refusal, never an empty successful observation.
+    Backend(knowledge_core::backend::BackendError),
+    /// Actual shared-account contention without a retry loop or partial promise.
+    Waiting(knowledge_core::admission::Waiting),
     /// The independently owned local Git seam refused the operation.
     History(knowledge_history::Error),
 }

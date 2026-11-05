@@ -314,6 +314,17 @@ impl Account {
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
+    /// Duplicate the actual selected generated-volume directory for a qualified native derived writer.
+    /// This neither selects a new volume nor grants source/library authority; the caller pays descriptor costs.
+    pub fn generated_directory(&self) -> Result<File, Error> {
+        let i = self.queue.lock()?;
+        i.extra
+            .as_ref()
+            .ok_or(Error::NotStarted)?
+            .directory
+            .try_clone()
+            .map_err(|_| Error::NativeFacts)
+    }
     /// Return visible startup configuration/native facts, not authority or physical enforcement.
     pub fn policy(&self) -> Policy {
         self.policy

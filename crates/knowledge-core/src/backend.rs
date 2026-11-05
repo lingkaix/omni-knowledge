@@ -3,10 +3,10 @@
 //! This module has no adapter, filesystem access, credential store, registry, or authorization.
 //! Constructing any value asserts data only; real adapters and the service must check current admission.
 use crate::data::{BackendKind, ContentDigest, DataError, RelativePath};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A data qualifier for an already selected library/home or mount, not root admission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendIdentity {
     /// Stable nonempty library data ID; never inferred from a name or digest.
     pub library_id: String,
@@ -17,7 +17,7 @@ pub struct BackendIdentity {
 }
 
 /// Backend-qualified continuity evidence, not content identity or permission to reassociate assets.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIdEvidence {
     /// Library/mount/backend in which this evidence was observed.
     pub backend: BackendIdentity,
@@ -32,7 +32,7 @@ pub struct FileIdEvidence {
 }
 
 /// Residency evidence; unknown cloud residency never implicitly permits a body read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Residency {
     /// Tested backend facts identify currently resident bytes.
@@ -44,7 +44,7 @@ pub enum Residency {
 }
 
 /// Freshness of an observation at its observation boundary, not a permanent validity promise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Freshness {
     /// The backend checked the relevant current facts; this does not imply a verified digest.
@@ -56,7 +56,7 @@ pub enum Freshness {
 }
 
 /// A typed nonavailable state; none is equivalent to a successful empty enumeration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Unavailable {
     /// The selected backend cannot currently be reached.
@@ -76,7 +76,7 @@ pub enum Unavailable {
 }
 
 /// Metadata availability, deliberately separate from freshness and byte-read admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Availability {
     /// Metadata is available; residency and read admission still need their own checks.
@@ -86,7 +86,7 @@ pub enum Availability {
 }
 
 /// A non-hashing stat observation; no field supplies a digest or portable authority.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatSnapshot {
     /// Backend-qualified context in which this snapshot was observed.
     pub backend: BackendIdentity,
@@ -109,7 +109,7 @@ pub struct StatSnapshot {
 }
 
 /// Metadata can retain prior/placeholder facts without admitting any source bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatObservation {
     /// Actual availability, including explicit offline/denied/placeholder/unknown states.
     pub availability: Availability,
@@ -118,7 +118,7 @@ pub struct StatObservation {
 }
 
 /// An explicit expected byte version to revalidate, not a constructor-issued verification grant.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpectedVersion {
     /// Claimed verified SHA-256; the caller must obtain it from actual admitted bytes.
     pub digest: ContentDigest,
@@ -284,7 +284,7 @@ pub struct RangeRead {
 }
 
 /// Classified operation failures; ordinary availability is not collapsed into success or absence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendError {
     /// Required current availability/residency/version was not established.

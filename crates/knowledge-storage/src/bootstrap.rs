@@ -96,17 +96,17 @@ struct Imported {
     proof: journal::Proof,
 }
 /// Actual pre-verification work bound; does not release the caller's resource capability.
-struct Bounds {
+pub(super) struct Bounds {
     /// Reserved scratch available for this call.
-    memory: u64,
+    pub(super) memory: u64,
     /// Finite native input/output work ceiling.
-    bytes: u64,
+    pub(super) bytes: u64,
     /// Earliest representable caller deadline.
-    deadline: Instant,
+    pub(super) deadline: Instant,
 }
 impl Bounds {
     /// Establish actual process ownership and prepaid resources before operation allocations.
-    fn new(p: &Preflight<'_>) -> Result<Self, Error> {
+    pub(super) fn new(p: &Preflight<'_>) -> Result<Self, Error> {
         Account::current()?;
         let remaining = p.holding.remaining()?;
         let memory = remaining.memory_bytes.min(p.budget.max_memory_bytes);
@@ -127,7 +127,7 @@ impl Bounds {
         })
     }
     /// Check between native steps/chunks, never pretend this preempts a blocked kernel operation.
-    fn check(&self) -> Result<(), Error> {
+    pub(super) fn check(&self) -> Result<(), Error> {
         if Instant::now() >= self.deadline {
             Err(Error::Budget)
         } else {
@@ -135,7 +135,12 @@ impl Bounds {
         }
     }
     /// Preflight every operation-owned identity copy/escaping before metadata allocation.
-    fn identities(&self, operation: &str, library: &str, writer: &str) -> Result<(), Error> {
+    pub(super) fn identities(
+        &self,
+        operation: &str,
+        library: &str,
+        writer: &str,
+    ) -> Result<(), Error> {
         if operation.is_empty() {
             return Err(Error::Invalid);
         }
@@ -151,7 +156,7 @@ impl Bounds {
         Ok(())
     }
     /// Bound private metadata parsing/encoding within prepaid scratch, not a persistent-format quota.
-    fn control(&self) -> u64 {
+    pub(super) fn control(&self) -> u64 {
         self.bytes.min(self.memory.saturating_sub(16384) / 64)
     }
 }

@@ -16,4 +16,5 @@ path = "../public_consumer.rs"
 [dependencies]
 knowledge-core = { path = "../../.." }
 libc = "=0.2.190"
+rustix = { version = "=1.1.5", features = ["fs"] }
 sha2 = "=0.10.9"

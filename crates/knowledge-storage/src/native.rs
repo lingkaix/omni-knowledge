@@ -85,6 +85,22 @@ pub(crate) fn regular_identity(f: &File) -> Result<(u64, u64), Error> {
     }
     Ok((m.dev(), m.ino()))
 }
+/// Determine actual descriptor ancestry without path-prefix guesses or following symlinks.
+pub(crate) fn within(child: &File, ancestor: &File) -> Result<bool, Error> {
+    let target = identity(ancestor)?;
+    let mut current = child.try_clone().map_err(|_| Error::Io)?;
+    loop {
+        let id = identity(&current)?;
+        if id == target {
+            return Ok(true);
+        }
+        let parent = directory(&current, "..")?;
+        if identity(&parent)? == id {
+            return Ok(false);
+        }
+        current = parent;
+    }
+}
 /// Check current selected path still resolves to the captured root.
 pub(crate) fn bound(path: &Path, held: &File) -> Result<(), Error> {
     if identity(&bind(path)?)? != identity(held)? {

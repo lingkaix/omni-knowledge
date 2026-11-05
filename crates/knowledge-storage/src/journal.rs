@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
 };
 
 /// Exact native byte extent of a synchronized journal record, not a permission or logical clock.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Proof {
     /// Actual stream identity, retained across recovery by a different current writer.
@@ -19,6 +19,12 @@ pub(crate) struct Proof {
     length: u64,
     /// SHA-256 of exactly those bytes.
     digest: String,
+}
+impl Proof {
+    /// Exact writer-local byte position, not a global clock or authority.
+    pub(crate) fn position(&self) -> u64 {
+        self.offset
+    }
 }
 /// Versioned metadata-only writer observation; bodies and raw request arguments are never stored here.
 #[derive(Serialize, Deserialize)]
@@ -56,6 +62,45 @@ struct Record {
     candidate: Option<String>,
     /// Current typed local phase.
     outcome: String,
+    /// Optional metadata-only qualified source observation; old operation records remain readable.
+    #[serde(default)]
+    observation: Option<crate::tracking::Observation>,
+    /// Optional actual qualified scan boundary; old records remain readable.
+    #[serde(default)]
+    checkpoint: Option<crate::tracking::Checkpoint>,
+}
+/// Validated metadata-only replay variants; source frames carry their exact visible anchor.
+pub(crate) enum ReplayItem {
+    /// One actual source observation.
+    Source(Box<crate::tracking::Observation>, Proof),
+    /// One actual complete/partial scope boundary.
+    Checkpoint(crate::tracking::Checkpoint),
+}
+/// Borrow actual typed source/scope metadata without introducing another controller.
+#[derive(Clone, Copy)]
+enum TrackingEvidence<'a> {
+    /// Source evidence.
+    Source(&'a crate::tracking::Observation),
+    /// Scope completion evidence.
+    Checkpoint(&'a crate::tracking::Checkpoint),
+}
+/// Next byte cursor plus an optional source record; operation records also advance the cursor.
+type ReplayRecord = (u64, Option<ReplayItem>);
+/// Encode the actual observed availability, not a successful empty-source substitute.
+fn availability_name(a: knowledge_core::backend::Availability) -> &'static str {
+    use knowledge_core::backend::{Availability, Unavailable};
+    match a {
+        Availability::Available => "available",
+        Availability::Unavailable(u) => match u {
+            Unavailable::Offline => "offline",
+            Unavailable::Denied => "denied",
+            Unavailable::Placeholder => "placeholder",
+            Unavailable::Unknown => "unknown",
+            Unavailable::Changed => "changed",
+            Unavailable::Unsupported => "unsupported",
+            Unavailable::Deleted => "deleted",
+        },
+    }
 }
 /// Held writer stream; the caller already owns the native single-writer lock.
 pub(crate) struct Journal {
@@ -65,6 +110,12 @@ pub(crate) struct Journal {
     writer: String,
     /// Finite caller memory-derived record ceiling, not a durable format quota.
     max: u64,
+    /// Reuse bounded sequential buffering; random proof/tail I/O explicitly invalidates it.
+    replay: Option<BufReader<File>>,
+    /// Exact next logical replay offset, independent of buffered read-ahead.
+    replay_next: u64,
+    /// Actual sequence continuity through this exact sequential replay.
+    replay_sequence: Option<u64>,
 }
 impl Journal {
     /// Open one visible writer stream; refuse malformed/truncated tails without modifying them.
@@ -73,6 +124,9 @@ impl Journal {
             file: native::append_file(dir, &format!("{writer}.jsonl"))?,
             writer: writer.to_owned(),
             max,
+            replay: None,
+            replay_next: 0,
+            replay_sequence: None,
         };
         j.last_sequence()?;
         Ok(j)
@@ -86,6 +140,9 @@ impl Journal {
             file: native::regular(dir, &format!("{writer}.jsonl"))?.ok_or(Error::Recovery)?,
             writer: writer.to_owned(),
             max,
+            replay: None,
+            replay_next: 0,
+            replay_sequence: None,
         })
     }
     /// Report a tail problem without discarding earlier verifiable operation evidence.
@@ -95,6 +152,7 @@ impl Journal {
     /// Read only a bounded final line to derive the next writer-local sequence.
     /// The complete prefix is retained; no repair, rewrite or silent truncation occurs.
     fn last_sequence(&mut self) -> Result<u64, Error> {
+        self.replay = None;
         let len = self.file.metadata().map_err(|_| Error::Io)?.len();
         if len == 0 {
             return Ok(0);
@@ -141,7 +199,7 @@ impl Journal {
         candidate: Option<&str>,
         phase: &str,
     ) -> Result<Proof, Error> {
-        self.append_with(operation, intent, candidate, phase, None)
+        self.append_with(operation, intent, candidate, phase, None, None)
     }
     /// Record an actually verified new file observation without assigning a hash-derived source identity.
     pub(crate) fn append_observed(
@@ -152,7 +210,7 @@ impl Journal {
         digest: &str,
         phase: &str,
     ) -> Result<Proof, Error> {
-        self.append_with(operation, intent, None, phase, Some((path, digest)))
+        self.append_with(operation, intent, None, phase, Some((path, digest)), None)
     }
     /// Append synchronized metadata before/after real effects and return the exact durable record extent.
     fn append_with(
@@ -162,7 +220,16 @@ impl Journal {
         candidate: Option<&str>,
         phase: &str,
         asset: Option<(&str, &str)>,
+        tracking: Option<TrackingEvidence<'_>>,
     ) -> Result<Proof, Error> {
+        let observation = match tracking {
+            Some(TrackingEvidence::Source(o)) => Some(o),
+            _ => None,
+        };
+        let checkpoint = match tracking {
+            Some(TrackingEvidence::Checkpoint(c)) => Some(c),
+            _ => None,
+        };
         let needed = [
             self.writer.len(),
             operation.len(),
@@ -193,17 +260,26 @@ impl Journal {
                 Sha256::digest(format!("{}:{}:{seq}", self.writer.len(), self.writer).as_bytes())
             ),
             operation_id: Some(operation.to_owned()),
-            source_id: None,
+            source_id: observation.map(|o| o.source_id.clone()),
             old_digest: None,
-            new_digest: asset.map(|(_, d)| d.to_owned()),
+            new_digest: observation
+                .and_then(|o| o.version.as_ref().map(|v| v.digest.as_str().to_owned()))
+                .or_else(|| asset.map(|(_, d)| d.to_owned())),
             old_path: None,
-            new_path: asset.map(|(p, _)| p.to_owned()),
-            availability: "available".into(),
+            new_path: observation
+                .map(|o| o.stat.path.as_str().to_owned())
+                .or_else(|| asset.map(|(p, _)| p.to_owned())),
+            availability: observation
+                .map(|o| availability_name(o.availability))
+                .unwrap_or("available")
+                .into(),
             evidence_kind: "local_operation".into(),
             observed_at,
             intent_digest: intent.to_owned(),
             candidate: candidate.map(str::to_owned),
             outcome: phase.to_owned(),
+            observation: observation.cloned(),
+            checkpoint: checkpoint.cloned(),
         };
         let mut bytes = serde_json::to_vec(&record).map_err(|_| Error::Io)?;
         if bytes.len() as u64 >= self.max {
@@ -221,6 +297,185 @@ impl Journal {
             length: bytes.len() as u64,
             digest: format!("{:x}", Sha256::digest(&bytes)),
         })
+    }
+    /// Append actual qualified source metadata without a body/annotation authority or inferred digest.
+    pub(crate) fn append_tracking(
+        &mut self,
+        operation: &str,
+        observation: &crate::tracking::Observation,
+    ) -> Result<Proof, Error> {
+        let mut size = crate::JsonSize {
+            bytes: 0,
+            limit: self.max / 4,
+        };
+        serde_json::to_writer(&mut size, observation).map_err(|_| Error::Budget)?;
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(observation).map_err(|_| Error::Budget)?)
+        );
+        self.append_with(
+            operation,
+            &digest,
+            None,
+            "observed",
+            None,
+            Some(TrackingEvidence::Source(observation)),
+        )
+    }
+    /// Persist an actual qualified scope boundary only after corresponding native inventory effects are durable.
+    pub(crate) fn append_checkpoint(
+        &mut self,
+        c: &crate::tracking::Checkpoint,
+    ) -> Result<Proof, Error> {
+        let mut size = crate::JsonSize {
+            bytes: 0,
+            limit: self.max / 4,
+        };
+        serde_json::to_writer(&mut size, c).map_err(|_| Error::Budget)?;
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(c).map_err(|_| Error::Budget)?)
+        );
+        self.append_with(
+            &c.scan,
+            &digest,
+            None,
+            if c.complete {
+                "reconcile_complete"
+            } else {
+                "reconcile_partial"
+            },
+            None,
+            Some(TrackingEvidence::Checkpoint(c)),
+        )
+    }
+    /// Validate projected metadata against actual exact synchronized visible bytes.
+    pub(crate) fn verify_tracking(
+        &mut self,
+        proof: &Proof,
+        observation: &crate::tracking::Observation,
+    ) -> Result<(), Error> {
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(observation).map_err(|_| Error::Budget)?)
+        );
+        self.verify(proof, &observation.scan, &digest, "observed")
+    }
+    /// Read one exact bounded retained record; malformed bytes stop at their original offset.
+    pub(crate) fn next_tracking(
+        &mut self,
+        offset: u64,
+        max: u64,
+    ) -> Result<Option<ReplayRecord>, Error> {
+        let end = self.file.metadata().map_err(|_| Error::Io)?.len();
+        if offset > end {
+            return Err(Error::Recovery);
+        }
+        if offset == end {
+            return Ok(None);
+        }
+        let length = (end - offset).min(max);
+        if self.replay.is_none() || self.replay_next != offset {
+            self.replay_sequence = None;
+            self.file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|_| Error::Io)?;
+            self.replay = Some(BufReader::with_capacity(
+                8192,
+                self.file.try_clone().map_err(|_| Error::Io)?,
+            ));
+        }
+        let mut bytes = Vec::new();
+        self.replay
+            .as_mut()
+            .ok_or(Error::Recovery)?
+            .take(length)
+            .read_until(b'\n', &mut bytes)
+            .map_err(|_| Error::Io)?;
+        if bytes.last() != Some(&b'\n') {
+            self.replay = None;
+            return Err(if length == end - offset {
+                Error::Recovery
+            } else {
+                Error::Budget
+            });
+        }
+        self.replay_next = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::Recovery)?;
+        let record: Record = serde_json::from_slice(&bytes).map_err(|_| Error::Recovery)?;
+        if record.format_version != 1
+            || record.writer_id != self.writer
+            || record
+                .sequence
+                .parse::<u64>()
+                .ok()
+                .is_none_or(|n| n == 0 || n.to_string() != record.sequence)
+        {
+            return Err(Error::Recovery);
+        }
+        let sequence = record
+            .sequence
+            .parse::<u64>()
+            .map_err(|_| Error::Recovery)?;
+        if (offset == 0 && sequence != 1)
+            || self
+                .replay_sequence
+                .is_some_and(|p| p.checked_add(1) != Some(sequence))
+        {
+            return Err(Error::Recovery);
+        }
+        self.replay_sequence = Some(sequence);
+        let next = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::Recovery)?;
+        let item = if let Some(o) = record.observation {
+            if o.format_version != 1
+                || record.source_id.as_deref() != Some(&o.source_id)
+                || record.new_path.as_deref() != Some(o.stat.path.as_str())
+                || record.operation_id.as_deref() != Some(&o.scan)
+                || record.outcome != "observed"
+            {
+                return Err(Error::Recovery);
+            }
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&o).map_err(|_| Error::Budget)?)
+            );
+            if record.intent_digest != digest {
+                return Err(Error::Recovery);
+            }
+            Some(ReplayItem::Source(
+                Box::new(o),
+                Proof {
+                    writer: self.writer.clone(),
+                    offset,
+                    length: bytes.len() as u64,
+                    digest: format!("{:x}", Sha256::digest(&bytes)),
+                },
+            ))
+        } else if let Some(c) = record.checkpoint {
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&c).map_err(|_| Error::Budget)?)
+            );
+            if c.format_version != 1
+                || record.intent_digest != digest
+                || record.operation_id.as_deref() != Some(&c.scan)
+                || record.outcome
+                    != if c.complete {
+                        "reconcile_complete"
+                    } else {
+                        "reconcile_partial"
+                    }
+            {
+                return Err(Error::Recovery);
+            }
+            Some(ReplayItem::Checkpoint(c))
+        } else {
+            None
+        };
+        Ok(Some((next, item)))
     }
     /// Verify synchronized aggregate evidence and report a damaged current tail without rewriting it.
     pub(crate) fn verify(
@@ -253,6 +508,7 @@ impl Journal {
         phase: &str,
         asset: Option<(&str, &str)>,
     ) -> Result<(), Error> {
+        self.replay = None;
         if proof.writer != self.writer {
             return Err(Error::Recovery);
         }
