@@ -158,7 +158,12 @@ pub(crate) fn regular(parent: &File, name: &str) -> Result<Option<File>, Error> 
     .map(File::from)
     .map_err(|_| Error::Io)?;
     let m = f.metadata().map_err(|_| Error::Io)?;
-    if !m.is_file() || m.dev() != s.st_dev || m.ino() != s.st_ino {
+    // MetadataExt::dev represents Darwin's signed dev_t with the same u64 cast.
+    #[cfg(target_os = "macos")]
+    let expected_device = s.st_dev as u64;
+    #[cfg(not(target_os = "macos"))]
+    let expected_device = s.st_dev;
+    if !m.is_file() || m.dev() != expected_device || m.ino() != s.st_ino {
         return Err(Error::Conflict);
     }
     Ok(Some(f))
