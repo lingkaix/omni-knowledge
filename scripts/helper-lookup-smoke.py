@@ -2,7 +2,7 @@
 """Smoke installed headless helpers through the public file and watch APIs.
 
 The HTML/EPUB harness is not copied into the product archive. It calls
-``extract_admitted`` and ``read_epub_admitted`` after ``Account::start`` on an
+``extract_file_funded`` and ``read_epub_file_funded`` after ``Account::start`` on an
 owned directory descriptor. ``omni --help`` is not this check.
 
 On macOS the same command also runs ``LocalMount::watch`` beside the staged
@@ -82,6 +82,7 @@ def write_project(project: Path, name: str, source: Path, crates: list[str]) -> 
     dependencies = [f'{crate} = {{ path = "{REPO / "crates" / crate}" }}' for crate in crates]
     if name == "parser-lookup-harness":
         dependencies.extend([
+            'anyhow = "1"',
             'serde_json = "1"',
             'zip = { version = "4", default-features = false, features = ["deflate"] }',
         ])
@@ -134,12 +135,10 @@ def launch(binary: Path, run: Path, env: dict) -> dict:
         [str(binary)], cwd=run, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    try:
-        stdout, stderr = process.communicate(timeout=180)
-    except subprocess.TimeoutExpired as error:
-        process.kill()
-        process.communicate(timeout=30)
-        raise ValueError(f"{binary.name} timed out and was killed: pid {process.pid}") from error
+    # The harness is the actual foreground owner of unknown M3/watch work.
+    # Its operation has native deadlines; never kill that owner on a wrapper
+    # timer and remove its fixture while group/I/O collection remains unknown.
+    stdout, stderr = process.communicate()
     if Path(f"/proc/{process.pid}").exists():
         raise ValueError(f"{binary.name} pid {process.pid} is still visible after wait")
     if process.returncode != 0:
@@ -204,7 +203,7 @@ def run_lookup(stage: Path, work: Path, harness: Path) -> dict:
             pids = report.get("child_pids")
             if not isinstance(pids, list) or not pids or not all(isinstance(pid, int) and pid > 0 for pid in pids):
                 raise ValueError("Linux smoke did not observe a real parser-worker pid")
-            if report.get("children_reaped") is not True or report.get("child_pid_sample") != "proc-exe":
+            if report.get("children_reaped") is not True or report.get("child_pid_sample") != "own-children-proc-exe":
                 raise ValueError("Linux smoke did not collect the parser-worker child")
         elif report.get("child_pid_sample") != "not-linux":
             raise ValueError("non-Linux parser smoke invented a Linux pid sample")

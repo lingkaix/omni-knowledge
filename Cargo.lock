@@ -4186,13 +4186,20 @@ dependencies = [
 name = "knowledge-package"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crc32fast",
  "flate2",
  "knowledge-core",
+ "knowledge-history",
+ "knowledge-processing",
+ "knowledge-storage",
+ "pulldown-cmark",
  "rustix 1.1.5",
  "serde_json",
  "serde_json_canonicalizer",
+ "serde_yaml",
  "sha2 0.10.9",
+ "tar",
  "unicode-normalization",
  "zip",
 ]
@@ -4214,9 +4221,35 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "knowledge-retrieval"
+version = "0.1.0"
+dependencies = [
+ "knowledge-core",
+ "retrieval-kernel",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "knowledge-search"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "knowledge-core",
+ "knowledge-retrieval",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -5353,18 +5386,22 @@ dependencies = [
  "knowledge-core",
  "knowledge-daemon",
  "knowledge-processing",
+ "knowledge-retrieval",
+ "knowledge-search",
  "knowledge-storage",
  "libc",
  "mime_guess",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "omni-service",
  "pdf-extract",
  "pulldown-cmark",
  "rayon",
  "regex",
  "reqwest",
  "roxmltree 0.21.1",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5383,8 +5420,10 @@ dependencies = [
 name = "omni-service"
 version = "0.1.0"
 dependencies = [
+ "knowledge-core",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
 ]
 
@@ -6595,6 +6634,8 @@ dependencies = [
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
+ "knowledge-core",
+ "knowledge-processing",
  "libc",
  "lindera",
  "regex-syntax",

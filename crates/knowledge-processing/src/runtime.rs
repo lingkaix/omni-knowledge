@@ -347,6 +347,8 @@ mod tests {
 
     /// Owns fake local executables and a separate disposable helper directory.
     struct Fixture {
+        /// Prevent another unit fixture's live child from contaminating native process-set observations.
+        _process_gate: std::sync::MutexGuard<'static, ()>,
         directory: TempDir,
         brew: PathBuf,
         launcher: PathBuf,
@@ -357,6 +359,9 @@ mod tests {
         /// Creates mock tools without exposing writable executable descriptors to parallel forks.
         /// No real Terminal or Homebrew installation is invoked; setup failures fail the test.
         fn new(brew_script: &str, launcher_script: &str) -> Self {
+            let process_gate = crate::admission::TEST_GATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let directory = tempfile::tempdir().unwrap();
             let requests = directory.path().join("requests");
             fs::create_dir(&requests).unwrap();
@@ -382,6 +387,7 @@ mod tests {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
             }
             Self {
+                _process_gate: process_gate,
                 directory,
                 brew,
                 launcher,

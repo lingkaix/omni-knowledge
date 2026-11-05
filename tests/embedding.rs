@@ -1,5 +1,9 @@
 //! Boundary regressions for local embeddings, video segmentation, and transcripts.
 
+fn ensure_processing_account() {
+    omni_knowledge::extract::establish_process_account().expect("process account");
+}
+
 use omni_knowledge::embedding::{
     EmbeddingClient, EmbeddingConfig, ProviderRequestError, cosine_similarity,
 };
@@ -163,6 +167,7 @@ fn embedding() -> Value {
 /// Detects a package change before private document text can reach the service.
 #[test]
 fn incompatible_health_never_sends_content() {
+    ensure_processing_account();
     let mut invalid = health();
     invalid["package_fingerprint"] = json!("a different package");
     let server = MockService::start(invalid, embedding(), Duration::ZERO);
@@ -175,6 +180,7 @@ fn incompatible_health_never_sends_content() {
 /// Separates local unreadable or invalid input from fatal provider request failures.
 #[test]
 fn local_media_errors_do_not_mark_provider_failure() {
+    ensure_processing_account();
     let server = MockService::start(health(), embedding(), Duration::ZERO);
     let client = EmbeddingClient::new(&server.config()).unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -190,6 +196,7 @@ fn local_media_errors_do_not_mark_provider_failure() {
 /// Detects an advertised space or dimension change before sending document content.
 #[test]
 fn incompatible_model_list_never_sends_content() {
+    ensure_processing_account();
     for (field, value) in [
         ("embedding_space", json!("different")),
         ("dimension", json!(64)),
@@ -213,6 +220,7 @@ fn incompatible_model_list_never_sends_content() {
 /// Confirms content crosses the boundary only after both identity observations pass.
 #[test]
 fn compatible_provider_returns_checked_vector() {
+    ensure_processing_account();
     let server = MockService::start(health(), embedding(), Duration::ZERO);
     let client = EmbeddingClient::new(&server.config()).unwrap();
     let vector = client.embed_text("Retrieve the relevant image").unwrap();
@@ -227,6 +235,7 @@ fn compatible_provider_returns_checked_vector() {
 /// Checks one visual input uses the exact image_url and video_url message keys.
 #[test]
 fn visual_requests_use_provider_message_contract() {
+    ensure_processing_account();
     let directory = tempfile::tempdir().unwrap();
     let image = directory.path().join("fixture.png");
     let video = directory.path().join("fixture.mp4");
@@ -251,6 +260,7 @@ fn visual_requests_use_provider_message_contract() {
 /// Rejects response-space changes even when vector dimensions remain equal.
 #[test]
 fn response_space_mismatch_is_rejected() {
+    ensure_processing_account();
     let mut invalid = embedding();
     invalid["indexed"]["embedding_space"] = json!("a different space");
     let server = MockService::start(health(), invalid, Duration::ZERO);
@@ -261,6 +271,7 @@ fn response_space_mismatch_is_rejected() {
 /// Rejects zero, missing, and truncated vectors rather than publishing meaningless similarity.
 #[test]
 fn malformed_vectors_are_rejected() {
+    ensure_processing_account();
     for vector in [
         json!([]),
         json!([1.0]),
@@ -282,6 +293,7 @@ fn malformed_vectors_are_rejected() {
 /// Restricts endpoints to literal loopback or canonical localhost and disables URL credentials.
 #[test]
 fn remote_and_credential_endpoints_are_rejected() {
+    ensure_processing_account();
     for endpoint in [
         "http://example.com:18789",
         "http://192.168.1.1:18789",
@@ -299,6 +311,7 @@ fn remote_and_credential_endpoints_are_rejected() {
 /// Bounds waiting for an unresponsive local service.
 #[test]
 fn provider_timeout_is_bounded() {
+    ensure_processing_account();
     let server = MockService::start(health(), embedding(), Duration::from_millis(1400));
     let mut config = server.config();
     config.timeout_seconds = 1;
@@ -310,6 +323,7 @@ fn provider_timeout_is_bounded() {
 /// Computes cosine for finite nonzero vectors and rejects invalid vector pairs.
 #[test]
 fn cosine_requires_compatible_finite_vectors() {
+    ensure_processing_account();
     assert!(
         (cosine_similarity(&[2.0, 0.0], &[1.0, 1.0]).unwrap() - 2.0_f32.sqrt().recip()).abs()
             < 1e-6
@@ -322,6 +336,7 @@ fn cosine_requires_compatible_finite_vectors() {
 /// Preserves second-based OpenAI Whisper ranges and millisecond-based whisper.cpp ranges.
 #[test]
 fn transcript_formats_preserve_time_ranges() {
+    ensure_processing_account();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("transcript.json");
     std::fs::write(
@@ -353,6 +368,7 @@ fn transcript_formats_preserve_time_ranges() {
 #[cfg(unix)]
 #[test]
 fn transcription_normalizes_audio_and_parses_cli_result() {
+    ensure_processing_account();
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("speech.flac");
@@ -410,6 +426,7 @@ printf '%s' '{"transcription":[{"offsets":{"from":0,"to":250},"text":"Recognized
 #[test]
 #[ignore = "Requires the pinned local ASR model and the generated speech fixture; run with --ignored after setup"]
 fn actual_local_asr_recognizes_known_speech() {
+    ensure_processing_account();
     let executable = std::env::var_os("OMNI_ASR_EXECUTABLE").expect("Set OMNI_ASR_EXECUTABLE");
     let model = std::env::var_os("OMNI_ASR_MODEL").expect("Set OMNI_ASR_MODEL");
     let fixture = std::env::var_os("OMNI_ASR_FIXTURE").expect("Set OMNI_ASR_FIXTURE");
@@ -450,6 +467,7 @@ fn actual_local_asr_recognizes_known_speech() {
 /// Decodes actual ffmpeg clips and verifies complete coverage, including the final short range.
 #[test]
 fn ffmpeg_segments_cover_video_without_overwriting() {
+    ensure_processing_account();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.mp4");
     let status = std::process::Command::new("ffmpeg")

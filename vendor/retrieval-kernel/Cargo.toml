@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+knowledge-core = { path = "../../crates/knowledge-core" }
+knowledge-processing = { path = "../../crates/knowledge-processing" }
 fs2 = "0.4"
 grep-matcher = "0.1"
 grep-regex = "0.1.14"

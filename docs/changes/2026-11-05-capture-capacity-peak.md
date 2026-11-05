@@ -1,0 +1,7 @@
+# Actual capture capacity and concurrent allocation peak
+
+The private funded integration's unchanged B2 control measures6,439,214 bytes against4,275,817. Its capture used Vec's default doubling, which can exceed the prepaid capture extent despite an acceptable length. Grow geometrically by1.5, clamped to the existing byte ceiling, with exact reservation before extension; this remains amortized linear rather than exact-per-byte quadratic growth. Two owned byte-reader controls check actual capacity and refusal before storing the excess byte.
+
+Reserve two capture extents for old/replacement allocations that may coexist during reallocation. Compact extraction transport slack before decoding while retaining that promise. No protocol, format/corpus ceiling, source authority, native child settlement or second pool is changed. Omitting the bounded growth restores the measurable over-capacity case; omitting the concurrent replacement extent undercounts a real possible peak.
+
+All47 processing runtime controls and two doctests plus strict Clippy/fmt pass locally, including every prior45 runtime control. The existing combined product probe still measures5,393,368>4,275,817 (same1,048,576-byte result), so B2 remains RED, not closed. That combined candidate also has a separate init/storage Context setup failure leaving B1 cases NOT_RUN; neither is waived or attributed away. Raw receipts are under lead-artifacts/m3-capture-growth. Native Mac and independent admission review remain pending; no public activation or full-product claim.

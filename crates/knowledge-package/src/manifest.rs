@@ -440,6 +440,12 @@ fn indexes(indexes: Option<&IndexSet>) -> Result<Value, Error> {
     if let Some(reason) = &indexes.fallback {
         map.insert("reason".into(), Value::String(checked_token(reason)?));
     }
+    for (key, value) in &indexes.metadata {
+        if map.contains_key(key) {
+            return Err(Error::Invalid);
+        }
+        map.insert(key.clone(), value.clone());
+    }
     Ok(Value::Object(map))
 }
 
@@ -466,9 +472,8 @@ fn parse_indexes(value: Value) -> Result<Option<IndexSet>, Error> {
             if !compatible && declared.is_none() {
                 return Err(Error::Invalid);
             }
-            if !obj.is_empty() {
-                return Err(Error::Invalid);
-            }
+            // Optional identity/extension facts survive re-export and are compared only to
+            // actual native caller requirements, never inferred from `compatible`.
             // Compatible generations still need the kernel Directory provider.
             // Until that query exists, core bytes stay usable and the index is omitted.
             let fallback = if compatible {
@@ -480,6 +485,7 @@ fn parse_indexes(value: Value) -> Result<Option<IndexSet>, Error> {
                 paths,
                 compatible,
                 fallback,
+                metadata: obj,
             }))
         }
         _ => Err(Error::Invalid),

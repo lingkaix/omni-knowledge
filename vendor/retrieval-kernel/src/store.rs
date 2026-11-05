@@ -54,10 +54,21 @@ pub(crate) struct Pin {
     _lock: LockFile,
 }
 
+/// Native immutable generation reader lease, not a path or permission grant.
+pub struct GenerationPin(Pin);
+impl GenerationPin {
+    /// Exact selected generation identity; the native reader lock remains held by this value.
+    pub fn id(&self) -> &str {
+        &self.0.id
+    }
+}
+
 /// Shared kernel owner. Source and derived storage roots are fixed at process startup.
 pub struct Kernel {
     pub(crate) source: File,
     pub(crate) store: PathBuf,
+    /// Explicit consuming build binding; None preserves historical prototype compatibility.
+    pub(crate) build_identity: Option<String>,
 }
 impl Kernel {
     /// Bind the admitted source root and caller-owned derived storage root.
@@ -70,7 +81,33 @@ impl Kernel {
         Ok(Self {
             source,
             store: fs::canonicalize(store).map_err(io_error)?,
+            build_identity: None,
         })
+    }
+    /// Bind the caller's consuming dependency/feature/target/source fingerprint before any reuse.
+    /// A changed fingerprint opens a different machinery identity and requires a rebuild.
+    pub fn with_build_identity(source: &Path, store: &Path, identity: &str) -> Result<Self> {
+        if identity.is_empty() || identity.len() > 4096 {
+            return Err(error("invalid-request", "invalid consuming build identity"));
+        }
+        let mut kernel = Self::new(source, store)?;
+        kernel.build_identity = Some(identity.to_owned());
+        Ok(kernel)
+    }
+    /// Combine the unchanged upstream machinery and explicit consuming fingerprint.
+    fn machinery(&self) -> String {
+        match &self.build_identity {
+            None => machinery(),
+            Some(identity) => digest(format!("{};consumer={identity}", machinery()).as_bytes()),
+        }
+    }
+    /// Hold an actual native reader lock across caller-owned generation use.
+    pub fn pin_generation(&self, scope: &str, control: &Control) -> Result<GenerationPin> {
+        control.check()?;
+        validate_scope(scope)?;
+        let pin = self.pin(scope)?;
+        control.check()?;
+        Ok(GenerationPin(pin))
     }
     /// Scope identifiers select safe hashed storage locations, never caller-provided paths.
     pub(crate) fn scope_path(&self, scope: &str) -> PathBuf {
@@ -103,7 +140,7 @@ impl Kernel {
         }
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|_| error("unavailable", "committed manifest invalid; rebuild scope"))?;
-        if manifest.scope != scope || manifest.machinery != machinery() {
+        if manifest.scope != scope || manifest.machinery != self.machinery() {
             return Err(error(
                 "unavailable",
                 "index identity mismatch; rebuild scope",
@@ -170,6 +207,22 @@ impl Kernel {
     pub fn publish(&self, view: ScopeView, expected: Option<String>) -> Result<String> {
         self.publish_inner(view, expected, &Budget::new(), INDEX_BYTES, |_| Ok(()))
     }
+    /// Publish under the actual caller cancellation/deadline and unchanged temporary format ceiling.
+    pub fn publish_controlled(
+        &self,
+        view: ScopeView,
+        expected: Option<String>,
+        control: &Control,
+    ) -> Result<String> {
+        control.check()?;
+        self.publish_inner(
+            view,
+            expected,
+            &Budget::controlled(control),
+            INDEX_BYTES,
+            |_| control.check(),
+        )
+    }
     /// Build and publish with a checkpoint callback used by in-module crash fixtures.
     pub(crate) fn publish_inner(
         &self,
@@ -208,7 +261,7 @@ impl Kernel {
                     .filter(|b| digest(b) == *id)
             })
             .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
-            .filter(|m| m.machinery == machinery());
+            .filter(|m| m.machinery == self.machinery());
         if let Some(old) = &old {
             for next in &view.documents {
                 if let Some(prior) = old
@@ -507,7 +560,7 @@ impl Kernel {
             records.push(record);
         }
         let manifest = Manifest {
-            machinery: machinery(),
+            machinery: self.machinery(),
             nonce: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(io_error)?

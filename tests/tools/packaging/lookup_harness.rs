@@ -1,10 +1,10 @@
 //! Packaging check for installed HTML and EPUB extraction.
 //!
 //! Starts one process account on an owned private directory descriptor and reads
-//! owned HTML and EPUB through `extract_admitted` and `read_epub_admitted`.
+//! owned HTML and EPUB through the funded held-file APIs.
 //! When `parser-worker` is beside this executable, Linux must observe that child.
-//! This trunk's processing crate does not spawn that child; an absent file is not
-//! replaced with a fabricated pid. The root CLI is not started.
+//! Real values die before their original holdings finish; unresolved native work
+//! stays foreground with the actual source descriptor. The root CLI is not started.
 
 use std::env;
 use std::fs::{self, File};
@@ -16,12 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use knowledge_core::admission::{
-    Account, Configuration, Decision, Error as AdmissionError, Holding, Origin, Scheduling, Waiting,
-};
-use knowledge_processing::admission::{AdmitError, Charge, SharedAccount, reservation};
-use knowledge_processing::epub::read_epub_admitted;
-use knowledge_processing::extract::extract_admitted;
+use knowledge_core::admission::{Account, Configuration, Scheduling};
+use knowledge_processing::admission::Admitted;
+use knowledge_processing::epub::read_epub_file_funded;
+use knowledge_processing::extract::extract_file_funded;
+use knowledge_processing::funding::Funding;
 
 fn main() -> ExitCode {
     match run() {
@@ -94,7 +93,7 @@ fn run() -> Result<String, String> {
         return Err(format!("parser child still running: {pids:?}"));
     }
     let sample_kind = if helper.is_some() && cfg!(target_os = "linux") {
-        "proc-exe"
+        "own-children-proc-exe"
     } else if helper.is_some() {
         "not-linux"
     } else {
@@ -104,7 +103,7 @@ fn run() -> Result<String, String> {
         "account": "started",
         "cache_fd": "owned-directory",
         "lookup_basename": if helper.is_some() { Some("parser-worker") } else { None::<&str> },
-        "public_api": ["extract_admitted", "read_epub_admitted"],
+        "public_api": ["extract_file_funded", "read_epub_file_funded"],
         "html_status": admitted.html_status,
         "html_contains": admitted.html_contains,
         "epub_contains": admitted.epub_contains,
@@ -147,17 +146,18 @@ fn observe(sample: &Sample) {
     let Some(helper) = &sample.helper else {
         return;
     };
-    let Ok(entries) = fs::read_dir("/proc") else {
+    // The real calls spawn from the main thread. Read its actual kernel child
+    // set instead of scanning unrelated host processes and missing short-lived
+    // workers before a whole /proc traversal reaches their PID. Each candidate
+    // must still resolve to this exact installed helper executable.
+    let parent = std::process::id();
+    let Ok(children) = fs::read_to_string(format!("/proc/{parent}/task/{parent}/children")) else {
         return;
     };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|text| text.parse::<u32>().ok())
-        else {
-            continue;
-        };
+    for pid in children
+        .split_ascii_whitespace()
+        .filter_map(|p| p.parse::<u32>().ok())
+    {
         if !still_our_helper(pid, helper) {
             continue;
         }
@@ -177,41 +177,54 @@ fn still_our_helper(pid: u32, helper: &Path) -> bool {
     exe.canonicalize().ok().as_deref() == Some(helper)
 }
 
-struct Host {
-    holdings: Vec<Holding>,
-    fault: String,
-}
-
-impl SharedAccount for Host {
-    fn reserve(&mut self, charge: Charge) -> Result<(), AdmitError> {
-        let account = match Account::current() {
-            Ok(account) => account,
-            Err(error) => {
-                self.fault = error.to_string();
-                return Err(AdmitError::Busy);
+/// Read-only native failures remain owned until actual group/I/O collection.
+/// The caller's actual input File stays live around this call.
+fn collected<T>(result: anyhow::Result<T>, input: File) -> Result<(T, File), String> {
+    match result {
+        Ok(value) => Ok((value, input)),
+        Err(mut error) => {
+            let mut holdings = Vec::new();
+            if let Some(child) =
+                error.downcast_mut::<knowledge_processing::worker::UnsettledChild>()
+            {
+                holdings = loop {
+                    match child.collect() {
+                        Ok(holdings) => break holdings,
+                        Err(_) => thread::sleep(std::time::Duration::from_millis(100)),
+                    }
+                };
             }
-        };
-        match account.reserve(reservation(charge), Origin::BeforeVerification) {
-            Ok(Decision::Ready(holding)) => {
-                self.holdings.push(holding);
-                Ok(())
+            let message = format!("{error:#}");
+            drop(error);
+            drop(input);
+            for holding in &mut holdings {
+                while holding.finish().is_err() {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                }
             }
-            Ok(Decision::Waiting(Waiting::Memory)) => Err(AdmitError::WaitingMemory),
-            Ok(Decision::Waiting(Waiting::Storage)) => Err(AdmitError::WaitingStorage),
-            Err(error @ AdmissionError::TooLargeMemory) => {
-                self.fault = error.to_string();
-                Err(AdmitError::TooLargeMemory)
-            }
-            Err(error @ AdmissionError::TooLargeStorage) => {
-                self.fault = error.to_string();
-                Err(AdmitError::TooLargeStorage)
-            }
-            Err(error) => {
-                self.fault = error.to_string();
-                Err(AdmitError::Busy)
-            }
+            Err(message)
         }
     }
+}
+
+/// Keep the actual value through its final reader, not only through native execution.
+fn consume<T, U>(
+    admitted: Admitted<T>,
+    input: File,
+    read: impl FnOnce(&T) -> U,
+) -> Result<U, String> {
+    let Admitted {
+        value,
+        mut retained,
+    } = admitted;
+    // These two callers return only bounded verdict/status metadata, not cloned native buffers.
+    let report = read(&value);
+    drop(value);
+    drop(input);
+    for holding in &mut retained {
+        holding.finish().map_err(|error| error.to_string())?;
+    }
+    Ok(report)
 }
 
 fn exercise(directory: &Path) -> Result<AdmittedText, String> {
@@ -243,19 +256,19 @@ fn exercise(directory: &Path) -> Result<AdmittedText, String> {
     let mut html_status = String::new();
     let mut html_contains = false;
     for _ in 0..2 {
-        let mut host = Host {
-            holdings: Vec::new(),
-            fault: String::new(),
-        };
-        let extracted = extract_admitted(&html_path, 4096, &mut host);
-        let finished = finish_all(&mut host);
-        let value = combine(
-            extracted.map_err(|error| format!("{error:#}")),
-            finished,
-            &host,
-        )?;
-        html_status = value.status;
-        html_contains = value.text.contains("Hello packaging");
+        let input = File::open(&html_path).map_err(|error| error.to_string())?;
+        let mut funding = Funding::BeforeVerification;
+        let parsed = extract_file_funded(
+            &input,
+            Path::new("page.html"),
+            4096,
+            Some(256 * 1024 * 1024),
+            &mut funding,
+        );
+        let (extracted, input) = collected(parsed, input)?;
+        (html_status, html_contains) = consume(extracted, input, |value| {
+            (value.status.clone(), value.text.contains("Hello packaging"))
+        })?;
         if html_status != "extracted" || !html_contains {
             return Err(format!(
                 "html extraction was not the owned text: {html_status}"
@@ -264,18 +277,13 @@ fn exercise(directory: &Path) -> Result<AdmittedText, String> {
     }
     let epub_path = directory.join("note.epub");
     write_epub(&epub_path)?;
-    let mut host = Host {
-        holdings: Vec::new(),
-        fault: String::new(),
-    };
-    let extracted = read_epub_admitted(&epub_path, 65_536, &mut host);
-    let finished = finish_all(&mut host);
-    let epub = combine(
-        extracted.map_err(|error| format!("{error:#}")),
-        finished,
-        &host,
-    )?;
-    let epub_contains = epub.contains("Packaging Note") && epub.contains("Owned chapter");
+    let input = File::open(&epub_path).map_err(|error| error.to_string())?;
+    let mut funding = Funding::BeforeVerification;
+    let parsed = read_epub_file_funded(&input, 65_536, Some(256 * 1024 * 1024), &mut funding);
+    let (extracted, input) = collected(parsed, input)?;
+    let epub_contains = consume(extracted, input, |epub| {
+        epub.contains("Packaging Note") && epub.contains("Owned chapter")
+    })?;
     if !epub_contains {
         return Err("epub extraction did not contain the owned title and chapter".to_string());
     }
@@ -294,40 +302,6 @@ fn exercise(directory: &Path) -> Result<AdmittedText, String> {
         epub_contains,
         holdings_after,
     })
-}
-
-fn combine<T>(
-    value: Result<T, String>,
-    finished: Result<(), String>,
-    host: &Host,
-) -> Result<T, String> {
-    let fault = if host.fault.is_empty() {
-        None
-    } else {
-        Some(host.fault.clone())
-    };
-    match (value, finished, fault) {
-        (Ok(value), Ok(()), None) => Ok(value),
-        (Err(error), Ok(()), None) => Err(error),
-        (Ok(_), Err(error), _) => Err(error),
-        (Err(error), Err(finish), _) => Err(format!("{error}; holdings: {finish}")),
-        (_, Ok(()), Some(fault)) => Err(fault),
-    }
-}
-
-fn finish_all(host: &mut Host) -> Result<(), String> {
-    let mut first = None;
-    for holding in &mut host.holdings {
-        if let Err(error) = holding.finish() {
-            if first.is_none() {
-                first = Some(error.to_string());
-            }
-        }
-    }
-    match first {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
 }
 
 fn write_epub(path: &Path) -> Result<(), String> {

@@ -5,7 +5,8 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tantivy::tokenizer::{
     LowerCaser, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
@@ -37,10 +38,81 @@ pub const WRITER_BYTES: usize = 32 * 1024 * 1024;
 pub const DICTIONARY_SHA256: &str =
     "a7ba9f645ffe7094e56ae1c4a81d100df8fbb1e28bbe1792622e9728e162db3d";
 
+/// Caller-owned cooperative deadline and cancellation shared with actual running work.
+/// This is not a memory reservation or an authorization capability.
+#[derive(Clone)]
+pub struct Control {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+    guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    scan_body_only: bool,
+    scan_identity: bool,
+}
+impl std::fmt::Debug for Control {
+    /// Show only the deadline, never host context or callback captures.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Control")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+impl Control {
+    /// Bind a monotonic deadline; an elapsed deadline starts stopped, never unlimited.
+    pub fn new(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            guard: None,
+            scan_body_only: false,
+            scan_identity: false,
+        }
+    }
+    /// Add a trusted caller's live stop check without importing host policy into the kernel.
+    /// False requests cooperative cancellation; it never creates permission or a resource account.
+    pub fn guarded(deadline: Instant, guard: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        let mut control = Self::new(deadline);
+        control.guard = Some(guard);
+        control
+    }
+    /// Restrict exact/regex evidence to admitted body units, without changing eligibility or authority.
+    pub fn body_scans(mut self) -> Self {
+        self.scan_body_only = true;
+        self
+    }
+    /// Scan admitted bodies plus display name/title/description, not tags/digests/other metadata.
+    /// This preserves ordinary file/text navigation; it never changes source eligibility or policy.
+    pub fn text_scans(mut self) -> Self {
+        self.scan_body_only = true;
+        self.scan_identity = true;
+        self
+    }
+    /// The actual caller deadline, for owned child adapters sharing the same operation.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+    /// Request cancellation; return does not assert that work or publication has settled.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+    /// Refuse further cooperative work after cancellation or deadline.
+    pub fn check(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Acquire)
+            || self.guard.as_ref().is_some_and(|guard| !guard())
+        {
+            return Err(error("partial", "operation cancelled"));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(error("resource-limited", "wall-time budget exhausted"));
+        }
+        Ok(())
+    }
+}
+
 /// A cooperative request deadline. Cancellation uses the same stopped-work path.
 pub(crate) struct Budget {
     pub deadline: Instant,
     pub cancelled: bool,
+    control: Option<Control>,
 }
 impl Budget {
     /// Start a fixed operation budget.
@@ -48,10 +120,33 @@ impl Budget {
         Self {
             deadline: Instant::now() + Duration::from_secs(WALL_SECONDS),
             cancelled: false,
+            control: None,
         }
+    }
+    /// Retain the caller's shared stop state without extending the prototype work ceiling.
+    pub fn controlled(control: &Control) -> Self {
+        Self {
+            deadline: control
+                .deadline
+                .min(Instant::now() + Duration::from_secs(WALL_SECONDS)),
+            cancelled: false,
+            control: Some(control.clone()),
+        }
+    }
+    /// Whether the caller requested body-only exact/regex evidence.
+    pub fn scan_field(&self, field: Option<&str>) -> bool {
+        self.control.as_ref().is_none_or(|control| {
+            !control.scan_body_only
+                || field.is_none()
+                || (control.scan_identity
+                    && matches!(field, Some("name" | "title" | "metadata.description")))
+        })
     }
     /// Stop before the next read, allocation, or chunk when the operation cannot continue.
     pub fn check(&self) -> Result<()> {
+        if let Some(control) = &self.control {
+            control.check()?;
+        }
         if self.cancelled {
             return Err(error("partial", "operation cancelled"));
         }

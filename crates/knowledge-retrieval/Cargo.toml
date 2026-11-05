@@ -1,0 +1,15 @@
+[package]
+name = "knowledge-retrieval"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Admitted native adapter for the shared retrieval kernel"
+
+[dependencies]
+knowledge-core = { path = "../knowledge-core" }
+retrieval-kernel = { path = "../../vendor/retrieval-kernel" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+sha2 = "0.10"

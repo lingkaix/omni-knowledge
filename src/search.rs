@@ -1,82 +1,22 @@
-//! Indexed lexical search, verified grep, and local vector rank fusion.
+//! File-level orchestration over Root's one admitted kernel facade and disk vector generations.
 use crate::{
     FileRecord, KnowledgeBase, SearchHit, SearchMethod, SearchMode, SearchOptions, Snapshot,
     UnifiedSearchOptions, embedding,
 };
 use anyhow::{Context, Result, bail};
-use rayon::prelude::*;
-use regex::RegexBuilder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
-use tantivy::schema::{IndexRecordOption, STORED, STRING, Schema, TEXT, TantivyDocument, Value};
-use tantivy::{Index, IndexWriter, doc};
 
-/// Adds separate Chinese characters and bigrams while preserving ordinary alphanumeric words.
-fn tokens(text: &str) -> String {
-    let mut output = Vec::new();
-    let mut word = String::new();
-    let mut previous = None;
-    for character in text.chars().flat_map(char::to_lowercase) {
-        let cjk = matches!(character as u32,0x3400..=0x9fff|0xf900..=0xfaff|0x20000..=0x2fa1f);
-        if cjk {
-            if !word.is_empty() {
-                output.push(std::mem::take(&mut word));
-            }
-            output.push(character.to_string());
-            if let Some(last) = previous {
-                output.push(format!("{last}{character}"));
-            }
-            previous = Some(character);
-        } else {
-            previous = None;
-            if character.is_alphanumeric() {
-                word.push(character);
-            } else if !word.is_empty() {
-                output.push(std::mem::take(&mut word));
-            }
-        }
-    }
-    if !word.is_empty() {
-        output.push(word);
-    }
-    output.join(" ")
-}
-
-/// Creates a new Tantivy index from this generation's records and commits its complete document set.
+/// Publishes the kernel store inside the owned index directory.
+/// The signature stays so the existing publisher can record every generated file.
 pub(crate) fn build_bm25(directory: &Path, records: &[FileRecord]) -> Result<()> {
-    let mut builder = Schema::builder();
-    let path = builder.add_text_field("path", STRING | STORED);
-    let title = builder.add_text_field("title", TEXT);
-    let body = builder.add_text_field("body", TEXT);
-    let tags = builder.add_text_field("tags", STRING);
-    let index = Index::create_in_dir(directory, builder.build())?;
-    let mut writer: IndexWriter = index.writer_with_num_threads(2, 50_000_000)?;
-    for record in records {
-        let mut document = doc!(path=>record.path.clone(),title=>tokens(&format!("{} {}",record.title,record.path)),body=>tokens(&format!("{} {} {}",record.description,record.tags.join(" "),record.text)));
-        for tag in &record.tags {
-            document.add_text(tags, tag);
-        }
-        writer.add_document(document)?;
-    }
-    writer.commit()?;
-    writer.wait_merging_threads()?;
-    Ok(())
+    let _ = records;
+    crate::admitted::write_reference(directory)
 }
 
-/// Constructs literal trigram postings; queries still verify every selected candidate.
-pub(crate) fn build_trigrams(records: &[FileRecord]) -> BTreeMap<String, Vec<usize>> {
-    let mut postings: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, record) in records.iter().enumerate() {
-        let text = format!("{}\n{}\n{}", record.path, record.description, record.text);
-        let chars: Vec<char> = text.chars().collect();
-        let unique: HashSet<String> = chars.windows(3).map(|w| w.iter().collect()).collect();
-        for trigram in unique {
-            postings.entry(trigram).or_default().push(index);
-        }
-    }
-    postings
+/// Trigram postings are not a lexical engine. Exact and regex scans read every admitted source.
+pub(crate) fn build_trigrams(_records: &[FileRecord]) -> BTreeMap<String, Vec<usize>> {
+    BTreeMap::new()
 }
 
 /// Executes the selected strategy; empty lexical queries return filtered file navigation.
@@ -99,7 +39,7 @@ pub(crate) fn search(
     }
     match options.mode {
         SearchMode::Files => files(kb, snapshot, options),
-        SearchMode::Grep => grep(kb, snapshot, options),
+        SearchMode::Grep => grep(kb, snapshot, directory, options),
         SearchMode::Bm25 => bm25(kb, snapshot, directory, options),
         SearchMode::Semantic => semantic(kb, snapshot, options),
         SearchMode::Hybrid => {
@@ -207,7 +147,7 @@ pub(crate) fn search_unified(
                 SearchMethod::Grep => {
                     // Desktop keywords are literal; the advanced CLI regex contract is unchanged.
                     request.query = regex::escape(keyword);
-                    grep(kb, snapshot, &request)?
+                    grep(kb, snapshot, directory, &request)?
                 }
                 SearchMethod::Semantic => semantic(kb, snapshot, &request)?,
                 SearchMethod::Files => files(kb, snapshot, &request)?,
@@ -351,7 +291,7 @@ fn files(
     } else {
         options.query.to_lowercase()
     };
-    Ok(snapshot
+    snapshot
         .records
         .iter()
         .filter(|r| tagged(r, options))
@@ -364,167 +304,44 @@ fn files(
             }
         })
         .take(options.limit)
-        .map(|r| hit(kb, r, "files", 1.0, r.description.clone(), None))
-        .collect())
+        .map(|r| {
+            crate::admitted::charge_hit(kb, r, r.description.len())?;
+            Ok(hit(kb, r, "files", 1.0, r.description.clone(), None))
+        })
+        .collect()
 }
 
-/// Searches BM25 with exact tag alternatives included before result limiting, including old indexes.
+/// All lexical methods use the exact Root adapter, generation plan and Core account.
 fn bm25(
     kb: &KnowledgeBase,
     snapshot: &Snapshot,
-    directory: &Path,
+    _directory: &Path,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let projected = tokens(&options.query);
-    if projected.is_empty() {
-        return Ok(vec![]);
-    }
-    let index = Index::open_in_dir(directory.join("tantivy"))?;
-    let schema = index.schema();
-    let title = schema.get_field("title")?;
-    let body = schema.get_field("body")?;
-    let tags = schema.get_field("tags")?;
-    let path = schema.get_field("path")?;
-    let mut parser = QueryParser::for_index(&index, vec![title, body]);
-    parser.set_field_boost(title, 2.0);
-    let parsed = parser.parse_query(&projected)?;
-    let mut parts: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, parsed)];
-    for tag in &options.tags {
-        let alternatives: BTreeSet<_> = if options.case_sensitive {
-            BTreeSet::from([tag.as_str()])
-        } else {
-            let folded = tag.to_lowercase();
-            snapshot
-                .records
-                .iter()
-                .flat_map(|record| &record.tags)
-                .filter(|stored| stored.to_lowercase() == folded)
-                .map(String::as_str)
-                .collect()
-        };
-        if alternatives.is_empty() {
-            return Ok(vec![]);
-        }
-        let alternatives: Vec<_> = alternatives
-            .into_iter()
-            .map(|stored| {
-                (
-                    Occur::Should,
-                    Box::new(TermQuery::new(
-                        tantivy::Term::from_field_text(tags, stored),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>,
-                )
-            })
-            .collect();
-        parts.push((Occur::Must, Box::new(BooleanQuery::new(alternatives))));
-    }
-    let query = BooleanQuery::new(parts);
-    let reader = index.reader()?;
-    let searcher = reader.searcher();
-    let top = searcher.search(&query, &TopDocs::with_limit(options.limit).order_by_score())?;
-    let lookup: HashMap<_, _> = snapshot
-        .records
-        .iter()
-        .map(|r| (r.path.as_str(), r))
-        .collect();
-    let mut result = vec![];
-    for (score, address) in top {
-        let document: TantivyDocument = searcher.doc(address)?;
-        let source = document
-            .get_first(path)
-            .and_then(|value| value.as_str())
-            .context("indexed source path missing")?;
-        let record = lookup.get(source).context("index and manifest disagree")?;
-        let (snippet, line) = lexical_snippet(record, &options.query);
-        result.push(hit(kb, record, "bm25", score, snippet, line));
-    }
-    Ok(result)
+    crate::admitted::lexical(
+        kb,
+        snapshot,
+        &SearchOptions {
+            mode: SearchMode::Bm25,
+            ..options.clone()
+        },
+    )
 }
-
-/// Finds a useful lexical source line, then falls back to description or start of content.
-fn lexical_snippet(record: &FileRecord, query: &str) -> (String, Option<usize>) {
-    let query = query.to_lowercase();
-    let words: Vec<_> = query.split_whitespace().collect();
-    for (line, text) in record.text.lines().enumerate() {
-        let lower = text.to_lowercase();
-        if lower.contains(&query) || words.iter().any(|word| lower.contains(word)) {
-            return (text.into(), Some(line + 1));
-        }
-    }
-    if !record.description.is_empty() {
-        (record.description.clone(), None)
-    } else {
-        (record.text.chars().take(500).collect(), None)
-    }
-}
-
-/// Verifies regex matches; only literal case-sensitive patterns use conservative trigram candidates.
+/// Regex scans every admitted body, never BM25 candidates or metadata-only pseudo-body matches.
 fn grep(
     kb: &KnowledgeBase,
     snapshot: &Snapshot,
+    _directory: &Path,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let regex = RegexBuilder::new(&options.query)
-        .case_insensitive(!options.case_sensitive)
-        .size_limit(10 * 1024 * 1024)
-        .build()
-        .context("invalid grep regular expression")?;
-    let literal =
-        options.case_sensitive && !options.query.chars().any(|c| ".[](){}*+?^$|\\".contains(c));
-    let mut candidates: Option<BTreeSet<usize>> = None;
-    if literal {
-        let chars: Vec<char> = options.query.chars().collect();
-        for window in chars.windows(3) {
-            let gram: String = window.iter().collect();
-            let postings: BTreeSet<_> = snapshot
-                .trigrams
-                .get(&gram)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            candidates = Some(match candidates {
-                None => postings,
-                Some(previous) => previous.intersection(&postings).copied().collect(),
-            });
-        }
-    }
-    let mut hits: Vec<_> = snapshot
-        .records
-        .par_iter()
-        .enumerate()
-        .filter(|(i, r)| {
-            tagged(r, options) && candidates.as_ref().is_none_or(|set| set.contains(i))
-        })
-        .flat_map_iter(|(_, record)| {
-            let mut result = vec![];
-            for (line, text) in record.text.lines().enumerate() {
-                if regex.is_match(text) {
-                    result.push(hit(kb, record, "grep", 1.0, text.into(), Some(line + 1)));
-                }
-                if result.len() >= options.limit {
-                    break;
-                }
-            }
-            if result.is_empty()
-                && regex.is_match(&format!("{}\n{}", record.path, record.description))
-            {
-                result.push(hit(
-                    kb,
-                    record,
-                    "grep",
-                    1.0,
-                    record.description.clone(),
-                    None,
-                ));
-            }
-            result.into_iter()
-        })
-        .collect();
-    hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
-    hits.truncate(options.limit);
-    Ok(hits)
+    crate::admitted::lexical(
+        kb,
+        snapshot,
+        &SearchOptions {
+            mode: SearchMode::Grep,
+            ..options.clone()
+        },
+    )
 }
 
 /// Queries the validated local space and scores finite matching fragments exactly.
@@ -562,6 +379,7 @@ fn semantic(
     for vector in &snapshot.vectors {
         if let Some(record) = lookup.get(vector.path.as_str()) {
             let score = embedding::cosine_similarity(&query, &vector.vector)?;
+            crate::admitted::charge_hit(kb, record, vector.text.len())?;
             let mut item = hit(
                 kb,
                 record,

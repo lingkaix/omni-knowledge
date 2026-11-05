@@ -382,3 +382,51 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<f32> {
     let right_norm: f64 = right.iter().map(|value| f64::from(*value).powi(2)).sum();
     Ok((dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0) as f32)
 }
+
+#[cfg(test)]
+mod transport {
+    use super::{EmbeddingClient, EmbeddingConfig};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn ephemeral_loopback_provider_returns_its_declared_vector() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, 18789);
+        let fingerprint = "a".repeat(64);
+        thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut buffer = [0; 4096];
+                let size = socket.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let body = if request.contains("/health") {
+                    format!(
+                        r#"{{"status":"ready","package_fingerprint":"{fingerprint}","backend":"fixture"}}"#
+                    )
+                } else if request.contains("/v1/models") {
+                    r#"{"data":[{"id":"fixture-model","dimension":2,"embedding_space":"fixture-space"}]}"#.into()
+                } else {
+                    r#"{"model":"fixture-model","indexed":{"dimension":2,"embedding_space":"fixture-space"},"data":[{"index":0,"embedding":[1.0,0.0]}]}"#.into()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        let client = EmbeddingClient::new(&EmbeddingConfig {
+            endpoint: format!("http://127.0.0.1:{port}"),
+            model: "fixture-model".into(),
+            dimension: 2,
+            package_fingerprint: "a".repeat(64),
+            embedding_space: "fixture-space".into(),
+            timeout_seconds: 5,
+        })
+        .unwrap();
+        assert_eq!(client.embed_text("synthetic").unwrap(), vec![1.0, 0.0]);
+    }
+}

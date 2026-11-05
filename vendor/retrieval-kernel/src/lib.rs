@@ -6,8 +6,8 @@ mod query;
 mod store;
 mod text;
 pub use model::*;
-pub use store::Kernel;
-pub use text::{analyze, tokens};
+pub use store::{GenerationPin, Kernel};
+pub use text::{Control, analyze, tokens};
 
 #[cfg(test)]
 mod tests;

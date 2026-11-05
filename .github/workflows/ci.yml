@@ -55,6 +55,11 @@ jobs:
         run: python3 tests/process/test_bundle_lifecycle.py --subject-repo "$PWD" --subject-ref "$GITHUB_SHA" --evidence-dir temp/ci-evidence/nested-bundle
       - name: Admit the notice collection instrument
         run: python3 -B tests/tools/notice_collection.py --subject-repo "$PWD" --current-ref "$GITHUB_SHA"
+      - name: Build and install the real processing test sibling
+        run: |
+          cargo build --locked -p knowledge-processing --bin parser-worker
+          target="${CARGO_TARGET_DIR:-target}"
+          install -m 755 "$target/debug/parser-worker" "$target/debug/deps/parser-worker"
       - name: Full headless workspace gate
         run: python3 scripts/gate.py headless
       - name: Stage Linux headless artifact
@@ -105,8 +110,16 @@ jobs:
           brew list ffmpeg >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
       - name: Admit the gate instrument
         run: python3 scripts/gate.py self-test
-      - name: Build the native FSEvents test sibling
-        run: cargo build --locked -p knowledge-local --bin omni-fsevents
+      - name: Build and install the real processing test sibling
+        run: |
+          cargo build --locked -p knowledge-processing --bin parser-worker
+          target="${CARGO_TARGET_DIR:-target}"
+          install -m 755 "$target/debug/parser-worker" "$target/debug/deps/parser-worker"
+      - name: Build and install the native FSEvents test sibling
+        run: |
+          cargo build --locked -p knowledge-local --bin omni-fsevents
+          target="${CARGO_TARGET_DIR:-target}"
+          install -m 755 "$target/debug/omni-fsevents" "$target/debug/deps/omni-fsevents"
       - name: Full headless workspace gate (includes available FSEvents tests)
         run: python3 scripts/gate.py headless
       - name: Stage macOS headless artifact

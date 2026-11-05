@@ -2,7 +2,7 @@
 
 This guide owns provenance and the local patch ledger.
 It does not claim that the mount, archive, or large-library interfaces are implemented.
-The unchanged [upstream README](README.md) describes the original repository layout and its historical evidence, not Omni's packaging or platform qualification.
+The [README](README.md) retains the upstream overview and adds the native adapter guide. Its original/current hashes and replay are recorded below; it is not Omni's platform qualification.
 
 ## Source And Licenses
 
@@ -22,7 +22,7 @@ No dictionary or model download is required by the seeded probe.
 
 ## Applied Patches
 
-[The replayable patch](../../tools/kernel-probe/patches/m0-vendoring.patch) contains every upstream-to-vendored adaptation listed below.
+Apply the historical [M0 patch](../../tools/kernel-probe/patches/m0-vendoring.patch), then the [native adapter overlay](../../tools/kernel-probe/patches/m3-native-owned.patch), to the exact pinned upstream crate. The ordered pair replays all adaptations below, including the two new local source/test files. Original hashes stay unchanged; current hashes cover all52 source entries. Metadata and the patch ledger are not a new license or platform proof.
 M0-P01 and M0-P02 change no analyzer, scoring, coverage, source admission, generation publication, or test assertion.
 
 | Patch | Necessity and effect | Future OpenKit candidate |
@@ -46,11 +46,30 @@ They do not change production path handling, resource ceilings, or controller po
 | OBS-01: canonical directory-race target | The fixture fault path now uses the canonical root that `Directory::new` binds. A `TMPDIR` symlink alias otherwise misses the pre-stat and pre-open removal. | Fixture setup only. Coverage, hit, unavailable-count, and privacy-marker assertions stay unchanged. No production path normalization. |
 | OBS-02: `ru_maxrss` unit | Darwin bytes come from XNU copying `resident_size_max`, which Mach `task_info` defines in bytes. Linux `getrusage(2)` reports kibibytes. The observer converts to bytes and keeps the 512 MiB ceiling. | The 48 MiB source bound, allocator check, exact-query checks, and child identity stay unchanged. This is not a budget increase. Native macOS execution remains unobserved. |
 
-## Dependency Identity Is Not Yet A Production Binding
+## M4 Native Invocation Seams
+
+M4-P01 adds an explicit consuming-build fingerprint to actual kernel machinery checks at publication and reader open.
+The prototype `Kernel::new` retains its historical upstream-only identity; product callers use `Kernel::with_build_identity` through `knowledge-retrieval`.
+M4-P02 adds shared caller cancellation/deadline checks to actual publication/query operations without raising the existing per-shard or per-format ceilings.
+M4-P03 exposes a real native generation reader pin; its filesystem reader lock remains live until the pin ends.
+These are generic future upstream candidates and import no Omni authority, library, service or model types.
+The replay and current source hashes include these patches; all original upstream hashes, licenses, locks, diagnostic numbers and AS/EINVAL evidence remain unchanged.
+The facade and its guide state the still-required source/Directory/streaming-orchestration boundaries; these seams alone do not certify the final product bound.
+
+M4-P04 supplies a live caller guard in `Control`; actual work checks its native current policy as well as deadline/cancellation. The generic library seam imports no authority types.
+M4-P05 is an Omni-local standalone-executable host adapter, **not an OpenKit library candidate**. The binary uses the actual Core account, admits parent/worker costs, launches one exact owned pure-kernel process group, observes native full RSS and `wait4` peak RSS (Linux KiB converted to bytes; Darwin bytes), and collects on cancellation/error before releasing resources. Native parent identity and parent-death/watch mechanisms reject a forged internal role. A bounded 100 ms missing-sample window retains the full promise and uses real exit peak evidence, never a fabricated zero sample. The private account directory is created on the selected store volume without changing existing directory permissions.
+M4-P06 replaces the old executable AS oracle with preserved-inheritance plus real owned-worker RSS assertions. No `RLIMIT_AS` ceiling is installed on either OS; the historical 2 GiB/EINVAL receipts and DIAG rows above remain historical facts, not current enforcement. Existing CPU/file ceilings and the 48 MiB/512 MiB library stress oracles remain. The live one-byte worker-promise test requires a numeric real-RSS refusal; Linux execution does not certify native macOS.
+`PROVENANCE.json` records original files unchanged in scope and separately lists new local source/test hashes. The complete upstream-to-current replay includes additions. The owned pure kernel creates no descendants; this proof does not close the separate product processing descendant-executor review.
+
+M4-P07 adds operation-only scan-field selection to the same exact/regex scanner: body-only for generic text, or body plus display name/title/description for ordinary Root navigation. Tags/digests/private identity metadata cannot become pseudo-body grep matches. Eligibility, current-document identity, complete scanning and the shared analyzer/ranking implementation are unchanged.
+M4-P08 repairs consequential native settlement: only exact successful wait4 sets reaped; bounded stop/poll keeps the full child/native resource capability quarantined on unknown collection, and ECHILD refuses signalling a stale PID. Owned reads/writes have nonblocking monotonic deadlines, the supervisor bounds its pure-worker lifetime, and diagnostics cannot block collection. Normal owned pipe-backpressure and unknown-reaper controls run in addition to the live RSS/inherited-AS tests. This is not native macOS qualification, a new executor, or product durable recovery.
+
+## Dependency Identity Binding
 
 The retained [upstream Cargo.lock](../upstream/openkit-b67cd0f2.Cargo.lock) has SHA-256 `88be6b21f6430d1aa5bf3b730822905e37ed7514a2378a49b454265797a0947a`.
 `machinery()` still binds this exact upstream evidence and the existing dictionary/schema/settings inputs.
-It does not automatically bind the actual consuming workspace's resolved dependencies.
+The historical prototype constructor does not automatically bind the actual consuming workspace's resolved dependencies.
+The explicit M4 constructor incorporates the caller's consuming fingerprint into the same manifest compatibility checks.
 The Git and path probes retain their actual Cargo-generated locks separately.
 The standalone crate lock records the M0 vendor test build, not Omni's future production resolution.
 
@@ -75,5 +94,4 @@ They must not introduce Omni library, GUI, package, or OpenKit authorization con
 
 No M4 seam trait or alternative production engine is introduced at M0.
 The Git probe is historical feasibility evidence in an isolated workspace; the path probe is the selected vendor consumer.
-The existing application search is not replaced by this dependency-only landing.
-The retrieval milestone owns that single-engine cutover and its independent old/new public conformance suite.
+The original M0 dependency-only landing did not replace application search. The subsequent rootlib integration now publishes/queries the actual kernel through `knowledge-retrieval`, with bounded deterministic legacy-snapshot shards and file-deduplicated rank-list fusion. Its old lexical/trigram construction is retired. This does not implement the admitted arbitrary-byte reader, archive Directory or streaming orchestration interfaces above, and does not assert final acceptance.

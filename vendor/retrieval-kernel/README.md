@@ -202,6 +202,19 @@ The full Cargo run initially exposed a writer-lock conflict during crash recover
 | S3: lexical any-term behavior | `test tests::lexical_any_term_matching ... ok` |
 | Recovery: release an inherited writer lock after failure | `test tests::failed_publication_releases_inherited_writer_lock ... ok` |
 
+## Native foreground ownership
+
+The downstream executable owns one pure-kernel worker and ONE Core account.
+It relays finite nonblocking stdout/stderr batches and retains the unreaped leader until the existing `knowledge-processing::worker::settle` proves actual native group and pipe collection.
+A short-lived worker's complete collected native RSS comes from `RUSAGE_CHILDREN`; this executable creates exactly one child and uses no baseline subtraction.
+The kernel engine itself launches no subprocesses.
+
+Controlled EOF, error, cancellation and unwind cannot return to `main` while collection is unknown.
+The real foreground Worker retains its Child, pipe ends and full resource holding; parent/bootstrap, signal and inherited-descriptor scopes remain live around it.
+Each M3 collection attempt is bounded to two seconds, followed by a sleep and bounded pending diagnostics rather than a leaked global or CPU busy loop.
+External forced SIGKILL is not successful settlement.
+See the [repair record](../../docs/changes/2026-11-05-foreground-native-extraction.md) for actual controls and remaining platform evidence.
+
 ## R2 Build Supply
 
 Root Turbo tasks include this package. NanoCore builds depend on its build, so a clean built-artifact smoke supplies the executable before serving Tasks. NanoCore tests also depend on its build, and the release test recipe builds it before collecting/executing the real stdio seam tests. Package Cargo scripts use `scripts/retrieval-cargo.sh`, which verifies the vendored IPADIC archive before exposing the fixed Lindera cache. The CI development image seeds that same verified archive. The App Dockerfile builds a target-native executable for each selected Linux platform and copies it with dictionary and dependency notices into the runtime image. The CLI/MCP are not installed into Sandbox images. Image qualification and remaining product cutover evidence belong in the R2 change record.

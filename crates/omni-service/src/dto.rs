@@ -1204,10 +1204,32 @@ pub enum SignerState {
     UnsignedExplicit,
 }
 
+/// Effective process policy, not a new resource pool or a source-access grant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceBudgets {
+    /// Effective process-wide working-memory ceiling in bytes.
+    pub memory_budget_bytes: U64,
+    /// Effective generated-storage ceiling, further limited by current native free-space/floor checks.
+    pub storage_budget_bytes: U64,
+    /// Explicit startup memory override, or null for the native default.
+    #[serde(deserialize_with = "required_nullable")]
+    pub memory_override_bytes: Option<U64>,
+    /// Explicit startup storage override, or null for the native default.
+    #[serde(deserialize_with = "required_nullable")]
+    pub storage_override_bytes: Option<U64>,
+    /// Selected caller-visible waiting jobs, or null when that host adapter has not supplied a count.
+    #[serde(deserialize_with = "required_nullable")]
+    pub waiting_for_memory: Option<U64>,
+}
+
 /// Selected-library status data, subject to transport/exposure projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
+    /// Additive optional effective policy; omission preserves existing version-1 response bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_budgets: Option<ResourceBudgets>,
     /// Public selected-library facts.
     pub library: Library,
     /// Current coverage.

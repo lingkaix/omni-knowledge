@@ -33,6 +33,29 @@ fn generation(kb: &KnowledgeBase) -> PathBuf {
     kb.root.join(".omni/indexes").join(name)
 }
 
+/// Resolve only the actual tuple published by this disposable fixture, not a legacy fake index.
+fn kernel_reference(kb: &KnowledgeBase) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(generation(kb).join("tantivy/kernel-reference.json")).unwrap())
+        .unwrap()
+}
+fn native_generation(kb: &KnowledgeBase) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let reference = kernel_reference(kb);
+    let cache = std::env::var_os("OMNI_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "omni-knowledge-derived-{}",
+                rustix::process::geteuid().as_raw()
+            ))
+        });
+    cache
+        .join(reference["corpus"].as_str().unwrap())
+        .join("kernel")
+        .join(hex::encode(Sha256::digest(b"shard-0")))
+        .join(reference["generations"]["shard-0"].as_str().unwrap())
+}
+
 /// Advances fixture metadata deterministically without sleeping for timestamp precision.
 fn touch_after(path: &Path, indexed_at: u64) {
     File::open(path)
@@ -249,7 +272,8 @@ fn absent_lexical_metadata_is_not_reported_as_current() {
     let (_directory, kb) = library(true);
     let probe = StatusProbe::default();
     assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
-    fs::remove_file(generation(&kb).join("tantivy/meta.json")).unwrap();
+    let metadata = native_generation(&kb).join("index/meta.json");
+    fs::remove_file(&metadata).unwrap();
     assert!(
         kb.search(&SearchOptions {
             query: "knowledge".into(),
@@ -261,13 +285,17 @@ fn absent_lexical_metadata_is_not_reported_as_current() {
         probe.inspect(&kb.root).folder.state,
         FolderState::NeedsIndex
     );
+    assert!(
+        !metadata.exists(),
+        "read-only status must not repair native files"
+    );
 }
 
 /// Detects missing referenced segment data without allocating source texts or vectors.
 #[test]
 fn absent_lexical_segment_requires_rebuilding() {
     let (_directory, kb) = library(true);
-    let path = fs::read_dir(generation(&kb).join("tantivy"))
+    let path = fs::read_dir(native_generation(&kb).join("index"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| {
@@ -280,6 +308,249 @@ fn absent_lexical_segment_requires_rebuilding() {
         StatusProbe::default().inspect(&kb.root).folder.state,
         FolderState::NeedsIndex
     );
+}
+
+/// A valid cached source summary cannot hide a changed consuming-build or shard reference.
+#[test]
+fn native_reference_binding_and_every_named_shard_are_checked() {
+    let (_directory, kb) = library(true);
+    let probe = StatusProbe::default();
+    assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
+    let path = generation(&kb).join("tantivy/kernel-reference.json");
+    let original = fs::read(&path).unwrap();
+    let mut reference = kernel_reference(&kb);
+    reference["consumer"] = serde_json::json!("0".repeat(64));
+    fs::write(&path, serde_json::to_vec(&reference).unwrap()).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    fs::write(&path, &original).unwrap();
+    reference = kernel_reference(&kb);
+    reference["generations"]["shard-1"] = serde_json::json!("0".repeat(64));
+    fs::write(&path, serde_json::to_vec(&reference).unwrap()).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    fs::write(&path, &original).unwrap();
+    assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    assert!(!path.exists(), "inspection cannot republish a reference");
+}
+
+/// Root CURRENT alone cannot certify a native missing/mismatched CURRENT or corrupted manifest.
+#[test]
+fn native_current_and_manifest_integrity_are_independent_of_summary_cache() {
+    let (_directory, kb) = library(true);
+    let probe = StatusProbe::default();
+    assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
+    let native = native_generation(&kb);
+    let current = native.parent().unwrap().join("CURRENT");
+    let pointer = fs::read(&current).unwrap();
+    fs::remove_file(&current).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    assert!(!current.exists());
+    fs::write(&current, "0".repeat(64)).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    fs::write(&current, pointer).unwrap();
+    let manifest = native.join("manifest.json");
+    let mut bytes = fs::read(&manifest).unwrap();
+    bytes.push(b' '); // Still valid JSON, but NOT the selected immutable generation's digest.
+    fs::write(manifest, bytes).unwrap();
+    assert_eq!(
+        probe.inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+}
+
+/// Native Tantivy payload/schema identity matters; existence of an old or unrelated index does not.
+#[test]
+fn native_lexical_commit_payload_must_match_its_generation() {
+    let (_directory, kb) = library(true);
+    let meta = native_generation(&kb).join("index/meta.json");
+    let original = fs::read(&meta).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    value["payload"] = serde_json::json!("0".repeat(64));
+    fs::write(&meta, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        StatusProbe::default().inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    // Names/types still exist, but swapped stored field addresses would read the wrong evidence.
+    value["schema"].as_array_mut().unwrap().swap(0, 1);
+    fs::write(&meta, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        StatusProbe::default().inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+}
+
+/// An existing native reader/publication gate is nonblocking and never created or replaced.
+#[test]
+fn native_publication_gate_is_checked_without_waiting() {
+    let (_directory, kb) = library(true);
+    let scope = native_generation(&kb).parent().unwrap().to_path_buf();
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .open(scope.join("LOCK"))
+        .unwrap();
+    FileExt::lock_exclusive(&lock).unwrap();
+    let start = Instant::now();
+    let report = StatusProbe::default().inspect(&kb.root);
+    FileExt::unlock(&lock).unwrap();
+    assert_eq!(
+        report.folder.state,
+        FolderState::Checking,
+        "{}",
+        report.folder.detail
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+/// Shared admission pressure means unknown freshness, not broken state or always-current fallback.
+#[test]
+fn status_memory_contention_is_checking_and_recovers() {
+    use knowledge_core::{
+        admission::{Account, Decision, Origin},
+        jobs::Reservation,
+    };
+    let (_directory, kb) = library(true);
+    let probe = StatusProbe::default();
+    assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
+    let account = Account::current().unwrap();
+    let Decision::Ready(mut held) = account
+        .reserve(
+            Reservation {
+                memory_bytes: account.status().unwrap().memory_available,
+                temporary_bytes: 0,
+            },
+            Origin::BeforeVerification,
+        )
+        .unwrap()
+    else {
+        panic!("owned memory pressure fixture");
+    };
+    let report = probe.inspect(&kb.root);
+    held.finish().unwrap();
+    assert_eq!(
+        report.folder.state,
+        FolderState::Checking,
+        "{}",
+        report.folder.detail
+    );
+    assert!(report.folder.detail.contains("admission"));
+    assert_eq!(probe.inspect(&kb.root).folder.state, FolderState::Current);
+}
+
+/// A valid other corpus with the same path names is not the selected generation's source revision.
+#[test]
+fn other_native_corpus_cannot_certify_selected_snapshot() {
+    let (_directory, kb) = library(true);
+    let (_other_directory, other) = library(false);
+    fs::write(
+        other.root.join("index.md"),
+        "A different original source revision\n",
+    )
+    .unwrap();
+    other.index(&IndexOptions::default()).unwrap();
+    let reference = fs::read(generation(&other).join("tantivy/kernel-reference.json")).unwrap();
+    fs::write(
+        generation(&kb).join("tantivy/kernel-reference.json"),
+        reference,
+    )
+    .unwrap();
+    let report = StatusProbe::default().inspect(&kb.root);
+    assert_eq!(
+        report.folder.state,
+        FolderState::NeedsIndex,
+        "{}",
+        report.folder.detail
+    );
+    assert!(report.folder.detail.contains("source revision"));
+}
+
+/// Native source projections are metadata-checked too; a missing one cannot be silently recreated.
+#[test]
+fn absent_native_projection_requires_rebuilding_without_repair() {
+    let (_directory, kb) = library(true);
+    let native = native_generation(&kb);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(native.join("manifest.json")).unwrap()).unwrap();
+    let relative = manifest["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|record| record["document"]["content"]["path"].as_str())
+        .unwrap();
+    let path = native.ancestors().nth(3).unwrap().join(relative);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        StatusProbe::default().inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    assert!(!path.exists());
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+    assert_eq!(
+        StatusProbe::default().inspect(&kb.root).folder.state,
+        FolderState::NeedsIndex
+    );
+    assert!(
+        fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// A fresh process cannot silently start Core or create its native cache just to inspect status.
+#[test]
+fn cold_status_never_initializes_account() {
+    if let Some(root) = std::env::var_os("OMNI_STATUS_TEST_ROOT") {
+        assert!(knowledge_core::admission::Account::current().is_err());
+        let report = StatusProbe::default().inspect(Path::new(&root));
+        assert_eq!(
+            report.folder.state,
+            FolderState::Checking,
+            "{}",
+            report.folder.detail
+        );
+        assert!(report.folder.detail.contains("account"));
+        assert!(knowledge_core::admission::Account::current().is_err());
+        assert!(!Path::new(&std::env::var_os("OMNI_CACHE_DIR").unwrap()).exists());
+        return;
+    }
+    let (_directory, kb) = library(true);
+    let cache = kb.root.join("must-not-create-cache");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cold_status_never_initializes_account",
+            "--nocapture",
+        ])
+        .env("OMNI_STATUS_TEST_ROOT", &kb.root)
+        .env("OMNI_CACHE_DIR", &cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!cache.exists());
 }
 
 /// Retries an active publication gate without blocking behind the external writer.

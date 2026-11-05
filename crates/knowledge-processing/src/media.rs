@@ -1,22 +1,24 @@
 //! Bounded local media conversion and timestamp-preserving speech transcript parsing.
 
-use crate::admission::{self, Charge};
+pub use crate::held::segment_video_held_funded;
+
+use crate::admission::{self, Admitted};
+use crate::funding::{Credits, Funding, read_fd, selected_volume};
 use crate::runtime::{RuntimeTool, resolve_executable};
 use crate::worker::{self, WorkerFailure};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 /// Maximum transcript JSON size accepted for one source file.
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum number of clips created by one segmentation operation.
-const MAX_SEGMENTS: usize = 100_000;
+pub(crate) const MAX_SEGMENTS: usize = 100_000;
 
 /// One derived video clip with its position in the authoritative source.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,46 +57,121 @@ pub fn media_kind(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Creates contiguous H.264 MP4 clips with exact source ranges in the caller's output directory.
-/// The default caller duration is ten seconds; accepted durations are 0.1 through 600 seconds.
-/// Requires executable `ffprobe` and `ffmpeg` at standard Homebrew locations or on PATH.
-/// Never replaces an existing output file.
-/// The caller owns cleanup of all created outputs, including partial work after an error.
+/// Creates contiguous H.264 MP4 clips using the compatibility pre-verification path.
 pub fn segment_video(path: &Path, output_dir: &Path, seconds: f64) -> Result<Vec<MediaSegment>> {
-    admission::with_legacy(None, || segment_video_body(path, output_dir, seconds))
+    admission::current()?;
+    let file =
+        File::open(path).with_context(|| format!("Cannot locate video {}", path.display()))?;
+    let storage = compatibility_storage()?;
+    let result = segment_video_file_funded(
+        &file,
+        output_dir,
+        seconds,
+        ClipPlan {
+            child_rss_bytes: None,
+            storage_bytes: storage,
+            max_segments: MAX_SEGMENTS,
+        },
+        &mut Funding::BeforeVerification,
+    );
+    Ok(worker::retain_source(result, file)?.value)
 }
 
-/// Segment one video after the host binds the shared account and any child ceiling.
-pub fn segment_video_admitted(
-    path: &Path,
+/// Complete bounds supplied by the job owner before any conversion effect.
+#[derive(Clone, Copy, Debug)]
+pub struct ClipPlan {
+    /// Opaque process-group RSS promise; None spends only credit left after all buffers.
+    pub child_rss_bytes: Option<u64>,
+    /// Total generated extent promise on the selected cache volume.
+    pub storage_bytes: u64,
+    /// Maximum clip count, at most the existing 100000 hostile-input ceiling.
+    pub max_segments: usize,
+}
+
+/// Compatibility descriptor API. Use the funded variant to retain its returned path-buffer credit.
+pub fn segment_video_file(
+    file: &File,
     output_dir: &Path,
     seconds: f64,
-    account: &mut impl admission::SharedAccount,
-    bound: admission::Bound,
+    child_rss_bytes: u64,
+    storage_bytes: u64,
 ) -> Result<Vec<MediaSegment>> {
-    admission::with_host(account, bound, || {
-        segment_video_body(path, output_dir, seconds)
-    })
-    .map_err(anyhow::Error::from)?
+    Ok(segment_video_file_funded(
+        file,
+        output_dir,
+        seconds,
+        ClipPlan {
+            child_rss_bytes: Some(child_rss_bytes),
+            storage_bytes,
+            max_segments: MAX_SEGMENTS,
+        },
+        &mut Funding::BeforeVerification,
+    )?
+    .value)
 }
 
-fn segment_video_body(path: &Path, output_dir: &Path, seconds: f64) -> Result<Vec<MediaSegment>> {
+/// Segment an admitted current source with all concurrent costs prepaid, including the returned paths.
+pub fn segment_video_file_funded(
+    file: &File,
+    output_dir: &Path,
+    seconds: f64,
+    plan: ClipPlan,
+    funding: &mut Funding<'_>,
+) -> Result<Admitted<Vec<MediaSegment>>> {
+    admission::current()?;
+    funding.checkpoint()?;
     ensure!(
         seconds.is_finite() && (0.1..=600.0).contains(&seconds),
         "Video segment duration must be from 0.1 through 600 seconds"
     );
     ensure!(
+        plan.max_segments > 0 && plan.max_segments <= MAX_SEGMENTS,
+        "Invalid clip count bound"
+    );
+    ensure!(
         output_dir.is_dir(),
         "Video output directory must already exist"
     );
-    let source = fs::canonicalize(path)
-        .with_context(|| format!("Cannot locate video {}", path.display()))?;
-    ensure!(source.is_file(), "Video source must be a regular file");
-    let duration = video_duration(&source)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "Video source must be a regular file"
+    );
+    selected_volume(&File::open(output_dir)?)?;
+    let first = output_dir.join("segment-000000.mp4");
+    ensure!(
+        !first.try_exists()?,
+        "Video clip already exists: {}",
+        first.display()
+    );
+    ensure!(
+        plan.storage_bytes > 0,
+        "Generated storage promise must be positive"
+    );
+    // Two arrays may coexist: complete collision-checked ranges and the returned segments.
+    let path_bytes = output_dir
+        .as_os_str()
+        .len()
+        .checked_add(128)
+        .context("Clip path bound overflow")?;
+    let result_bytes = (plan.max_segments as u64)
+        .checked_mul((path_bytes + std::mem::size_of::<MediaSegment>()) as u64)
+        .and_then(|n| n.checked_mul(2))
+        .context("Clip memory bound overflow")?;
+    let mut credits = Credits::new(
+        funding,
+        0,
+        result_bytes,
+        crate::opaque::capture_memory(1024 * 1024),
+        plan.child_rss_bytes,
+        plan.storage_bytes,
+    )?;
+    let _source_fd = worker::InheritedFd::new(file);
+    let source = fd_path(file);
+    let duration = video_duration(&source, &mut credits, funding)?;
     let count = (duration / seconds).ceil() as usize;
     ensure!(
-        count <= MAX_SEGMENTS,
-        "Video requires more than 100000 segments"
+        count <= plan.max_segments,
+        "Video requires more than the admitted segment count"
     );
     let ranges: Vec<_> = (0..count)
         .map(|index| {
@@ -106,7 +183,6 @@ fn segment_video_body(path: &Path, output_dir: &Path, seconds: f64) -> Result<Ve
             )
         })
         .collect();
-    // Check every output first, so a collision cannot leave an earlier subset newly converted.
     for (_, _, output) in &ranges {
         ensure!(
             !output.try_exists()?,
@@ -114,91 +190,118 @@ fn segment_video_body(path: &Path, output_dir: &Path, seconds: f64) -> Result<Ve
             output.display()
         );
     }
-    if let Some(bytes) = admission::storage_bytes() {
-        admission::checkpoint()?;
-        admission::before(Charge::Storage { bytes })?;
-    }
     let mut segments = Vec::with_capacity(count);
     for (start, end, output) in ranges {
+        // The only regular output inode is ours before exec and is bound to the selected volume.
+        let destination = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&output)?;
+        selected_volume(&destination)?;
+        let _output_fd = worker::InheritedFd::new(&destination);
+        let limit = credits
+            .storage
+            .0
+            .as_ref()
+            .context("Missing generated storage promise")?
+            .remaining()?
+            .temporary_bytes;
         let mut command = media_command(RuntimeTool::FFmpeg)?;
         command
             .args(["-nostdin", "-v", "error", "-ss"])
             .arg(format!("{start:.6}"))
             .arg("-i")
-            .arg(&source)
-            .arg("-t")
-            .arg(format!("{:.6}", end - start))
-            .args([
-                "-map",
-                "0:v:0",
-                "-an",
-                "-vf",
-                "setpts=PTS-STARTPTS,fps=25,scale=640:-2",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "25",
-                "-pix_fmt",
-                "yuv420p",
-                "-n",
-            ])
-            .arg(&output);
-        run_bounded(command, Duration::from_secs(120), "ffmpeg video conversion")?;
-        ensure!(
-            fs::metadata(&output)?.len() > 0,
-            "ffmpeg produced an empty video clip"
+            .arg(&source);
+        clip_encoding(&mut command, end - start);
+        command.arg(fd_path(&destination));
+        let converted = run_command(
+            command,
+            Duration::from_secs(120),
+            "ffmpeg video conversion",
+            &mut credits,
+            funding,
+            Some(limit),
         );
+        drop(_output_fd);
+        let (length, _destination) =
+            reconcile_writer(converted, destination, &mut credits, &[&output])?;
+        ensure!(length > 0, "ffmpeg produced an empty video clip");
         segments.push(MediaSegment {
             start_seconds: start,
             end_seconds: end,
             path: output,
         });
     }
-    Ok(segments)
+    let retained = credits.retained();
+    Ok(Admitted {
+        value: segments,
+        retained,
+    })
 }
 
 /// Reads OpenAI Whisper JSON, whisper.cpp JSON, or a plain `{ "text": ... }` transcript.
 /// Converts whisper.cpp millisecond offsets to seconds and rejects invalid or reversed ranges.
 /// Plain text records use a zero-to-zero range because no timing evidence exists.
 pub fn parse_transcript(path: &Path) -> Result<Vec<TranscriptSegment>> {
-    admission::with_legacy(Some(MAX_TRANSCRIPT_BYTES), || parse_transcript_body(path))
+    Ok(parse_transcript_path(path)?.value)
 }
 
-/// Parse one transcript after the host binds the shared account.
-pub fn parse_transcript_admitted(
-    path: &Path,
-    account: &mut impl admission::SharedAccount,
-) -> Result<Vec<TranscriptSegment>> {
-    admission::with_host(account, admission::Bound::default(), || {
-        parse_transcript_body(path)
-    })
-    .map_err(anyhow::Error::from)?
-}
-
-fn parse_transcript_body(path: &Path) -> Result<Vec<TranscriptSegment>> {
-    admission::checkpoint()?;
-    admission::before(Charge::Input {
-        bytes: MAX_TRANSCRIPT_BYTES,
-    })?;
-    admission::before(Charge::Live {
-        bytes: MAX_TRANSCRIPT_BYTES,
-    })?;
+/// Parse one transcript and return the holding that covers the retained text.
+pub fn parse_transcript_path(path: &Path) -> Result<Admitted<Vec<TranscriptSegment>>> {
+    admission::current()?;
     let file =
         File::open(path).with_context(|| format!("Cannot read transcript {}", path.display()))?;
+    worker::retain_source(parse_transcript_file(&file), file)
+}
+
+/// Parse an already admitted transcript with the compatibility pre-verification path.
+pub fn parse_transcript_file(file: &File) -> Result<Admitted<Vec<TranscriptSegment>>> {
+    parse_transcript_file_funded(file, None, &mut Funding::BeforeVerification)
+}
+
+/// Parse bounded descriptor bytes in the real watched parser, retaining result credit until freed.
+pub fn parse_transcript_file_funded(
+    file: &File,
+    child_rss_bytes: Option<u64>,
+    funding: &mut Funding<'_>,
+) -> Result<Admitted<Vec<TranscriptSegment>>> {
+    admission::current()?;
+    funding.checkpoint()?;
+    let length = file.metadata()?.len();
+    ensure!(length <= MAX_TRANSCRIPT_BYTES, "Transcript exceeds 16 MiB");
+    let capacity = usize::try_from(length)?
+        .checked_add(1)
+        .context("Transcript input overflow")?;
+    let cap = crate::opaque::transport_cap(capacity);
+    let output = cap.checked_mul(8).context("Transcript result overflow")?;
+    let mut credits = Credits::new(
+        funding,
+        capacity as u64,
+        output,
+        crate::opaque::capture_memory(cap),
+        child_rss_bytes,
+        0,
+    )?;
+    let bytes = read_fd(file, capacity)?;
     ensure!(
-        file.metadata()?.len() <= MAX_TRANSCRIPT_BYTES,
-        "Transcript exceeds 16 MiB"
+        bytes.len() as u64 <= length,
+        "Transcript grew during bounded descriptor read"
     );
-    let mut bytes = Vec::new();
-    file.take(MAX_TRANSCRIPT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_TRANSCRIPT_BYTES,
-        "Transcript exceeds 16 MiB"
-    );
-    let value: Value = serde_json::from_slice(&bytes).context("Transcript is not valid JSON")?;
+    let result = crate::opaque::transcript_in_worker(&bytes, capacity, &mut credits, funding)?;
+    drop(bytes);
+    credits.input.release_now()?;
+    let retained = credits.retained();
+    Ok(Admitted {
+        value: result,
+        retained,
+    })
+}
+
+/// Mature transcript parser used only inside the already funded RSS-watched process.
+/// Retains OpenAI, whisper.cpp, plain text, millisecond conversion, and source-clock validation.
+pub fn parse_transcript_bytes(bytes: &[u8]) -> Result<Vec<TranscriptSegment>> {
+    let value: Value = serde_json::from_slice(bytes).context("Transcript is not valid JSON")?;
     let mut result = Vec::new();
     if let Some(segments) = value.get("segments") {
         for segment in segments
@@ -227,43 +330,82 @@ fn parse_transcript_body(path: &Path) -> Result<Vec<TranscriptSegment>> {
     Ok(result)
 }
 
-/// Converts audio to mono 16 kHz PCM WAV and invokes a configured local whisper.cpp executable.
-/// Requires existing model and executable paths; it downloads no model and starts no service.
-/// Produces `asr-input.wav` and `asr-result.json` in the caller's directory without replacing files.
-/// The caller owns cleanup; recognition has a maximum duration of thirty minutes.
+/// Leave native observation headroom in the compatibility estimate; funded callers choose their exact admitted extent.
+fn compatibility_storage() -> Result<u64> {
+    let available = admission::available_storage()?;
+    Ok(available.saturating_sub((available / 100).max(1)))
+}
+
+/// Complete ASR bounds, chosen before creating any WAV/JSON output.
+#[derive(Clone, Copy, Debug)]
+pub struct AsrPlan {
+    /// Opaque child-group RSS promise; None spends only credit left after buffers.
+    pub child_rss_bytes: Option<u64>,
+    /// Total new regular-file extent on the selected cache volume.
+    pub storage_bytes: u64,
+    /// Maximum transcript input bytes, no greater than the retained 16 MiB ceiling.
+    pub transcript_bytes: usize,
+}
+
+/// Convert audio and run a configured local recognizer; the compatibility result keeps a stranded live charge.
 pub fn transcribe(
     path: &Path,
     whisper_executable: &Path,
     model: &Path,
     output_dir: &Path,
 ) -> Result<Vec<TranscriptSegment>> {
-    admission::with_legacy(None, || {
-        transcribe_body(path, whisper_executable, model, output_dir)
-    })
+    admission::current()?;
+    let file = File::open(path).context("Cannot locate audio source")?;
+    let storage = compatibility_storage()?;
+    let result = transcribe_file_funded(
+        &file,
+        whisper_executable,
+        model,
+        output_dir,
+        AsrPlan {
+            child_rss_bytes: None,
+            storage_bytes: storage,
+            transcript_bytes: MAX_TRANSCRIPT_BYTES as usize,
+        },
+        &mut Funding::BeforeVerification,
+    );
+    Ok(worker::retain_source(result, file)?.value)
 }
 
-/// Transcribe after the host binds the shared account and any child ceiling.
-pub fn transcribe_admitted(
-    path: &Path,
+/// Compatibility descriptor API; the funded API consumes the current job's existing credits.
+pub fn transcribe_file(
+    file: &File,
     whisper_executable: &Path,
     model: &Path,
     output_dir: &Path,
-    account: &mut impl admission::SharedAccount,
-    bound: admission::Bound,
-) -> Result<Vec<TranscriptSegment>> {
-    admission::with_host(account, bound, || {
-        transcribe_body(path, whisper_executable, model, output_dir)
-    })
-    .map_err(anyhow::Error::from)?
+    child_rss_bytes: u64,
+    storage_bytes: u64,
+) -> Result<Admitted<Vec<TranscriptSegment>>> {
+    transcribe_file_funded(
+        file,
+        whisper_executable,
+        model,
+        output_dir,
+        AsrPlan {
+            child_rss_bytes: Some(child_rss_bytes),
+            storage_bytes,
+            transcript_bytes: MAX_TRANSCRIPT_BYTES as usize,
+        },
+        &mut Funding::BeforeVerification,
+    )
 }
 
-fn transcribe_body(
-    path: &Path,
+/// Perform real conversion/recognition under prepaid extent ceilings, then parse within the same funded call.
+pub fn transcribe_file_funded(
+    file: &File,
     whisper_executable: &Path,
     model: &Path,
     output_dir: &Path,
-) -> Result<Vec<TranscriptSegment>> {
-    admission::checkpoint()?;
+    plan: AsrPlan,
+    funding: &mut Funding<'_>,
+) -> Result<Admitted<Vec<TranscriptSegment>>> {
+    admission::current()?;
+    funding.checkpoint()?;
     ensure!(
         whisper_executable.is_file(),
         "Configured whisper.cpp executable is missing"
@@ -273,8 +415,29 @@ fn transcribe_body(
         output_dir.is_dir(),
         "Transcription output directory must already exist"
     );
-    let source = fs::canonicalize(path).context("Cannot locate audio source")?;
-    ensure!(source.is_file(), "Audio source must be a regular file");
+    ensure!(
+        file.metadata()?.is_file(),
+        "Audio source must be a regular file"
+    );
+    ensure!(
+        plan.transcript_bytes > 0 && plan.transcript_bytes as u64 <= MAX_TRANSCRIPT_BYTES,
+        "Invalid transcript byte bound"
+    );
+    selected_volume(&File::open(output_dir)?)?;
+    ensure!(
+        plan.storage_bytes > 0,
+        "Generated storage promise must be positive"
+    );
+    let cap = crate::opaque::transport_cap(plan.transcript_bytes);
+    let mut credits = Credits::new(
+        funding,
+        plan.transcript_bytes as u64 + 1,
+        cap.checked_mul(8).context("ASR output overflow")?,
+        crate::opaque::capture_memory(cap.max(1024 * 1024)),
+        plan.child_rss_bytes,
+        plan.storage_bytes,
+    )?;
+    let _inherited = worker::InheritedFd::new(file);
     let wav = output_dir.join("asr-input.wav");
     let prefix = output_dir.join("asr-result");
     let output = output_dir.join("asr-result.json");
@@ -282,10 +445,17 @@ fn transcribe_body(
         !wav.try_exists()? && !output.try_exists()?,
         "Transcription outputs already exist"
     );
+    let destination = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&wav)?;
+    selected_volume(&destination)?;
+    let _output_fd = worker::InheritedFd::new(&destination);
     let mut converter = media_command(RuntimeTool::FFmpeg)?;
     converter
         .args(["-nostdin", "-v", "error", "-i"])
-        .arg(source)
+        .arg(fd_path(file))
         .args([
             "-map",
             "0:a:0",
@@ -296,14 +466,35 @@ fn transcribe_body(
             "1",
             "-c:a",
             "pcm_s16le",
-            "-n",
+            "-f",
+            "wav",
+            "-y",
         ])
-        .arg(&wav);
-    run_bounded(
+        .arg(fd_path(&destination));
+    let limit = credits
+        .storage
+        .0
+        .as_ref()
+        .context("Missing storage promise")?
+        .remaining()?
+        .temporary_bytes;
+    let converted = run_command(
         converter,
         Duration::from_secs(300),
         "ffmpeg audio conversion",
-    )?;
+        &mut credits,
+        funding,
+        Some(limit),
+    );
+    drop(_output_fd);
+    let (_, _wav_fd) = reconcile_writer(converted, destination, &mut credits, &[&wav])?;
+    // The private admitted directory must remain exclusively owned while whisper uses its required basename protocol.
+    let json = File::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&output)?;
+    selected_volume(&json)?;
     let mut recognizer = Command::new(whisper_executable);
     recognizer
         .arg("-m")
@@ -312,16 +503,45 @@ fn transcribe_body(
         .arg(&wav)
         .args(["-l", "auto", "-oj", "-of"])
         .arg(prefix);
-    run_bounded(
+    let limit = credits
+        .storage
+        .0
+        .as_ref()
+        .context("Missing storage promise")?
+        .remaining()?
+        .temporary_bytes
+        .min(plan.transcript_bytes as u64);
+    let recognized = run_command(
         recognizer,
         Duration::from_secs(1800),
         "whisper.cpp speech recognition",
-    )?;
-    parse_transcript(&output)
+        &mut credits,
+        funding,
+        Some(limit),
+    );
+    let (length, json) = reconcile_writer(recognized, json, &mut credits, &[&wav, &output])?;
+    ensure!(
+        length <= plan.transcript_bytes as u64,
+        "Transcript exceeds admitted bytes"
+    );
+    let bytes = read_fd(&json, plan.transcript_bytes + 1)?;
+    ensure!(
+        bytes.len() as u64 <= length,
+        "Transcript changed during bounded read"
+    );
+    let segments =
+        crate::opaque::transcript_in_worker(&bytes, plan.transcript_bytes, &mut credits, funding)?;
+    drop(bytes);
+    credits.input.release_now()?;
+    let retained = credits.retained();
+    Ok(Admitted {
+        value: segments,
+        retained,
+    })
 }
 
 /// Observes the first video stream and obtains a finite positive source duration.
-fn video_duration(source: &Path) -> Result<f64> {
+fn video_duration(source: &str, credits: &mut Credits, funding: &Funding<'_>) -> Result<f64> {
     let mut command = media_command(RuntimeTool::FFprobe)?;
     command
         .args([
@@ -335,7 +555,14 @@ fn video_duration(source: &Path) -> Result<f64> {
             "json",
         ])
         .arg(source);
-    let bytes = run_bounded(command, Duration::from_secs(30), "ffprobe video inspection")?;
+    let bytes = run_command(
+        command,
+        Duration::from_secs(30),
+        "ffprobe video inspection",
+        credits,
+        funding,
+        None,
+    )?;
     let value: Value = serde_json::from_slice(&bytes).context("ffprobe returned invalid JSON")?;
     let streams = value["streams"]
         .as_array()
@@ -361,7 +588,7 @@ fn video_duration(source: &Path) -> Result<f64> {
 }
 
 /// Resolves only a typed media executable, including Homebrew tools when Finder has a limited PATH.
-fn media_command(tool: RuntimeTool) -> Result<Command> {
+pub(crate) fn media_command(tool: RuntimeTool) -> Result<Command> {
     let path = resolve_executable(tool).with_context(|| {
         format!(
             "{} is missing; use the app's dependency guide to install the local tool",
@@ -400,6 +627,28 @@ fn transcript_segment(value: &Value, milliseconds: bool) -> Result<TranscriptSeg
     })
 }
 
+/// Apply the single retained visual conversion recipe to either admitted input/output protocol.
+pub(crate) fn clip_encoding(command: &mut Command, duration: f64) {
+    command.arg("-t").arg(format!("{duration:.6}")).args([
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "setpts=PTS-STARTPTS,fps=25,scale=640:-2",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "25",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "mp4",
+        "-y",
+    ]);
+}
+
 /// Effective clip recipe recorded by the host in processor identity. Not a source digest.
 pub fn clip_processor_facts() -> &'static [(&'static str, &'static str)] {
     &[
@@ -412,139 +661,139 @@ pub fn clip_processor_facts() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// Runs a local executable with a deadline, bounded captured output, and guaranteed child cleanup.
-/// Commands receive separate arguments and a closed input stream; imported content is never executed.
-fn run_bounded(mut command: Command, timeout: Duration, description: &str) -> Result<Vec<u8>> {
-    admission::checkpoint()?;
-    let rss_limit = admission::child_rss_bytes();
-    if let Some(limit) = rss_limit {
-        admission::before(Charge::Live { bytes: limit })?;
+/// Reconcile one new inode exactly once, including known failed partial output; unknown writers keep their promises and fixtures.
+fn reconcile_writer(
+    result: Result<Vec<u8>>,
+    destination: File,
+    credits: &mut Credits,
+    artifacts: &[&Path],
+) -> Result<(u64, File)> {
+    let result = result.map(drop);
+    if let Err(mut error) = result {
+        if let Some(pending) = error.downcast_mut::<worker::UnsettledChild>() {
+            for path in artifacts {
+                pending.retain_artifact(path.to_path_buf());
+            }
+            pending.retain_descriptor(destination);
+        } else {
+            crate::funding::reconcile_file(destination, &mut credits.storage, artifacts)?;
+        }
+        return Err(error);
     }
-    let mut stdout = tempfile::tempfile().context("Cannot allocate command output")?;
-    let mut stderr = tempfile::tempfile().context("Cannot allocate command diagnostics")?;
-    command
-        .stdin(Stdio::null())
-        .stdout(stdout.try_clone()?)
-        .stderr(stderr.try_clone()?);
-    #[cfg(unix)]
+    crate::funding::reconcile_file(destination, &mut credits.storage, artifacts)
+}
+
+/// All real media tools share the same continuously observed nonblocking runner.
+fn run_command(
+    command: Command,
+    timeout: Duration,
+    description: &str,
+    credits: &mut Credits,
+    funding: &Funding<'_>,
+    extent: Option<u64>,
+) -> Result<Vec<u8>> {
+    let result = worker::run(
+        command,
+        None,
+        1024 * 1024,
+        timeout,
+        credits,
+        funding,
+        extent,
+    )
+    .map(|capture| capture.bytes);
+    if result
+        .as_ref()
+        .is_err_and(|e| e.downcast_ref::<WorkerFailure>() == Some(&WorkerFailure::Deadline))
     {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        return result.with_context(|| {
+            format!(
+                "{description} exceeded its {} second deadline",
+                timeout.as_secs()
+            )
+        });
     }
-    let mut child = command.spawn().with_context(|| {
-        format!("Cannot start {description}; check local executable availability")
-    })?;
-    let deadline = admission::deadline().map_or_else(
-        || Instant::now() + timeout,
-        |host| host.min(Instant::now() + timeout),
-    );
-    let status = loop {
-        let output_sizes = stdout
-            .metadata()
-            .and_then(|out| stderr.metadata().map(|err| (out.len(), err.len())));
-        let (out_size, err_size) = match output_sizes {
-            Ok(sizes) => sizes,
-            Err(error) => {
-                worker::settle(&mut child);
-                return Err(error).with_context(|| format!("Cannot inspect {description} output"));
-            }
-        };
-        if out_size > 1024 * 1024 || err_size > 1024 * 1024 {
-            worker::settle(&mut child);
-            return Err(anyhow::Error::new(WorkerFailure::OutputExceeded)
-                .context(format!("{description} diagnostics exceed 1 MiB")));
-        }
-        if let Err(error) = admission::checkpoint() {
-            worker::settle(&mut child);
-            return Err(error.into());
-        }
-        if let Some(limit) = rss_limit {
-            match worker::resident_bytes(child.id()) {
-                Ok(observed) if observed > limit => {
-                    worker::settle(&mut child);
-                    return Err(anyhow::Error::new(WorkerFailure::RssExceeded {
-                        limit_bytes: limit,
-                        observed_bytes: observed,
-                    }));
-                }
-                Ok(_) => {}
-                Err(_) => match child.try_wait() {
-                    Ok(Some(status)) => break status,
-                    _ => {
-                        worker::settle(&mut child);
-                        return Err(anyhow::Error::new(WorkerFailure::Unmeasured));
-                    }
-                },
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                worker::settle(&mut child);
-                return Err(anyhow::Error::new(WorkerFailure::Deadline).context(format!(
-                    "{description} exceeded its {} second deadline",
-                    timeout.as_secs()
-                )));
-            }
-            Err(error) => {
-                worker::settle(&mut child);
-                return Err(error).with_context(|| format!("Cannot observe {description}"));
-            }
-        }
-    };
-    if !status.success() {
-        stderr.seek(SeekFrom::Start(0))?;
-        let mut diagnostic = String::new();
-        stderr.take(4096).read_to_string(&mut diagnostic)?;
-        bail!("{description} failed with {status}: {}", diagnostic.trim());
+    result.with_context(|| description.to_owned())
+}
+
+/// Existing private regression seam: actual tools use precisely the same admitted runner.
+#[cfg(test)]
+fn run_bounded(
+    command: Command,
+    timeout: Duration,
+    description: &str,
+    rss_limit: u64,
+) -> Result<Vec<u8>> {
+    if timeout.is_zero() {
+        bail!(WorkerFailure::Deadline);
     }
-    stdout.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    stdout.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= 1024 * 1024,
-        "{description} output exceeds 1 MiB"
-    );
-    Ok(bytes)
+    let mut funding = Funding::BeforeVerification;
+    let mut credits = Credits::new(
+        &mut funding,
+        0,
+        0,
+        crate::opaque::capture_memory(1024 * 1024),
+        Some(rss_limit),
+        0,
+    )?;
+    run_command(command, timeout, description, &mut credits, &funding, None)
+}
+
+fn fd_path(file: &File) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // The child resolves the parent's descriptor, not the caller's path.
+        format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        format!("/dev/fd/{}", file.as_raw_fd())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = file;
+        String::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::{AdmitError, Bound, Charge, SharedAccount};
+    use crate::admission::AdmitError;
     use crate::worker::WorkerFailure;
+    use knowledge_core::admission::{Account, Configuration, Scheduling};
     use std::collections::HashSet;
-    use std::sync::Mutex;
+    use std::sync::Once;
     use std::time::Instant;
 
-    static SLEEP_GATE: Mutex<()> = Mutex::new(());
+    use crate::admission::TEST_GATE as SLEEP_GATE;
 
-    struct Ledger {
-        memory: u64,
-        storage: u64,
-        cancel: bool,
-    }
-
-    impl SharedAccount for Ledger {
-        fn reserve(&mut self, charge: Charge) -> Result<(), AdmitError> {
-            let need = charge.bytes();
-            if charge.is_storage() {
-                if self.storage < need {
-                    return Err(AdmitError::TooLargeStorage);
-                }
-                self.storage -= need;
-            } else if self.memory < need {
-                return Err(AdmitError::TooLargeMemory);
-            } else {
-                self.memory -= need;
+    fn ensure_account() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let path = tempfile::tempdir().unwrap().keep();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = File::open(&path).unwrap();
+            match Account::start(
+                directory,
+                Configuration {
+                    memory_bytes: None,
+                    storage_bytes: None,
+                },
+                Scheduling {
+                    max_pending: 64,
+                    max_records: 4096,
+                    max_descriptor_bytes: 1 << 20,
+                    per_mount: 4,
+                },
+            ) {
+                Ok(_) | Err(knowledge_core::admission::Error::AlreadyStarted) => {}
+                Err(error) => panic!("start account: {error}"),
             }
-            Ok(())
-        }
-
-        fn cancelled(&self) -> bool {
-            self.cancel
-        }
+        });
     }
 
     fn sleep_pids() -> HashSet<u32> {
@@ -590,28 +839,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn rss_ceiling_kills_and_reaps_sleep() {
+        ensure_account();
         let _gate = SLEEP_GATE.lock().expect("sleep gate");
         let before = sleep_pids();
-        let mut ledger = Ledger {
-            memory: u64::MAX,
-            storage: 0,
-            cancel: false,
-        };
-        let error = admission::with_host(
-            &mut ledger,
-            Bound {
-                child_rss_bytes: Some(1),
-                storage_bytes: None,
-                deadline: None,
-            },
-            || {
-                let mut command = Command::new("/bin/sleep");
-                command.arg("30");
-                run_bounded(command, Duration::from_secs(5), "sleep probe")
-            },
-        )
-        .expect("binding")
-        .expect_err("sleep must exceed one byte");
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error = run_bounded(command, Duration::from_secs(5), "sleep probe", 1)
+            .expect_err("sleep must exceed one byte");
         assert!(error.chain().any(|item| {
             matches!(
                 item.downcast_ref::<WorkerFailure>(),
@@ -624,14 +858,18 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn deadline_reaps_sleep_without_a_new_memory_ceiling() {
+        ensure_account();
         let _gate = SLEEP_GATE.lock().expect("sleep gate");
         let before = sleep_pids();
         let started = Instant::now();
-        let error = admission::with_legacy(None, || {
-            let mut command = Command::new("/bin/sleep");
-            command.arg("30");
-            run_bounded(command, Duration::from_millis(200), "sleep probe")
-        })
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error = run_bounded(
+            command,
+            Duration::from_millis(200),
+            "sleep probe",
+            64 * 1024 * 1024,
+        )
         .expect_err("deadline");
         assert!(format!("{error}").contains("exceeded its"));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -640,51 +878,65 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cancellation_does_not_start_the_child() {
+    fn expired_deadline_does_not_start_the_child() {
         let _gate = SLEEP_GATE.lock().expect("sleep gate");
         let before = sleep_pids();
-        let mut ledger = Ledger {
-            memory: u64::MAX,
-            storage: 0,
-            cancel: true,
-        };
-        let error = admission::with_host(&mut ledger, Bound::default(), || {
-            let mut command = Command::new("/bin/sleep");
-            command.arg("30");
-            run_bounded(command, Duration::from_secs(5), "sleep probe")
-        })
-        .expect("binding")
-        .expect_err("cancelled");
-        assert!(error.downcast_ref::<AdmitError>() == Some(&AdmitError::Cancelled));
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error =
+            run_bounded(command, Duration::ZERO, "sleep probe", 1024).expect_err("deadline");
+        assert!(error.downcast_ref::<WorkerFailure>() == Some(&WorkerFailure::Deadline));
         assert!(sleep_pids().is_subset(&before));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn refused_child_promise_does_not_spawn() {
+        ensure_account();
         let _gate = SLEEP_GATE.lock().expect("sleep gate");
         let before = sleep_pids();
-        let mut ledger = Ledger {
-            memory: 0,
-            storage: 0,
-            cancel: false,
-        };
-        let error = admission::with_host(
-            &mut ledger,
-            Bound {
-                child_rss_bytes: Some(1024),
-                storage_bytes: None,
-                deadline: None,
-            },
-            || {
-                let mut command = Command::new("/bin/sleep");
-                command.arg("30");
-                run_bounded(command, Duration::from_secs(5), "sleep probe")
-            },
-        )
-        .expect("binding")
-        .expect_err("refused");
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let error = run_bounded(command, Duration::from_secs(5), "sleep probe", u64::MAX)
+            .expect_err("refused");
         assert!(error.downcast_ref::<AdmitError>() == Some(&AdmitError::TooLargeMemory));
         assert_eq!(sleep_pids(), before);
+    }
+
+    /// Direct-child exit must not release a still-running descendant's memory or keep its pipe writer alive.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_exit_collects_the_actual_owned_background_process() {
+        ensure_account();
+        let _gate = SLEEP_GATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & printf '%s' \"$!\""]);
+        let bytes = run_bounded(
+            command,
+            Duration::from_secs(4),
+            "owned group exit probe",
+            64 * 1024 * 1024,
+        )
+        .unwrap();
+        let pid: u32 = std::str::from_utf8(&bytes).unwrap().trim().parse().unwrap();
+        let live = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+            s.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state != "Z" && state != "X")
+        });
+        // On the reviewed implementation this exact fixture survives. Stop only its native PID before reporting RED.
+        if live {
+            assert!(
+                Command::new("/bin/kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(
+            !live,
+            "direct exit left actual owned descendant {pid} running"
+        );
     }
 }

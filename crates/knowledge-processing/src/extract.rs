@@ -3,20 +3,22 @@
 //! Originals remain authoritative; unsupported formats return metadata-only coverage.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use pulldown_cmark::{Event, Options, Parser, html};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::admission::{self, Charge};
-use crate::worker;
+use crate::admission::{self, Admitted};
+use crate::funding::{Credits, Funding, read_fd};
+use crate::worker::WorkerFailure;
+
+pub use crate::admission::establish_process_account;
 
 /// Keep source-line markup bounded even when a small source contains many empty lines.
 const MAX_PREVIEW_LINES: usize = 20_000;
@@ -36,109 +38,211 @@ pub struct Extraction {
 
 /// Read one regular file within `max_bytes` and derive text without changing the source.
 ///
-/// Unknown binary formats remain metadata-only; parser errors become explicit failed coverage.
-/// Files over the input limit remain metadata-only, and output truncation uses UTF-8 boundaries.
-/// Returns an error for unreadable sources, non-regular files, or a zero limit.
+/// Requires [`admission::current`] before the open. The returned text's live-memory
+/// holding is not finished: [`knowledge_core::admission::Holding`] does not release
+/// on drop, so this compatibility path keeps the charge until process exit.
+/// Hosts that can finish the holding call [`extract_file`].
 pub fn extract(path: &Path, max_bytes: usize) -> Result<Extraction> {
-    admission::with_legacy(Some(max_bytes as u64), || extract_body(path, max_bytes))
+    Ok(extract_path(path, max_bytes)?.value)
 }
 
-/// Extract one source after the host binds the shared account on this thread.
-pub fn extract_admitted(
-    path: &Path,
+/// Extract one path and return the live-text holdings with the result.
+pub fn extract_path(path: &Path, max_bytes: usize) -> Result<Admitted<Extraction>> {
+    admission::current()?;
+    let file = File::open(path).with_context(|| format!("Read {}", path.display()))?;
+    crate::worker::retain_source(extract_file(&file, path, max_bytes, None), file)
+}
+
+/// Extract an already admitted file. `hint` supplies the extension only.
+///
+/// `child_rss_bytes` is the live promise for an opaque parser child. `None`
+/// uses the account's current `memory_available` after the input reservation.
+/// It does not skip the watchdog.
+pub fn extract_file(
+    file: &File,
+    hint: &Path,
     max_bytes: usize,
-    account: &mut impl admission::SharedAccount,
-) -> Result<Extraction> {
-    admission::with_host(account, admission::Bound::default(), || {
-        extract_body(path, max_bytes)
-    })
-    .map_err(anyhow::Error::from)?
+    child_rss_bytes: Option<u64>,
+) -> Result<Admitted<Extraction>> {
+    extract_file_funded(
+        file,
+        hint,
+        max_bytes,
+        child_rss_bytes,
+        &mut Funding::BeforeVerification,
+    )
 }
 
-fn extract_body(path: &Path, max_bytes: usize) -> Result<Extraction> {
-    admission::checkpoint()?;
+/// Extract from the admitted descriptor using existing claim credit or explicit pre-verification funding.
+/// The native caller must establish current source version before and after this read; a live FD alone is not version proof.
+pub fn extract_file_funded(
+    file: &File,
+    hint: &Path,
+    max_bytes: usize,
+    child_rss_bytes: Option<u64>,
+    funding: &mut Funding<'_>,
+) -> Result<Admitted<Extraction>> {
+    admission::current()?;
+    funding.checkpoint()?;
     if max_bytes == 0 {
         bail!("The extraction byte limit must be positive");
     }
-    let metadata = fs::metadata(path).with_context(|| format!("Read {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Read {}", hint.display()))?;
     if !metadata.is_file() {
-        bail!("Extraction requires a regular file: {}", path.display());
+        bail!("Extraction requires a regular file: {}", hint.display());
     }
-    let extension = path
+    let extension = hint
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let format = match extension.as_str() {
-        "md" | "markdown" | "mdown" => "markdown",
-        "html" | "htm" | "xhtml" => "html",
-        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pdf" | "doc" | "rtf" => {
-            &extension
-        }
-        _ => "unknown",
-    }
-    .to_string();
+    let format = classify(&extension);
     if metadata.len() > max_bytes as u64 {
-        return Ok(Extraction {
-            text: String::new(),
-            format,
-            status: "metadata-only".into(),
-            warnings: vec![format!(
-                "Source exceeds the {max_bytes}-byte extraction limit"
-            )],
+        return Ok(Admitted {
+            value: metadata_only(
+                &format,
+                format!("Source exceeds the {max_bytes}-byte extraction limit"),
+            ),
+            retained: Vec::new(),
         });
     }
-    admit(Charge::Input {
-        bytes: metadata.len(),
-    })?;
-    admit(Charge::Work {
-        bytes: metadata.len(),
-    })?;
-    admit(Charge::Output {
-        bytes: max_bytes as u64,
-    })?;
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(max_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("Read {}", path.display()))?;
-    if bytes.len() > max_bytes {
-        return Ok(Extraction {
-            text: String::new(),
-            format,
-            status: "metadata-only".into(),
-            warnings: vec![format!(
-                "Source grew beyond the {max_bytes}-byte extraction limit"
-            )],
-        });
+    let capacity = usize::try_from(metadata.len())?
+        .checked_add(1)
+        .context("Source size overflow")?;
+    let mut magic = [0u8; 5];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let _ = file.read_at(&mut magic, 0)?;
     }
-    let detected_format = if bytes.starts_with(b"%PDF-") {
-        "pdf"
+    let detected = if &magic == b"%PDF-" {
+        "pdf".to_owned()
     } else {
-        format.as_str()
+        format
     };
+    let child_needed = opaque_mode(&detected) || matches!(detected.as_str(), "doc" | "rtf");
+    let cap = crate::opaque::transport_cap(max_bytes);
+    let output = if child_needed {
+        cap.checked_mul(8)
+            .ok_or(admission::AdmitError::TooLargeMemory)?
+    } else {
+        metadata.len()
+    };
+    let mut credits = Credits::new(
+        funding,
+        capacity as u64,
+        output,
+        if child_needed {
+            crate::opaque::capture_memory(cap)
+        } else {
+            0
+        },
+        if child_needed {
+            child_rss_bytes
+        } else {
+            Some(0)
+        },
+        0,
+    )?;
+    let bytes = read_fd(file, capacity).with_context(|| format!("Read {}", hint.display()))?;
+    if bytes.len() > metadata.len() as usize {
+        drop(bytes);
+        credits.input.release_now()?;
+        return Ok(Admitted {
+            value: metadata_only(
+                &detected,
+                format!("Source grew during the bounded {max_bytes}-byte extraction read"),
+            ),
+            retained: Vec::new(),
+        });
+    }
+    let extraction = if detected == "doc" || detected == "rtf" {
+        let text = legacy_office_text(file, max_bytes, &mut credits, funding)?;
+        text_extraction(&detected, text, false, max_bytes)
+    } else if opaque_mode(&detected) {
+        let mode = if detected == "html" || detected == "epub" || detected == "pdf" {
+            detected.clone()
+        } else {
+            format!("office:{detected}")
+        };
+        match crate::opaque::parse_in_worker(&mode, &bytes, max_bytes, &mut credits, funding) {
+            Ok(extraction) => extraction,
+            Err(error)
+                if error.chain().any(|cause| {
+                    cause.is::<admission::AdmitError>()
+                        || cause.is::<WorkerFailure>()
+                        || cause.is::<crate::worker::UnsettledChild>()
+                }) =>
+            {
+                return Err(error);
+            }
+            Err(error) => Extraction {
+                text: String::new(),
+                format: detected.clone(),
+                status: "failed".into(),
+                warnings: vec![format!("{error:#}")],
+            },
+        }
+    } else {
+        parse_loaded(&detected, &extension, &bytes, max_bytes)?
+    };
+    drop(bytes);
+    credits.input.release_now()?;
+    let retained = if extraction.text.is_empty() && extraction.warnings.is_empty() {
+        Vec::new()
+    } else {
+        credits.retained()
+    };
+    Ok(Admitted {
+        value: extraction,
+        retained,
+    })
+}
+
+/// Parse bytes that are already in memory. The parser worker calls this.
+///
+/// Hosts use [`extract_file`]. This function does not reserve on the account.
+pub fn parse_loaded(
+    mode: &str,
+    extension: &str,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<Extraction> {
+    if max_bytes == 0 {
+        bail!("The extraction byte limit must be positive");
+    }
+    let detected_format = mode.strip_prefix("office:").unwrap_or(mode).to_string();
+    let extension = extension.to_string();
     let mut resolved_format = detected_format.to_string();
     let mut output_truncated = false;
-    let parsed: Result<Option<String>> = match detected_format {
-        "pdf" => std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&bytes))
+    let parsed: Result<Option<String>> = match detected_format.as_str() {
+        "pdf" => std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes))
             .map_err(|_| anyhow!("PDF parser failed on this document"))
             .and_then(|result| result.map(Some).map_err(anyhow::Error::from)),
-        "epub" => crate::epub::read_epub(path, max_bytes).map(Some),
-        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => {
-            office_text(path, detected_format, max_bytes, &mut output_truncated).map(Some)
-        }
-        "doc" | "rtf" => legacy_office_text(path, max_bytes).map(Some),
-        "html" => String::from_utf8(bytes)
+        "epub" => crate::epub::read_epub_bytes(bytes, max_bytes).map(Some),
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => office_text(
+            bytes,
+            detected_format.as_str(),
+            max_bytes,
+            &mut output_truncated,
+        )
+        .map(Some),
+        "doc" | "rtf" => Err(anyhow!(
+            "Legacy DOC/RTF extraction requires macOS textutil or an optional parser"
+        )),
+        "html" => String::from_utf8(bytes.to_vec())
             .map_err(anyhow::Error::from)
             .and_then(|source| {
                 html2text::from_read(source.as_bytes(), 120)
                     .map(Some)
                     .map_err(anyhow::Error::from)
             }),
-        "markdown" => String::from_utf8(bytes)
+        "markdown" => String::from_utf8(bytes.to_vec())
             .map(Some)
             .map_err(anyhow::Error::from),
-        _ => match String::from_utf8(bytes) {
+        _ => match String::from_utf8(bytes.to_vec()) {
             Ok(text) if looks_like_text(&text) => {
                 resolved_format = if extension.is_empty() {
                     "text".into()
@@ -184,7 +288,16 @@ fn extract_body(path: &Path, max_bytes: usize) -> Result<Extraction> {
             status: "metadata-only".into(),
             warnings: Vec::new(),
         }),
-        Err(error) if admission::stops_call(&error) => Err(error),
+        Err(error)
+            if error
+                .downcast_ref::<crate::admission::AdmitError>()
+                .is_some()
+                || error
+                    .downcast_ref::<crate::worker::WorkerFailure>()
+                    .is_some() =>
+        {
+            Err(error)
+        }
         Err(error) => Ok(Extraction {
             text: String::new(),
             format: resolved_format,
@@ -194,10 +307,59 @@ fn extract_body(path: &Path, max_bytes: usize) -> Result<Extraction> {
     }
 }
 
-fn admit(charge: Charge) -> Result<()> {
-    admission::checkpoint()?;
-    admission::before(charge)?;
-    Ok(())
+fn classify(extension: &str) -> String {
+    match extension {
+        "md" | "markdown" | "mdown" => "markdown",
+        "html" | "htm" | "xhtml" => "html",
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" | "pdf" | "doc" | "rtf" => {
+            extension
+        }
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+fn opaque_mode(format: &str) -> bool {
+    matches!(
+        format,
+        "pdf" | "html" | "epub" | "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp"
+    )
+}
+
+fn metadata_only(format: &str, warning: String) -> Extraction {
+    Extraction {
+        text: String::new(),
+        format: format.to_string(),
+        status: "metadata-only".into(),
+        warnings: vec![warning],
+    }
+}
+
+fn text_extraction(
+    format: &str,
+    mut text: String,
+    truncated: bool,
+    max_bytes: usize,
+) -> Extraction {
+    let truncated = truncate_utf8(&mut text, max_bytes) || truncated;
+    let empty = text.trim().is_empty();
+    let mut warnings = Vec::new();
+    if truncated {
+        warnings.push(format!("Extracted text was limited to {max_bytes} bytes"));
+    }
+    Extraction {
+        text,
+        format: format.to_string(),
+        status: if truncated {
+            "partial"
+        } else if empty {
+            "metadata-only"
+        } else {
+            "extracted"
+        }
+        .into(),
+        warnings,
+    }
 }
 
 /// Parse leading YAML front matter and return its JSON value plus the remaining Markdown.
@@ -266,26 +428,163 @@ pub fn preview_html(path: &Path, max_bytes: usize) -> Result<String> {
 /// Large text uses a bounded row window around the evidence; missing lines produce a notice,
 /// without highlighting a substitute. Returns the same source-read errors as `preview_html`.
 pub fn preview_html_at_line(path: &Path, max_bytes: usize, line: Option<usize>) -> Result<String> {
-    admission::with_legacy(Some(max_bytes as u64), || {
-        preview_html_body(path, max_bytes, line)
-    })
-}
-
-/// Preview one source after the host binds the shared account on this thread.
-pub fn preview_html_admitted(
-    path: &Path,
-    max_bytes: usize,
-    line: Option<usize>,
-    account: &mut impl admission::SharedAccount,
-) -> Result<String> {
-    admission::with_host(account, admission::Bound::default(), || {
-        preview_html_body(path, max_bytes, line)
-    })
-    .map_err(anyhow::Error::from)?
+    preview_html_body(path, max_bytes, line)
 }
 
 fn preview_html_body(path: &Path, max_bytes: usize, line: Option<usize>) -> Result<String> {
-    let result = extract(path, max_bytes)?;
+    admission::current()?;
+    let file = File::open(path).with_context(|| format!("Read {}", path.display()))?;
+    let result = preview_file_funded(
+        &file,
+        path,
+        max_bytes,
+        line,
+        None,
+        &mut Funding::BeforeVerification,
+    );
+    Ok(crate::worker::retain_source(result, file)?.value)
+}
+
+/// Render an admitted file in the same real parser process, with prepaid input/transport/result lifetimes.
+/// Caller ownership/version obligations are identical to extract_file_funded; this does not authorize paths.
+pub fn preview_file_funded(
+    file: &File,
+    hint: &Path,
+    max_bytes: usize,
+    line: Option<usize>,
+    child_rss: Option<u64>,
+    funding: &mut Funding<'_>,
+) -> Result<Admitted<String>> {
+    admission::current()?;
+    funding.checkpoint()?;
+    ensure_preview_limit(max_bytes)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("Preview requires a regular file");
+    }
+    let oversized = metadata.len() > max_bytes as u64;
+    let capacity = if oversized {
+        0
+    } else {
+        usize::try_from(metadata.len())?
+            .checked_add(1)
+            .context("Preview source overflow")?
+    };
+    let extension = hint
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let format = classify(&extension);
+    let mut magic = [0u8; 5];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let _ = file.read_at(&mut magic, 0)?;
+    }
+    let effective = if &magic == b"%PDF-" { "pdf" } else { &format };
+    let legacy = matches!(effective, "doc" | "rtf");
+    let size = if opaque_mode(effective) || legacy {
+        max_bytes as u64
+    } else {
+        metadata.len().min(max_bytes as u64)
+    };
+    let cap = size
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(MAX_PREVIEW_LINES as u64 * 512 + 65_536))
+        .context("Preview output overflow")?;
+    let mut credits = Credits::new(
+        funding,
+        capacity as u64,
+        cap,
+        crate::opaque::capture_memory(cap),
+        child_rss,
+        0,
+    )?;
+    let bytes = read_fd(file, capacity)?;
+    if !oversized && bytes.len() as u64 > metadata.len() {
+        bail!("Preview source grew during bounded descriptor read");
+    }
+    let legacy_text = if legacy && !oversized {
+        Some(legacy_office_text(file, max_bytes, &mut credits, funding)?)
+    } else {
+        None
+    };
+    let kind = if oversized {
+        "oversized"
+    } else if legacy {
+        "legacy"
+    } else {
+        "source"
+    };
+    let payload = legacy_text
+        .as_ref()
+        .map_or(bytes.as_slice(), |text| text.as_bytes());
+    let filename = hint.file_name().unwrap_or_default().to_string_lossy();
+    let mut command = Command::new(crate::worker::parser_worker_path()?);
+    command.args([
+        "preview",
+        kind,
+        &extension,
+        &filename,
+        &max_bytes.to_string(),
+        &line.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+    ]);
+    let capture = crate::worker::run(
+        command,
+        Some(payload),
+        cap,
+        Duration::from_secs(120),
+        &mut credits,
+        funding,
+        None,
+    )?;
+    let value =
+        String::from_utf8(capture.bytes).context("Preview worker returned invalid UTF-8")?;
+    drop(legacy_text);
+    drop(bytes);
+    credits.input.release_now()?;
+    let retained = credits.retained();
+    Ok(Admitted { value, retained })
+}
+
+/// Keep preview and extraction's existing positive byte-limit rule identical.
+fn ensure_preview_limit(max_bytes: usize) -> Result<()> {
+    if max_bytes == 0 {
+        bail!("The extraction byte limit must be positive");
+    }
+    Ok(())
+}
+
+/// Pure mature rendering inside the watched worker; source markup remains inert and line clocks stay unchanged.
+pub fn preview_loaded(
+    kind: &str,
+    extension: &str,
+    filename: &str,
+    bytes: &[u8],
+    max_bytes: usize,
+    line: Option<usize>,
+) -> Result<String> {
+    let result = if kind == "oversized" {
+        metadata_only(
+            &classify(extension),
+            format!("Source exceeds the {max_bytes}-byte extraction limit"),
+        )
+    } else if kind == "legacy" {
+        text_extraction(
+            extension,
+            String::from_utf8(bytes.to_vec())?,
+            false,
+            max_bytes,
+        )
+    } else {
+        let detected = if bytes.starts_with(b"%PDF-") {
+            "pdf".to_string()
+        } else {
+            classify(extension)
+        };
+        parse_loaded(&detected, extension, bytes, max_bytes)?
+    };
     if matches!(result.format.as_str(), "markdown" | "epub") && result.status == "extracted" {
         return Ok(rendered_line_preview(
             &render_markdown(&result.text),
@@ -299,28 +598,15 @@ fn preview_html_body(path: &Path, max_bytes: usize, line: Option<usize>) -> Resu
         ));
     }
     if result.format == "html" && result.status != "metadata-only" {
-        admit(Charge::Input {
-            bytes: max_bytes as u64,
-        })?;
-        let mut bytes = Vec::new();
-        File::open(path)?
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > max_bytes {
-            bail!("HTML source grew beyond the preview limit");
-        }
-        let source = String::from_utf8(bytes)?;
+        let source = std::str::from_utf8(bytes)?;
         return Ok(rendered_line_preview(
-            &sanitize_html(&source),
+            &sanitize_html(source),
             &result.text,
             line,
             "Extracted text lines",
         ));
     }
-    let mut preview = format!(
-        "<h2>{}</h2>",
-        escape_html(&path.file_name().unwrap_or_default().to_string_lossy())
-    );
+    let mut preview = format!("<h2>{}</h2>", escape_html(filename));
     if !result.warnings.is_empty() {
         preview.push_str(&format!(
             "<p class=\"notice\">{}</p>",
@@ -480,8 +766,8 @@ fn looks_like_text(text: &str) -> bool {
 }
 
 /// Read one ZIP member against a shared expanded-byte budget without extracting paths.
-pub(crate) fn read_zip_text(
-    archive: &mut zip::ZipArchive<File>,
+pub(crate) fn read_zip_text<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
     name: &str,
     remaining: &mut usize,
 ) -> Result<String> {
@@ -491,12 +777,6 @@ pub(crate) fn read_zip_text(
     if member.size() > *remaining as u64 {
         bail!("Archive text exceeds the expanded-byte limit at {name}");
     }
-    admit(Charge::Input {
-        bytes: member.size(),
-    })?;
-    admit(Charge::Work {
-        bytes: member.size(),
-    })?;
     let mut bytes = Vec::new();
     member
         .by_ref()
@@ -512,14 +792,12 @@ pub(crate) fn read_zip_text(
 /// Extract Office text against the shared XML byte budget; return read/parse/admission errors.
 /// Set output_truncated when XLSX applies max_bytes during assembly rather than after return.
 fn office_text(
-    path: &Path,
+    bytes: &[u8],
     format: &str,
     max_bytes: usize,
     output_truncated: &mut bool,
 ) -> Result<String> {
-    let length = fs::metadata(path)?.len();
-    admit(Charge::Input { bytes: length })?;
-    let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     if archive.len() > 100_000 {
         bail!("Office archive contains too many members");
     }
@@ -669,8 +947,8 @@ impl SpreadsheetOutput {
 /// Resolve borrowed XLSX shared/inline runs and numeric values into a bounded ordered prefix.
 /// Charge all selected XML to remaining, even after output truncation, retaining late failures.
 /// Return text plus omission state for public partial coverage; propagate ZIP/XML/budget errors.
-fn spreadsheet_text(
-    archive: &mut zip::ZipArchive<File>,
+fn spreadsheet_text<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
     remaining: &mut usize,
     max_bytes: usize,
 ) -> Result<(String, bool)> {
@@ -750,87 +1028,55 @@ fn spreadsheet_text(
 }
 
 /// Use the existing macOS converter for legacy Office and RTF with bounded output and timeout.
-fn legacy_office_text(path: &Path, max_bytes: usize) -> Result<String> {
+fn legacy_office_text(
+    file: &File,
+    max_bytes: usize,
+    credits: &mut Credits,
+    funding: &Funding<'_>,
+) -> Result<String> {
     if !cfg!(target_os = "macos") {
         bail!("Legacy DOC/RTF extraction requires macOS textutil or an optional parser");
     }
-    let source = fs::canonicalize(path)?;
-    let deadline =
-        admission::deadline().unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-    if let Some(limit) = admission::child_rss_bytes() {
-        admit(Charge::Live { bytes: limit })?;
-    }
+    let _inherited = crate::worker::InheritedFd::new(file);
     let mut command = Command::new("/usr/bin/textutil");
     command
         .args(["-convert", "txt", "-stdout"])
-        .arg(source)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
+        .arg(fd_path(file));
+    // The same nonblocking loop continuously samples RSS, including while textutil is silent.
+    let capture = crate::worker::run(
+        command,
+        None,
+        max_bytes as u64,
+        Duration::from_secs(30),
+        credits,
+        funding,
+        None,
+    )?;
+    String::from_utf8(capture.bytes).context("textutil output is not UTF-8")
+}
+
+fn fd_path(file: &File) -> String {
+    #[cfg(target_os = "linux")]
     {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        use std::os::unix::io::AsRawFd;
+        format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
     }
-    let mut child = command.spawn().context("Start macOS textutil")?;
-    if let Err(error) = worker::enforce_rss(&mut child, admission::child_rss_bytes()) {
-        return Err(anyhow::Error::new(error));
-    }
-    let stdout = child.stdout.take().context("Read textutil output")?;
-    let (sender, receiver) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send(result);
-    });
-    let result = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-    let timed_out = matches!(result, Err(mpsc::RecvTimeoutError::Timeout));
-    if !result
-        .as_ref()
-        .is_ok_and(|value| value.as_ref().is_ok_and(|bytes| bytes.len() <= max_bytes))
+    #[cfg(target_os = "macos")]
     {
-        let _ = child.kill();
+        use std::os::unix::io::AsRawFd;
+        format!("/dev/fd/{}", file.as_raw_fd())
     }
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if let Err(error) = admission::checkpoint() {
-            worker::settle(&mut child);
-            let _ = reader.join();
-            return Err(error.into());
-        }
-        if let Err(error) = worker::enforce_rss(&mut child, admission::child_rss_bytes()) {
-            let _ = reader.join();
-            return Err(anyhow::Error::new(error));
-        }
-        if Instant::now() >= deadline {
-            worker::settle(&mut child);
-            let _ = reader.join();
-            bail!("textutil exceeded its 30-second conversion timeout");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let _ = reader.join();
-    if timed_out {
-        bail!("textutil exceeded its 30-second conversion timeout");
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = file;
+        String::new()
     }
-    let bytes = result.context("textutil exceeded its 30-second conversion timeout")??;
-    if bytes.len() > max_bytes {
-        bail!("textutil output exceeds the extraction limit");
-    }
-    if !status.success() {
-        bail!("textutil could not convert this document");
-    }
-    String::from_utf8(bytes).context("textutil output is not UTF-8")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
 
     #[test]
@@ -855,7 +1101,7 @@ mod tests {
             .unwrap();
         archive.finish().unwrap();
         let original = fs::read(&path).unwrap();
-        let extracted = extract(&path, 65536).unwrap();
+        let extracted = parse_loaded("office:xlsx", "xlsx", &original, 65536).unwrap();
         assert!(extracted.text.contains("Alpha"), "{}", extracted.text);
         assert!(extracted.text.contains("Beta"), "{}", extracted.text);
         assert_ne!(extracted.status, "failed");

@@ -17,6 +17,11 @@ impl Kernel {
     pub fn search(&self, query: Query) -> Result<SearchResult> {
         self.search_inner(query, &Budget::new())
     }
+    /// Search under a caller-shared cancellation state and monotonic deadline.
+    pub fn search_controlled(&self, query: Query, control: &Control) -> Result<SearchResult> {
+        control.check()?;
+        self.search_inner(query, &Budget::controlled(control))
+    }
     /// Run a query under its request-local cancellation and wall budget.
     pub(crate) fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
         let regex = validate_query(&query)?;
@@ -148,6 +153,9 @@ impl Kernel {
                             self.representation(&pin, record, live[&record.document.key])?;
                         for (unit_id, unit) in record.units.iter().enumerate() {
                             budget.check()?;
+                            if !budget.scan_field(unit.field.as_deref()) {
+                                continue;
+                            }
                             file.seek(SeekFrom::Start(unit.start)).map_err(io_error)?;
                             let mut emit = |start: u64, end: u64, preview: &str| {
                                 occurrences += 1;

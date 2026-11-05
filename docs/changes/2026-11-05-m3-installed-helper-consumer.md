@@ -1,0 +1,9 @@
+# Installed M3 helper consumer
+
+The maintained installed smoke initially failed to compile because it consumed the removed SharedAccount/extract_admitted/read_epub_admitted facade. It now calls the committed funded held-file APIs on the existing single512 MiB account; no wrapper account, second pool, fake helper or success fallback is introduced. The actual input descriptors and returned values survive their readers, are destroyed before the original holdings finish, and read-only uncertain children remain foreground through actual group/I/O collection. The wrapper no longer kills that sole owner on a timer and then deletes its fixture.
+
+The first real helper run then honestly failed PID observation: scanning all host processes missed the short-lived real worker. The sampler now reads its spawning main thread's actual kernel children list and still verifies each candidate's exact installed executable. PID/exe observations are diagnostic data, not authority or settlement; the M3 API's whole group/I/O collection remains the settlement proof. No sleeps, synthetic PID, modified processor or larger format fixture was added.
+
+Actual Linux installed smoke passed real HTML twice and EPUB once with child PIDs879771/879772/879773, harness879769 collected, zero holdings after final consumption, and the original contained text. Darwin/FSEvents and root-native-command activation remain explicitly unobserved/unbound here. The prior compile and missed-sample failures remain in external evidence, not overwritten as success.
+
+Cargo test callers reside under debug/deps, so CI installs actual built parser-worker and Darwin omni-fsevents bytes beside those callers before tests rather than merely building a different sibling path. The release archive still obtains its helper names from actual Cargo/parent implementation, preserving normal installed lookup. This instrument port does not replace native product/M0 acceptance.

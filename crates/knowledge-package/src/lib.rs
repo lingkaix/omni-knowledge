@@ -8,8 +8,11 @@
 //! - [`Work`] borrows one [`knowledge_core::admission::Holding`]. `grow` runs before a buffer or generated write, and `written` runs after the bytes are on the volume.
 //!
 //! Package identity and digests are data. They do not grant mounts, roots, or signer authority.
-//! Signer policy, STORED-generation search, v1 mapping, bundle verification, M1 install, and EPUB presets remain required.
-//! This crate does not mark those calls done and does not start a second Git engine or writer.
+//! [`FrozenArchive`] provides verified held STORED ranges and compatible component directories.
+//! [`V1Package`] verifies genuine directory/TAR inventories without extracting a TAR filesystem.
+//! [`V1Projection`] pins explicit native/foreign core mappings and publishes host-manifest-bound artifacts.
+//! On Linux and macOS, held descriptors call `Store::import_copy`, `Store::install`, `History::verify_bundle`, `History::admit_bundle`, and ordered `export_epub_held_funded`.
+//! Signer trust, kernel search, snapshot activation, macOS execution, and external host publication remain open.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
@@ -32,14 +35,39 @@ use std::time::{Duration, Instant};
 
 mod archive;
 mod capturing;
+mod compatibility;
+mod delegation;
+mod foreign;
+mod frozen;
 mod gated;
 mod manifest;
 mod metadata;
 mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod owners;
+mod projection;
+mod remap;
 mod restoring;
+#[cfg(test)]
+mod scalar_control;
 mod source;
+mod tar;
 
 pub use capturing::capture;
+pub use compatibility::{
+    IndexDecision, IndexDirectory, IndexOmission, IndexRequirements, VectorSpace,
+};
+pub use delegation::OwnerHandoff;
+pub use foreign::{V1Directory, V1Package};
+pub use frozen::{ArchiveVersion, EntryRange, FrozenArchive, StoredRange};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use owners::{
+    EpubOwnerError, HeldMember, HistoryOwner, StorageOwner, TextInstall, admit_inert_objects,
+    export_ordered_epub, import_verified_source, install_verified_text, native_operation,
+    verify_inert_bundle,
+};
+pub use projection::{V1Artifact, V1Carrier, V1ExportOutcome, V1MappedFile, V1Projection};
+pub use remap::{V1PathMap, V1ReferenceMap};
 pub use restoring::{apply, stage};
 pub use source::VerifiedSource;
 
@@ -49,8 +77,7 @@ pub const FORMAT: &str = "omni.knowledge-package";
 /// Storage no-clobber apply. `apply_text_change` is the storage owner operation.
 ///
 /// `install_new` is the exclusive create for original bytes. Neither method may delete unrelated files.
-/// Owners must use `VerifiedSource::copy_to` into a private candidate, then perform their
-/// destination authority/version checks before publication. A copy failure forbids publication.
+/// A copy failure forbids publication. An existing destination stays in place.
 pub trait SafeApply {
     /// Install authored text when `expected` still matches, or create it when `expected` is absent.
     fn apply_text_change(
@@ -71,14 +98,13 @@ pub trait SafeApply {
     ) -> Result<ApplyOutcome, Error>;
 }
 
-/// History handoff. The Git owner verifies and imports an inert bundle.
+/// History handoff for an inert bundle.
 ///
-/// The fixed history seam is `History::prepare`, `publish`, `inspect`, and
-/// `prepare_confirmation` at `2c86db6`. That seam has no `git bundle verify`.
-/// This crate does not invoke Git, hooks, or network operations.
+/// `GitAdmit::Inert` does not activate refs, checkout, config, hooks, remotes, or trust.
+/// It is not snapshot activation and it is not package trust.
 pub trait GitTransactions {
-    /// Copy the held bundle with `VerifiedSource::copy_to` before history-owner admission.
-    /// A path is not source proof. This method does not certify `git bundle verify`.
+    /// Hand the held bundle to the history owner. A path is not source proof.
+    /// `GitAdmit::Inert` is not snapshot activation, package trust, or a waiver of a later host check.
     fn admit_inert_bundle(
         &mut self,
         operation_id: &str,
@@ -112,6 +138,8 @@ pub enum GitAdmit {
 pub enum Error {
     /// The archive or manifest shape is not usable.
     Invalid,
+    /// Optional packaged generation cannot be opened by the actual native consumer.
+    IndexOmitted(IndexOmission),
     /// A caller quota or Core budget was exceeded.
     Quota,
     /// Actual expansion exceeded the caller ratio.
@@ -157,6 +185,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Invalid => "invalid package",
+            Self::IndexOmitted(_) => "optional package index omitted",
             Self::Quota => "package quota exceeded",
             Self::Ratio => "package compression ratio exceeded",
             Self::Hostile => "hostile package archive",
@@ -459,6 +488,8 @@ pub struct IndexSet {
     pub compatible: bool,
     /// Why the generation was not queried. Core bytes stay usable either way.
     pub fallback: Option<String>,
+    /// Optional identity/extension facts retained verbatim; never native compatibility authority.
+    pub metadata: Map<String, Value>,
 }
 
 /// History or journal pointer.
@@ -987,6 +1018,7 @@ fn index_set(items: &[Digested]) -> Option<IndexSet> {
             paths,
             compatible: false,
             fallback: Some("kernel_not_wired".into()),
+            metadata: Map::new(),
         })
     }
 }
@@ -1066,7 +1098,7 @@ pub(crate) fn preallocate(work: &Work<'_>, bytes: u64) -> Result<Scratch, Error>
     }
 }
 
-fn admission_error(error: AdmissionError) -> Error {
+pub(crate) fn admission_error(error: AdmissionError) -> Error {
     match error {
         AdmissionError::TooLargeMemory | AdmissionError::TooLargeStorage => Error::TooLarge,
         _ => Error::Indeterminate,

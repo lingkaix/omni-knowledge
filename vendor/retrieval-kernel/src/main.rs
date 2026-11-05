@@ -2,14 +2,20 @@
 use retrieval_kernel::{directory::Directory, *};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+mod owned;
 
-/// Dispatch one face. Runtime performs no network operations or subprocess launches.
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("{}", serde_json::to_string(&error).unwrap());
-        std::process::exit(1);
+/// Dispatch a face through the actual native Core/RSS worker boundary; the engine has no subprocesses.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // The foreground native owner has completed controlled shutdown before run returns.
+            owned::diagnostic(serde_json::to_string(&error).unwrap().as_bytes());
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 /// Local bounded error constructor.
@@ -24,7 +30,7 @@ fn run() -> Result<()> {
     process_limits()?;
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--version") {
-        println!("retrieval-kernel {}", env!("CARGO_PKG_VERSION"));
+        owned::output(format!("retrieval-kernel {}", env!("CARGO_PKG_VERSION")).as_bytes())?;
         return Ok(());
     }
     if args.is_empty() {
@@ -53,7 +59,14 @@ fn run() -> Result<()> {
                 "service requires an owner-assigned derived store",
             )
         })?;
-        let kernel = Kernel::new(&PathBuf::from(root), &PathBuf::from(store))?;
+        let store = PathBuf::from(store);
+        let kernel = Kernel::new(&PathBuf::from(root), &store)?;
+        if let Some(status) = owned::supervise(&store)? {
+            if !status.success() {
+                return Err(error("worker-failed", "collected kernel worker failed"));
+            }
+            return Ok(());
+        }
         return stdio(|request| service(&kernel, request), true);
     }
     if source_flag.is_some() {
@@ -82,22 +95,31 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(".retrieval-kernel"));
     let kernel = Kernel::new(&root, &store)?;
+    if let Some(status) = owned::supervise(&store)? {
+        if !status.success() {
+            return Err(error("worker-failed", "collected kernel worker failed"));
+        }
+        return Ok(());
+    }
     let directory = Directory::new(&root, &store)?;
     match command.as_str() {
         "index" => {
             let view = directory.inventory()?;
             let expected = kernel.generation(&view.scope)?;
             let generation = kernel.publish(view, expected)?;
-            println!(
-                "{}",
+            owned::output(
                 json!({"generation":generation,"scope":directory.scope()})
-            );
+                    .to_string()
+                    .as_bytes(),
+            )?;
             Ok(())
         }
         "search" => {
             let (mode, query) = query_args.unwrap();
             let result = directory.search(&kernel, mode, query, limit)?;
-            println!("{}", serde_json::to_string(&result).unwrap());
+            owned::output(
+                &serde_json::to_vec(&result).map_err(|_| error("io", "serialization failed"))?,
+            )?;
             Ok(())
         }
         "mcp" => stdio(|request| mcp(&kernel, &directory, request), false),
@@ -121,11 +143,17 @@ fn flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
 }
 /// Consume newline-delimited JSON with bounded frame storage and stdout reserved for replies.
 fn stdio(mut handle: impl FnMut(Value) -> Option<Value>, local_service: bool) -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut input = stdin.lock();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
-    while let Some(frame) = frame(&mut input)? {
+    let mut input = std::io::BufReader::new(
+        owned::Channel::new(0, Instant::now() + Duration::from_secs(30))
+            .map_err(|_| error("io", "owned input unavailable"))?,
+    );
+    loop {
+        input
+            .get_mut()
+            .deadline(Instant::now() + Duration::from_secs(30));
+        let Some(frame) = frame(&mut input)? else {
+            break;
+        };
         cpu_limit()?;
         let reply = match frame.and_then(|b| {
             serde_json::from_slice::<Value>(&b)
@@ -144,11 +172,7 @@ fn stdio(mut handle: impl FnMut(Value) -> Option<Value>, local_service: bool) ->
             if bytes.len() > 8 * 1024 * 1024 {
                 return Err(error("resource-limited", "response byte budget exhausted"));
             }
-            output
-                .write_all(&bytes)
-                .and_then(|_| output.write_all(b"\n"))
-                .and_then(|_| output.flush())
-                .map_err(|_| error("io", "stdio output failed"))?;
+            owned::output(&bytes)?;
         }
     }
     Ok(())
@@ -372,7 +396,8 @@ fn process_limits() -> Result<()> {
             "file-growth signal enforcement unavailable",
         ));
     }
-    set_limit(libc::RLIMIT_AS, 2 * 1024 * 1024 * 1024)?;
+    // Darwin EINVAL remains historical evidence. No blanket address-space ceiling overrides
+    // the selected native budget on either OS; owned full-RSS observation is the active bound.
     set_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024)?;
     cpu_limit()?;
     eprintln!("{}", self_vm_summary("installed"));

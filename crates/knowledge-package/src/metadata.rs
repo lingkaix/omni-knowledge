@@ -144,6 +144,10 @@ pub(crate) fn manifest(value: &Manifest) -> Shape {
         if let Some(reason) = &index.fallback {
             shape.text(reason);
         }
+        for (key, value) in &index.metadata {
+            shape.text(key);
+            shape.value(value);
+        }
     }
     for blob in [&value.history, &value.journal].into_iter().flatten() {
         shape.nodes += 6;

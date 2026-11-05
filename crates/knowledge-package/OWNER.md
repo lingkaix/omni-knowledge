@@ -19,7 +19,7 @@ An exhausted examination returns `Error::Quota` without counter overshoot; alrea
 ## Restore
 
 `apply` calls `SafeApply::apply_text_change` for core text and `SafeApply::install_new` for original bytes.
-Those are the storage-owner operations. This workspace does not contain a committed `knowledge-storage` crate, so this crate does not link `Store::install` and does not write the destination.
+`apply` itself does not write the destination.
 Conflicts and indeterminate results stop the call. Already saved paths are not rolled back here.
 The breaking Rust handoff is `apply(staged, storage, history, work)`.
 Both `SafeApply` methods accept `&mut VerifiedSource` and `&mut Work`, not a staged path.
@@ -30,48 +30,54 @@ Unknown files, incomplete generations, stale input, and old generations without 
 
 ## Git
 
-Consume only the history seam fixed in `2c86db6`: `prepare`, `publish`, `inspect`, and `prepare_confirmation`.
-Publication in that commit checks the confirmed proposal inside the native transaction.
-This crate does not run `git` and does not add a second history engine.
-`GitTransactions::admit_inert_bundle` hands the verified native source capability and the same `Work` to that owner.
-The owner must copy with `VerifiedSource::copy_to` into its private candidate before any admission effect; a mutable path is no longer source proof.
-`2c86db6` still has no `git bundle verify`. `GitAdmit::Inert` is not a verified import.
-Bundle verification remains required. It is unfinished until history exposes that check on `2c86db6`.
+This package does not shell out to Git and does not start a second history engine.
+`GitAdmit::Inert` is not snapshot activation and it is not package trust.
+The held file is the read-only open of the copied inode. The writer stays open until the owner callback returns.
+On Linux, `/proc/self/fd` only cross-checks that inode. The handed descriptor is the `O_RDONLY` open, including on macOS.
+`OwnerHandoff` preserves the actual native result and a separate late drift observation.
+`import_verified_source` and `install_verified_text` call the borrowed `Store` with the held descriptor.
+`install_verified_text` charges that peak before any path copy or private handoff, `read_text` does not charge it again, and the cost remains through the copy, preparation, and a typed refusal.
+`verify_inert_bundle` and `admit_inert_objects` call the borrowed `History` with that descriptor and the same `Claim`.
+`StorageOwner` and `HistoryOwner` implement the apply traits with those calls.
+`take_unsettled` returns `knowledge_history::Error::Unsettled` without converting it to text or settling the claim.
+This package does not claim snapshot activation, and it does not publish remotes or schedules.
 
 ## Index
 
 Package indexes stay STORED and are not copied into the home.
 `compatible: true` does not refuse the package. An incompatible generation needs an explicit reason.
-Until the kernel Directory provider is called, both cases record fallback `kernel_not_wired` and leave core bytes installable.
+`FrozenArchive`/`IndexDirectory` supply actual verified STORED ranges; native compatibility uses complete identities, not that boolean.
+After the `6deb711` partial review, `index_decision` returns `Result<IndexDecision, Error>` and `index_paths` returns `Result<&[RelativePath], Error>` with cooperative, pre-admitted linearithmic membership checks and no input-order requirement.
+The README compiles this migration for the kernel consumer.
+Until actual kernel queries compose that source, the installation preview's `kernel_not_wired` fallback remains truthful and core bytes stay usable.
 Search of STORED generations and exact float32 vectors remains required. It is unfinished. `required_features` still refuse installation.
 
 ## EPUB
 
 `docs/specs/package.md` keeps EPUB as a processing operation, not a snapshot preset.
-The required preset path is `knowledge_processing::read_epub` and `export_epub` at frozen `9a807f9`, in this workspace, without a second writer or a second account.
-That call is unfinished here.
+`export_ordered_epub` calls `export_epub_held_funded` with the held members in the caller's order.
+The output inode is the caller's empty private file. A logical name is not opened as a source path.
+`EpubOwnerError` retains partial descriptors, holdings, and an unsettled parser child until the caller inspects them.
 
 ## Concrete Cross-Owner Binding Tasks
 
 These tasks remain obligations, not waivers or claims of a complete M5 delivery.
-Only `knowledge-package` is edited in this change.
+The product edit is `knowledge-package`. Storage and history bodies are unchanged.
 
 | Source owner | Required binding and acceptance |
 | --- | --- |
-| M1 storage owner | Implement `SafeApply::{apply_text_change, install_new}` against its real installation authority, consuming `VerifiedSource::copy_to` with the shared `Work` before the native transaction publishes. Prove destination version/conflict and cancellation with actual `Store::install` when the storage crate is committed; this clone has no such crate. |
-| History owner, seam `2c86db6` | Implement the updated `GitTransactions::admit_inert_bundle` capability handoff and expose genuine bundle verification before import. Keep hooks/filters/remotes inert and preserve unrelated repositories. The current package port does not claim bundle verification. |
+| M1 storage owner | Call `Store::import_copy` with the held read-only descriptor and `Preflight`, or `Store::prepare` plus `Store::install`, on one `Scope` and the current `WritePolicy`. File-exists conflict and a stale expected version retain the destination and the original. Unknown files are not adopted or deleted. | 
+| History owner | Call `verify_bundle` and `admit_bundle` with the held descriptor, exact digest, and existing `Claim`. Admit objects only. Keep refs, checkout, config, hooks, remotes, and trust inert. Snapshot activation is not claimed. |
 | Signer-policy integration owner | Bind `inspect` signature observations to user/system SSHSIG trust verification over the decoded snapshot digest with namespace `omni-knowledge.snapshot.v1`; do not promote `Unverified` to trust. |
 | Retrieval integration owner | Connect `IndexSet` STORED generations to the kernel Directory provider with first-use digest/version checks and exact float32 query evidence; retain the explicit `kernel_not_wired` fallback until then. |
-| Compatibility integration owner | Replace `v1_import_plan` refusal only when genuine foreign owner/revision/profile inventory and truthful export context exist; prove mappings without invented context. |
-| Processing owner, seam `9a807f9` | Bind `read_epub`/`export_epub` to the service preset operation on P1 admission `d51cdde`, without another writer or account. |
+| Compatibility integration owner | `V1Package` verifies held genuine directories and TAR. `V1Projection` pins actual native and foreign files, maps paths, assets, parsed destinations, and Source scalars, and publishes only reopened output bound to separately supplied host context. Remapped locator scalars stay YAML strings, including plain `null`, boolean, and numeric filenames. Real external host publication is still open. |
+| Processing owner | Call `export_epub_held_funded` with `HeldMember` order equal to the spine order. Do not hash a descriptor and reopen a path. Do not treat the book as publication authority. |
 
 ## Still required
 
 These are not closed by this crate and are not waived:
 
-- SSH signer policy. `Signature::Unverified` is not trust.
-- Kernel query of STORED index generations and exact float32 vectors.
-- Genuine v1 inventory mapping and truthful export context. `v1_import_plan` still returns `CompatibilityRefused` and does not invent owner, revision, or review facts.
-- `git bundle verify` through history `2c86db6` once that function exists. Do not shell out to Git.
-- M1 `Store::install` when `knowledge-storage` is a committed workspace member. `apply` still delegates through `SafeApply` and refuses tampered staged bytes.
-- EPUB through processing `9a807f9` on the shared account. Admission stays P1 `d51cdde`.
+- SSH signer policy. `Signature::Unverified` is not trust. Git `ValidKnown` is not detached snapshot trust.
+- Kernel query of STORED index generations and exact float32 vectors. C5 `NativeSource` and `Delivery` live on the root service at `71290207` and are not a package dependency. Worker exit `c9` remains open. `FrozenArchive` is the held source and is not kernel search.
+- Genuine external host publication. Supplied context fixtures are not Notebook acceptance.
+- Snapshot activation, remote publication, and schedule publication. Inert object admission does not close them. macOS execution of this binding is not observed. Admission stays P1 `d51cdde`.

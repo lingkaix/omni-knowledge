@@ -2,8 +2,8 @@
 //!
 //! The accepted `docs/specs/service.md` owns this boundary. These types describe
 //! data, not admitted filesystem handles, caller identity, or capabilities.
-//! Decoding an owner-only command does not authorize it. No operation handler,
-//! backend, transport, daemon, or exposure implementation exists in this crate.
+//! Decoding an owner-only command does not authorize it. The native authority/runtime modules
+//! separately bind selected directory capabilities, current policy and real domain hostcalls.
 //!
 //! Use [`decode_request`] for one complete control payload and [`encode_response`]
 //! for one response. Neither function reads a file, logs input, executes commands,
@@ -23,8 +23,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod authority;
 mod codec;
 pub mod dto;
+pub mod runtime;
 pub mod scalar;
 
 pub use codec::{

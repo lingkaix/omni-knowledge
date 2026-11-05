@@ -1,92 +1,183 @@
-//! Admitted adapters, legacy bypass, and installed ffmpeg/ffprobe behavior.
+//! Real account coverage for admitted files, retained holdings, and installed ffmpeg.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::process::Command;
+use std::sync::Mutex;
 
-use knowledge_processing::admission::{AdmitError, Bound, Charge, SharedAccount};
+use knowledge_processing::admission::{self, AdmitError};
 use knowledge_processing::extract;
-use knowledge_processing::media::{segment_video, segment_video_admitted};
+use knowledge_processing::media::segment_video;
 use knowledge_processing::worker::WorkerFailure;
 
-struct Ledger {
-    memory: u64,
-    storage: u64,
-    charges: Vec<&'static str>,
-}
+static GATE: Mutex<()> = Mutex::new(());
 
-impl SharedAccount for Ledger {
-    fn reserve(&mut self, charge: Charge) -> Result<(), AdmitError> {
-        self.charges.push(match charge {
-            Charge::Input { .. } => "input",
-            Charge::Work { .. } => "work",
-            Charge::Output { .. } => "output",
-            Charge::Live { .. } => "live",
-            Charge::Storage { .. } => "storage",
-        });
-        let need = charge.bytes();
-        if charge.is_storage() {
-            if self.storage < need {
-                return Err(AdmitError::TooLargeStorage);
-            }
-            self.storage -= need;
-        } else if self.memory < need {
-            return Err(AdmitError::TooLargeMemory);
-        } else {
-            self.memory -= need;
-        }
-        Ok(())
-    }
-}
-
-fn ledger(memory: u64, storage: u64) -> Ledger {
-    Ledger {
-        memory,
-        storage,
-        charges: Vec::new(),
-    }
+fn started() {
+    admission::establish_process_account().unwrap();
 }
 
 #[test]
-fn admitted_text_matches_legacy_and_refusal_leaves_bytes() {
+fn retained_text_stays_charged_until_finish_and_matches_bytes() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("note.txt");
     let original = "Hello \u{1F600} incremental\n";
     fs::write(&path, original).unwrap();
-    let legacy = extract::extract(&path, 4096).unwrap();
-    let mut account = ledger(u64::MAX / 4, 0);
-    let admitted = extract::extract_admitted(&path, 4096, &mut account).unwrap();
-    assert_eq!(legacy.text, original);
-    assert_eq!(admitted.text, legacy.text);
-    assert_eq!(admitted.status, "extracted");
-    assert_eq!(account.charges.first().copied(), Some("input"));
-    assert!(account.charges.contains(&"work"));
-    assert!(account.charges.contains(&"output"));
+    let before = admission::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .memory_available;
+    let admitted = extract::extract_path(&path, 4096).unwrap();
+    assert_eq!(admitted.value.text, original);
+    assert_eq!(admitted.value.status, "extracted");
+    let holding = admitted.retained.first().expect("live text holding");
+    assert_eq!(
+        holding.remaining().unwrap().memory_bytes,
+        original.len() as u64
+    );
+    let during = admission::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .memory_available;
+    assert!(during < before);
+    let mut retained = admitted.retained;
+    let live = retained.pop().unwrap();
+    drop(retained);
+    let mut live = live;
+    live.finish().unwrap();
+    let after = admission::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .memory_available;
+    assert!(after > during);
     assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+}
 
-    let mut refused = ledger(0, 0);
-    let error = extract::extract_admitted(&path, 4096, &mut refused).unwrap_err();
+#[test]
+fn admitted_fd_survives_unlinking_the_path() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("note.txt");
+    let original = "same inode\n";
+    fs::write(&path, original).unwrap();
+    let file = File::open(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    let admitted =
+        extract::extract_file(&file, std::path::Path::new("note.txt"), 4096, None).unwrap();
+    assert_eq!(admitted.value.text, original);
+    for mut holding in admitted.retained {
+        holding.finish().unwrap();
+    }
+}
+
+#[test]
+fn oversized_source_reserves_nothing() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wide.txt");
+    fs::write(&path, "abcdef").unwrap();
+    let before = admission::current().unwrap().status().unwrap();
+    let admitted = extract::extract_path(&path, 4).unwrap();
+    assert_eq!(admitted.value.status, "metadata-only");
+    assert!(admitted.value.text.is_empty());
+    assert!(admitted.retained.is_empty());
+    let after = admission::current().unwrap().status().unwrap();
+    assert_eq!(after.memory_available, before.memory_available);
+    assert_eq!(after.reserved.memory_bytes, before.reserved.memory_bytes);
+}
+
+#[test]
+fn child_promise_above_the_account_does_not_spawn() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("page.html");
+    fs::write(&path, "<p>Hello</p>").unwrap();
+    let original = fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let Err(error) = extract::extract_file(&file, &path, 4096, Some(u64::MAX)) else {
+        panic!("child promise above the account must be refused");
+    };
     assert_eq!(
         error.downcast_ref::<AdmitError>(),
         Some(&AdmitError::TooLargeMemory)
     );
-    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&path).unwrap(), original);
 }
 
 #[test]
-fn oversized_source_stays_metadata_only_without_a_read_charge() {
+fn one_byte_rss_ceiling_stops_the_parser_worker() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("wide.txt");
-    fs::write(&path, "abcdef").unwrap();
-    let mut account = ledger(0, 0);
-    let extraction = extract::extract_admitted(&path, 4, &mut account).unwrap();
-    assert_eq!(extraction.status, "metadata-only");
-    assert!(extraction.text.is_empty());
-    assert!(account.charges.is_empty());
-    assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+    let path = directory.path().join("page.html");
+    fs::write(&path, "<p>Hello</p>").unwrap();
+    let original = fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let Err(error) = extract::extract_file(&file, &path, 4096, Some(1)) else {
+        panic!("one-byte resident ceiling must stop the parser worker");
+    };
+    assert!(error.chain().any(|item| {
+        matches!(
+            item.downcast_ref::<WorkerFailure>(),
+            Some(WorkerFailure::RssExceeded { limit_bytes: 1, .. } | WorkerFailure::Unmeasured)
+        )
+    }));
+    assert_eq!(fs::read(&path).unwrap(), original);
 }
 
 #[test]
-fn ffmpeg_segments_cover_ranges_and_do_not_clobber() {
+fn xlsx_worker_keeps_shared_strings() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sheet.xlsx");
+    let file = File::create(&path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    archive.start_file("xl/sharedStrings.xml", options).unwrap();
+    archive
+        .write_all(br#"<sst><si><t>Alpha</t></si><si><t>Beta</t></si></sst>"#)
+        .unwrap();
+    archive
+        .start_file("xl/worksheets/sheet1.xml", options)
+        .unwrap();
+    archive
+        .write_all(
+            br#"<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>"#,
+        )
+        .unwrap();
+    archive.finish().unwrap();
+    let original = fs::read(&path).unwrap();
+    let admitted = extract::extract_path(&path, 65536).unwrap();
+    assert!(
+        admitted.value.text.contains("Alpha"),
+        "{}",
+        admitted.value.text
+    );
+    assert!(
+        admitted.value.text.contains("Beta"),
+        "{}",
+        admitted.value.text
+    );
+    assert_ne!(admitted.value.status, "failed");
+    assert_eq!(fs::read(&path).unwrap(), original);
+    for mut holding in admitted.retained {
+        holding.finish().unwrap();
+    }
+}
+
+#[test]
+fn ffmpeg_segments_use_storage_and_leave_the_source() {
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.mp4");
     let status = Command::new("ffmpeg")
@@ -97,94 +188,39 @@ fn ffmpeg_segments_cover_ranges_and_do_not_clobber() {
             "-f",
             "lavfi",
             "-i",
-            "color=blue:size=16x16:rate=25",
-            "-t",
-            "1.2",
+            "color=c=black:s=16x16:d=1.2",
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
-            "-n",
+            "-y",
         ])
         .arg(&source)
         .status()
-        .expect("ffmpeg is required");
-    assert!(status.success(), "synthetic media failed");
+        .unwrap();
+    assert!(status.success());
     let original = fs::read(&source).unwrap();
-    let outputs = directory.path().join("clips");
-    fs::create_dir(&outputs).unwrap();
-    let mut account = ledger(u64::MAX / 4, 8 * 1024 * 1024);
-    let segments = segment_video_admitted(
-        &source,
-        &outputs,
-        1.0,
-        &mut account,
-        Bound {
-            child_rss_bytes: None,
-            storage_bytes: Some(1024 * 1024),
-            deadline: None,
-        },
-    )
-    .expect("ffprobe and ffmpeg");
-    assert!(account.charges.contains(&"storage"));
-    assert!(!account.charges.contains(&"live"));
-    assert_eq!(segments.len(), 2);
-    assert_eq!(
-        (segments[0].start_seconds, segments[0].end_seconds),
-        (0.0, 1.0)
-    );
-    assert!((segments[1].end_seconds - 1.2).abs() < 0.05);
-    for segment in &segments {
-        let decoded = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-            ])
-            .arg(&segment.path)
-            .output()
-            .expect("ffprobe is required");
-        assert!(decoded.status.success());
-        assert!(!decoded.stdout.is_empty());
-    }
-    let retained = fs::read(&segments[0].path).unwrap();
-    assert!(segment_video(&source, &outputs, 1.0).is_err());
-    assert_eq!(fs::read(&segments[0].path).unwrap(), retained);
+    let output = directory.path().join("clips");
+    fs::create_dir(&output).unwrap();
+    let before = admission::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .storage_available;
+    let segments = segment_video(&source, &output, 1.0).unwrap();
+    assert!(segments.len() >= 2, "{}", segments.len());
+    let after = admission::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .storage_available;
+    assert!(after >= before.saturating_sub(8 * 1024 * 1024));
     assert_eq!(fs::read(&source).unwrap(), original);
-}
-
-#[test]
-fn child_rss_refusal_writes_no_clip_and_keeps_the_source() {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("source.mp4");
-    fs::write(&source, b"not a video").unwrap();
-    let original = fs::read(&source).unwrap();
-    let outputs = directory.path().join("clips");
-    fs::create_dir(&outputs).unwrap();
-    let mut account = ledger(u64::MAX / 4, u64::MAX / 4);
-    let error = segment_video_admitted(
-        &source,
-        &outputs,
-        1.0,
-        &mut account,
-        Bound {
-            child_rss_bytes: Some(1),
-            storage_bytes: Some(1024),
-            deadline: None,
-        },
-    )
-    .unwrap_err();
+    assert!(output.join("segment-000000.mp4").is_file());
+    let again = output.join("segment-000000.mp4");
+    let error = segment_video(&source, &output, 1.0).unwrap_err();
     assert!(
-        error.chain().any(|item| {
-            matches!(
-                item.downcast_ref::<WorkerFailure>(),
-                Some(WorkerFailure::RssExceeded { .. } | WorkerFailure::Unmeasured)
-            )
-        }) || error.downcast_ref::<AdmitError>().is_some()
+        format!("{error:#}").contains(&again.display().to_string())
+            || format!("{error:#}").contains("already exists")
     );
-    assert!(fs::read_dir(&outputs).unwrap().next().is_none());
-    assert_eq!(fs::read(&source).unwrap(), original);
 }

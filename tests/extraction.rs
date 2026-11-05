@@ -1,5 +1,15 @@
 //! Contract regressions for local extraction, inert previews, and EPUB packaging.
 
+fn ensure_processing_account() -> std::sync::MutexGuard<'static, ()> {
+    // These format/preview assertions share one account and use the documented
+    // None opaque-RSS promise (all currently available credit). Test their
+    // formats serially; dedicated Core/M3 tests retain concurrency coverage.
+    static FORMATS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = FORMATS.lock().unwrap_or_else(|error| error.into_inner());
+    omni_knowledge::extract::establish_process_account().expect("process account");
+    guard
+}
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -25,6 +35,7 @@ fn archive(path: &Path, entries: &[(&str, &str)]) {
 /// Arbitrary binary files remain admitted without pretending their bytes are text.
 #[test]
 fn binary_and_extensionless_text_have_distinct_coverage() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let binary = dir.path().join("firmware.unknown");
     fs::write(&binary, [0, 255, 1, 2]).unwrap();
@@ -68,6 +79,7 @@ fn native_pdf(text: &str) -> Vec<u8> {
 /// PDF native text is searchable, and oversized sources keep honest metadata coverage.
 #[test]
 fn pdf_extracts_native_text_and_reports_source_limit() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let path = dir.path().join("report.pdf");
     fs::write(&path, native_pdf("Searchable PDF content")).unwrap();
@@ -83,6 +95,7 @@ fn pdf_extracts_native_text_and_reports_source_limit() {
 /// Front matter stays discoverable and imported scripts never become executable preview markup.
 #[test]
 fn frontmatter_and_preview_preserve_unicode_without_active_content() {
+    let _format = ensure_processing_account();
     let source = "---\r\ntitle: 知识库\r\ntags: [研究, rust]\r\n---\r\n# Body\n```mermaid\ngraph LR; A-->B\n```\n<script>alert(1)</script>";
     let (metadata, body) = extract::markdown_frontmatter(source);
     assert_eq!(metadata["title"], "知识库");
@@ -109,6 +122,7 @@ fn frontmatter_and_preview_preserve_unicode_without_active_content() {
 /// Source evidence uses the same CRLF, blank-line, and Unicode positions as indexed text.
 #[test]
 fn text_preview_numbers_and_targets_exact_source_lines() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let path = dir.path().join("lines.txt");
     fs::write(
@@ -129,6 +143,7 @@ fn text_preview_numbers_and_targets_exact_source_lines() {
 /// Markdown remains rendered by default, while a source hit includes original front-matter lines.
 #[test]
 fn markdown_preview_retains_rendering_and_targets_source_not_rendered_lines() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let path = dir.path().join("note.md");
     fs::write(&path, "---\ntitle: 帽子\n---\n# Heading\n\nA matching sentence.\n\n```mermaid\ngraph LR; A-->B\n```\n").unwrap();
@@ -147,6 +162,7 @@ fn markdown_preview_retains_rendering_and_targets_source_not_rendered_lines() {
 /// Converted HTML evidence numbers extracted lines, and imported attributes cannot forge a hit.
 #[test]
 fn html_preview_targets_extracted_lines_without_accepting_source_targets() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let path = dir.path().join("document.html");
     fs::write(&path, "<h1>Title</h1><p>First paragraph.</p><p data-preview-target=\"true\">Second paragraph.</p>").unwrap();
@@ -171,6 +187,7 @@ fn html_preview_targets_extracted_lines_without_accepting_source_targets() {
 /// Distant evidence remains visible in a bounded row window without highlighting a wrong line.
 #[test]
 fn numbered_preview_bounds_rows_and_rejects_unavailable_line_evidence() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let path = dir.path().join("many-lines.txt");
     let text: String = (1..=20_050).map(|line| format!("Line {line}\n")).collect();
@@ -190,6 +207,7 @@ fn numbered_preview_bounds_rows_and_rejects_unavailable_line_evidence() {
 /// ZIP document extraction reads text values instead of archive-order or shared-string indices.
 #[test]
 fn office_text_is_native_and_ordered() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let doc = dir.path().join("note.docx");
     archive(
@@ -249,6 +267,7 @@ fn office_text_is_native_and_ordered() {
 /// The EPUB spine determines reading order independently of ZIP insertion order.
 #[test]
 fn epub_reads_spine_order_and_rejects_expansion_over_budget() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let book = dir.path().join("ordered.epub");
     archive(
@@ -297,6 +316,7 @@ fn epub_reads_spine_order_and_rejects_expansion_over_budget() {
 /// EPUB resources that escape the container or identify encrypted chapters are rejected.
 #[test]
 fn epub_rejects_escaping_or_encrypted_chapters() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     let book = dir.path().join("unsafe.epub");
     let container = "<container><rootfile full-path=\"content.opf\"/></container>";
@@ -342,6 +362,7 @@ fn epub_rejects_escaping_or_encrypted_chapters() {
 /// Export preserves sources, excludes nested roots, writes valid XHTML, and refuses overwrite.
 #[test]
 fn epub_export_is_readable_contained_and_no_clobber() {
+    let _format = ensure_processing_account();
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("chapter.md"),

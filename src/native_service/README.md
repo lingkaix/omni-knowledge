@@ -1,0 +1,89 @@
+# Compiled native source / processing / delivery boundary
+
+Public types: `omni_knowledge::native_service::{NativeLibraryService, NativeSource, NativeProcessing, NativeJobPlan}`. Runtime/authority types remain in `omni_service::{runtime,authority}`. This is an additive native SDK surface, NOT another wire command, scheduler, pool, permission DTO, or competing writer.
+
+## Source and current context
+
+1. Keep the actual native `Session` from `NativeLibraryService::connect`, with real transport observations. `native_scope(&session, &existing_command, approval)` uses the SAME 47-command routing/native approval/read-policy checks and real frame holding as dispatch. It starts no effect. Domain hosts may instead use their existing dispatcher `&Permit`.
+2. `service.source(&permit, &RelativePath, verification: knowledge_core::backend::Budget) -> Result<NativeSource>` checks the selected read policy BEFORE opening the source. It traverses descriptor-relative/no-follow from that permit's real selected root, not `kb.resolve(path)` followed by reopen. Verification observes its explicit bytes/deadline bounds and checks the current native policy/namespace/source at every controlled hash refill.
+3. `source.file()? -> &File` returns that EXACT FD. `source.hint()` is only an extension/MIME hint. NEVER reopen the hint. Recheck `source.check()` before/after controlled processing and before each controllable output boundary. The held FD AND its current descriptor-relative name must retain the observed version; namespace/marker/read-policy/revision changes refuse.
+4. `source.library_id()`, `context()`, `version()` are observed native facts. Context hashes held root identity, actual current policy/revision and marker; version hashes the complete actual held file. They are data, not authority tokens. No constant `selected` context/library or request digest substitutes for them.
+
+This first source constructor accepts regular files. It does NOT claim a whole-directory content fingerprint. Directory export owners can borrow the selected root/policy/revision through `Permit::with_selected_context`, enumerate/read descriptor-relative under current path checks and retain actual member/directory pins with `retain_check`. Never reenter the permit while its selected-context callback holds the owner lock. Source/descriptor APIs grant NO destination/raw-write authority; effects still require the actual qualified owner/publication/native intent APIs.
+
+## Real queue and Claim
+
+`source.processing(actual_recipe_digest, actual_caller_processor_digest) -> NativeProcessing` combines the caller processor identity with actual consuming Root/M3 source and lock bytes. Recipe/processor digests describe real work/code, never permissions. Key source identity derives from the real relative path, keeping equal-content files distinct.
+
+- `processing.key() -> knowledge_core::jobs::Key<'_>` borrows its actual context, selected library, source identity/version, recipe and consuming processor identity. Ordinary-local `mount=None` is the constructor's real backend fact, not a caller mount claim.
+- `processing.submit(NativeJobPlan { operation_id, job_id, budget, reservation, priority, max_attempts }) -> Result<jobs::Submitted>` ALWAYS calls the existing actual `Account::submit`, including when another job is pending/unsettled. It returns the real visible job ID/created flag, preserving native TooLarge vs contention. Never replace submission with a waiting String or fabricate a numeric/pending grant.
+- Retain this carrier in the EXISTING job owner under `Submitted.job`; do not create another queue/registry/executor. The shared scheduler's `queue().claim(now)` can select another job. Dispatch it to its existing owner; NEVER discard a mismatched actual running Claim.
+- `processing.funding(&mut actual_claim) -> Result<knowledge_processing::funding::Funding<'_>>` checks the live native source and M1's exact claim generation/key/stop request. M3 performs actual native `split_claim` admission at spend; the funding view itself grants no resources or effects. Do not separately reserve the same funded child/input/output costs.
+- Borrow the FD with `processing.source().file()?`, use the hint ONLY for format detection and pass the real funding view to EEE's `*_file_funded` calls. `processing.check(&claim)` is a controlled native source/claim boundary. Keep native guards for every later controlled member read/effect/delivery.
+
+M1 production Core/local/storage and retained storage source match compiled `a1144464a6970e608cbbc67f09ff2716d654ba40`, including the `3550ae6` prerequisite; no activation based on f5's unchecked ABI. M3 EEE remains the actual frozen implementation, not a reopened callee body.
+
+## Owned funded extraction
+
+`processing.extract(actual_claim, max_bytes, child_rss_bytes) -> Result<NativeExtraction, NativeExtractionError>` consumes the SAME native source carrier and actual scheduler claim.
+It calls EEE's public funded descriptor API, checks current source/policy/claim before and after processing, and keeps the whole `Admitted<Extraction>` result paid through its last reader.
+`None` for child RSS uses only this claim's credit after the complete input/output/capture peak, not unrelated account availability.
+Choose the complete simultaneous reservation in `NativeJobPlan`; this method never enlarges policy or manufactures credit.
+
+Use `extracted.value()?` for a checked borrow and `extracted.source()?` to prepay the complete response/copy/encoder peak before constructing it.
+Keep the response holding through real output settlement.
+`extracted.complete()?` first destroys all extraction fields, finishes their dead holdings, settles the actual claim, and returns the SAME `NativeSource` for delivery checks.
+An abandoned result settles as failed, cancelled or superseded only after actual resource destruction and native collection.
+An unresolved error owns the actual source/claim/child capabilities; `collect()` makes one bounded native attempt and drop remains in foreground shutdown while collection is unknown.
+For a mismatched dispatch, `error.into_parts()` returns the actual source carrier and actual Claim after real resource collection, without settling that Claim under another key.
+No job registry, worker pool, or second account is introduced.
+
+The compiled `native_extraction_owns_complete_claim_and_paid_result_lifetime` test uses the real opaque HTML parser and ONE actual Core claim.
+This additive owner does not replace the lower-level source/funding/delivery API above.
+The held staging calls below use the same owner; CLI/MCP/daemon publication and transport ports still belong to their existing owners.
+Legacy raw compatibility returns are not native job owners.
+See the [repair record](../../docs/changes/2026-11-05-foreground-native-extraction.md) for limits and gates.
+
+## Held EPUB and video staging
+
+Committed M3 ABI `d6ae37d16ddbdde3b33086293f2db2a85eaaef1c` is consumed without editing its producer bodies.
+`NativeAdmitted<T>` and `NativeAdmittedError<T>` generalize the same paid owner; `NativeExtraction` and `NativeExtractionError` remain aliases for the original extraction contract.
+
+- `processing.export_epub(actual_claim, Vec<NativeEpubMember { source, name }>, NativeEpubPlan { title, include_media, child_rss_bytes, storage_bytes })` calls `epub::export_epub_held_funded` with actual admitted FDs and versions in the supplied spine order.
+- Each member is an independently current `NativeSource` from the same selected context.
+The actual queued recipe must bind ordered logical names, source versions, title and media options; names are link data, never filesystem lookup authority.
+- `processing.segment_video(actual_claim, NativeVideoPlan { seconds, clips: media::ClipPlan })` calls `media::segment_video_held_funded` with the SAME held source/version and an actual private directory FD.
+- Root splits namespace/metadata costs from that actual Claim before creating staging files.
+The private namespace, original FDs, all member source owners, typed M3 errors and complete returned holdings stay with the result/error.
+No path reopen is used to consume generated EPUB or clip bytes; borrow the actual returned File.
+- New native member pins are prepaid before duplication and retained in the final anchor's actual delivery scope.
+Members from separate scopes therefore remain current-version checked after processing completion.
+- `value()`, `source()` and `complete()` retain their extraction semantics, including all-member current checks and last-reader destruction before credit release.
+`complete()` destroys staging data, so an authorized publication/copy owner must finish its real consumer first and prepay any new buffers before copying.
+No staging method grants raw writes, destination authority, publication, or `saved_local`.
+
+Typed `PartialOutputs`, `UnsettledChild` and `UnsettledWrite` stay owned, never stringified into settlement.
+Actual stopped partial records are destroyed before their credit finishes; unknown writes are not reconciled by guessing artifact sizes.
+A changed staging namespace refuses retirement while its real owner and credit remain reachable.
+`error.staging_directory()` exposes the actual retained FD for native recovery, not disclosure or destination authority.
+Controlled hosts must retain these carriers in their existing job owner, collect/drop them before termination, and never call `process::exit` while unknown work is owned.
+The SDK does not install a second signal runtime or certify another owner's shutdown hook.
+
+`actual_root_held_epub_and_video_keep_funded_native_owners` consumes real generated EPUB/MP4 bytes through FDs, checks reversed-name spine order and Unicode, separate-scope member drift, actual Claim/reader credit lifetimes and unchanged sources.
+Native Mac effects, full face/publication wiring, legacy vector-provider pathname consumers and frozen B2 allocation remain OPEN.
+
+## Settlement and Delivery
+
+Destroy ALL paid payload buffers (including format/status/warnings, metadata and entry collections), FDs and temporary objects before their particular `finish`/`rejoin`. Return only exact synchronous loans AFTER their real buffers die. Root's funded resident-copy envelope is prepaid before body construction; no live/cached parent holding is rejoined merely to resize it. Native source/key/descriptor costs remain separately owned through their actual last use.
+
+Only after actual child/IO settlement use the EXISTING queue settlement API with `processing.key()`. `into_source()` then retains the same current source/delivery owner. Unknown child/write settlement must retain the COMPLETE `NativeProcessing`, actual Claim, M3 unsettled capability, descriptors and costs and continue bounded collection or a real existing-owner transfer. A receipt/string/global about to disappear at `process::exit` is not that transfer.
+
+`source.reserve_result(bytes)` admits the full simultaneous response/escaping/clone/encoder envelope BEFORE growth, not a guessed `3 * text`. For ordinary native CLI output keep the source/permit owner with all paid bytes through the actual bounded writer/flush result; use `source.check()` before each controllable write. Do not wrap an arbitrary CLI payload in a fake wire result.
+
+For an EXISTING v1 `Response`, `source.into_delivery(response)` moves the same guard/holding into `runtime::Delivery`; native domain owners may use `Delivery::from_native(response, permit)`. Both require pre-admitted construction/encoding. Hold `Delivery` AND encoded bytes through real write settlement, check before every controllable chunk, and never write old encoded bytes following a refused check. `encode()` returning is NOT transport settlement. Writer/deadline/error handling remains the transport owner's actual implementation, not this API's certification.
+
+## Executed boundary proof / scope
+
+`native_source_real_claim_key_and_delivery_bridge` executes real descriptor hash/version binding, two visible jobs while one is running, actual EEE funded-FD extraction, whole-value destruction before exact rejoin, terminal/stopped claim refusal, native queue settlement and source-change refusal after encoding. Original seven native controls remain active.
+
+This compiled boundary does not certify the consumer's five caller repairs, close consequential rereview of the three 9ed findings, or activate native M6. Full Root disk vectors, generic archive Directory consumption, full-corpus streaming and native macOS evidence remain required. No waiting for FSEvents and no host inotify changes/suppression are part of this slice.

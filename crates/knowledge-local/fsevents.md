@@ -26,6 +26,9 @@ On an actual macOS CI host, build the helper before the native tests:
 
 ```sh
 cargo build --locked --offline -p knowledge-local --bin omni-fsevents
+target="${CARGO_TARGET_DIR:-target}"
+# Cargo integration-test callers live in deps, not beside the ordinary debug bin.
+install -m 755 "$target/debug/omni-fsevents" "$target/debug/deps/omni-fsevents"
 cargo test --locked --offline -p knowledge-local -p knowledge-storage
 ```
 

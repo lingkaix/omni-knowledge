@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 /// Local knowledge-library command line; mutations never delete original files.
 #[derive(Parser)]
@@ -159,19 +160,25 @@ enum Operation {
 }
 
 /// Runs one operation and writes machine-readable errors without hiding failure exits.
-fn main() {
+fn main() -> ExitCode {
     let arguments = Arguments::parse();
-    if let Err(error) = run(&arguments) {
-        let unbound = error.downcast_ref::<UnboundHandler>().is_some();
-        if arguments.json {
-            eprintln!("{}", serde_json::json!({"error":format!("{error:#}")}));
-        } else if unbound {
-            eprintln!("{}", omni_knowledge::status::format_process_account(None));
-            eprintln!("native authority handler is not bound");
-        } else {
-            eprintln!("Error: {error:#}");
+    match run(&arguments) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let unbound = error.downcast_ref::<UnboundHandler>().is_some();
+            if arguments.json {
+                eprintln!("{}", serde_json::json!({"error":format!("{error:#}")}));
+            } else if unbound {
+                eprintln!("{}", omni_knowledge::status::format_process_account(None));
+                eprintln!("native authority handler is not bound");
+            } else {
+                eprintln!("Error: {error:#}");
+            }
+            // Drop the actual error before process termination. Its owned M3
+            // PendingProcessing must finish foreground collection with all FDs,
+            // source/stage objects and credit, including error-output failure.
+            ExitCode::from(if unbound { 3 } else { 1 })
         }
-        std::process::exit(if unbound { 3 } else { 1 });
     }
 }
 

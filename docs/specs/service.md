@@ -204,7 +204,13 @@ type MigrationPlan = {
   path_map: { from: RelativePath; to: RelativePath }[];
   orphan_annotation_paths: RelativePath[]; conflicts: RelativePath[]; warnings: string[];
 };
+type ResourceBudgets = {
+  memory_budget_bytes: U64; storage_budget_bytes: U64;
+  memory_override_bytes: U64 | null; storage_override_bytes: U64 | null;
+  waiting_for_memory: U64 | null;
+};
 type Status = {
+  resource_budgets?: ResourceBudgets;
   library: Library; coverage: Coverage; jobs: Job[]; generation_id: Id | null;
   cache_path: string; history_path: string | null; cache_used_bytes: U64; cache_budget_bytes: U64;
   provider: "ready" | "unavailable" | "incompatible" | "not_configured";

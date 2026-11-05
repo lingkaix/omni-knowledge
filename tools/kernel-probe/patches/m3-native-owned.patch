@@ -1,0 +1,1715 @@
+diff --git c/Cargo.toml w/Cargo.toml
+index 336c9a6..ac4d031 100644
+--- c/Cargo.toml
++++ w/Cargo.toml
+@@ -4,6 +4,8 @@ version = "0.1.0"
+ edition = "2024"
+ 
+ [dependencies]
++knowledge-core = { path = "../../crates/knowledge-core" }
++knowledge-processing = { path = "../../crates/knowledge-processing" }
+ fs2 = "0.4"
+ grep-matcher = "0.1"
+ grep-regex = "0.1.14"
+diff --git c/PROVENANCE.json w/PROVENANCE.json
+index d5a2b8d..d94b213 100644
+--- c/PROVENANCE.json
++++ w/PROVENANCE.json
+@@ -15,12 +15,12 @@
+     {
+       "path": "Cargo.toml",
+       "upstream_sha256": "d04a4ba566f11591761cbdbfb6b1098c532b16aff64fe88ee18f57e2d1def5a7",
+-      "vendored_sha256": "d04a4ba566f11591761cbdbfb6b1098c532b16aff64fe88ee18f57e2d1def5a7"
++      "vendored_sha256": "87397537a3d7b7560ec882e4d82c38dbf2317ab6046fb8d5814c7bf651893536"
+     },
+     {
+       "path": "README.md",
+       "upstream_sha256": "efb74107f7d92fd939400ad85f5698abe399b03b660262d198d4a4a0d7f109ec",
+-      "vendored_sha256": "efb74107f7d92fd939400ad85f5698abe399b03b660262d198d4a4a0d7f109ec"
++      "vendored_sha256": "fc0d2c973d6c9f41c3f1c927b81a6ce80fffd1be4b79561bce00a904f4d4443b"
+     },
+     {
+       "path": "mise.toml",
+@@ -195,12 +195,12 @@
+     {
+       "path": "src/lib.rs",
+       "upstream_sha256": "c525feb0644dd781813ce14622a407c89835bd414262e35029180e2e5bf6c12a",
+-      "vendored_sha256": "c525feb0644dd781813ce14622a407c89835bd414262e35029180e2e5bf6c12a"
++      "vendored_sha256": "af466a4f4671154758f9e3c4b9406dab3437a12a81facd62379f7beb9695586f"
+     },
+     {
+       "path": "src/main.rs",
+       "upstream_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892",
+-      "vendored_sha256": "9c83727b4471787e3f7650c049e86e0a7b863e00c871104347c68c31853fcae9"
++      "vendored_sha256": "485a3e5d9467cf0d589f508685eed6a13dd2626cd63f68547f49add4e6738359"
+     },
+     {
+       "path": "src/model.rs",
+@@ -210,12 +210,12 @@
+     {
+       "path": "src/query.rs",
+       "upstream_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c",
+-      "vendored_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c"
++      "vendored_sha256": "a694b4ec1128005fac962ffce5704a7140902f8df3bd5ef9f74dc7a379e243ee"
+     },
+     {
+       "path": "src/store.rs",
+       "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
+-      "vendored_sha256": "ae97069b44039bf7421546adce7ee5873e83e3cff351603c6450c27c569c766e"
++      "vendored_sha256": "788b5206c78484819994999fad20ca8500ab3a6b8523d8353bbf0c71e28c9751"
+     },
+     {
+       "path": "src/tests.rs",
+@@ -225,12 +225,12 @@
+     {
+       "path": "src/text.rs",
+       "upstream_sha256": "e3c705464091cc0caf030c48a54bbe7b8aa1e5f91de4dbc2c0c308ad2b5ee9e0",
+-      "vendored_sha256": "e3c705464091cc0caf030c48a54bbe7b8aa1e5f91de4dbc2c0c308ad2b5ee9e0"
++      "vendored_sha256": "1283cd305c216d33d29a77b77520df24c726fbf54fca8961acdba436d77c9d34"
+     },
+     {
+       "path": "tests/faces.rs",
+       "upstream_sha256": "8162feebba22f033ece5ac8362bda5f5b55e4e686c4bf6766f7649758feaf112",
+-      "vendored_sha256": "8162feebba22f033ece5ac8362bda5f5b55e4e686c4bf6766f7649758feaf112"
++      "vendored_sha256": "cb87808230b4edffe2b29eba4126866628478b0145c29f2a446f1959340b98e7"
+     },
+     {
+       "path": "tests/image_notices_test.py",
+@@ -261,6 +261,16 @@
+       "path": "verify-image-notices.py",
+       "upstream_sha256": "293e9109410598a0eb952e39a63c6ccb31f870b631040d441854ba176826df60",
+       "vendored_sha256": "293e9109410598a0eb952e39a63c6ccb31f870b631040d441854ba176826df60"
++    },
++    {
++      "path": "src/owned.rs",
++      "upstream_sha256": null,
++      "vendored_sha256": "e787824415c40773ceae455679d9d272c41b95de9e9c6d9e1883b9b0762a377d"
++    },
++    {
++      "path": "tests/native_rss.rs",
++      "upstream_sha256": null,
++      "vendored_sha256": "e81c8552b5d512e80841166ca7d6251e590529f7486b879e669a6b021dc1df9c"
+     }
+   ]
+ }
+diff --git c/README.md w/README.md
+index c14cd6b..7a0c466 100644
+--- c/README.md
++++ w/README.md
+@@ -202,6 +202,19 @@ The full Cargo run initially exposed a writer-lock conflict during crash recover
+ | S3: lexical any-term behavior | `test tests::lexical_any_term_matching ... ok` |
+ | Recovery: release an inherited writer lock after failure | `test tests::failed_publication_releases_inherited_writer_lock ... ok` |
+ 
++## Native foreground ownership
++
++The downstream executable owns one pure-kernel worker and ONE Core account.
++It relays finite nonblocking stdout/stderr batches and retains the unreaped leader until the existing `knowledge-processing::worker::settle` proves actual native group and pipe collection.
++A short-lived worker's complete collected native RSS comes from `RUSAGE_CHILDREN`; this executable creates exactly one child and uses no baseline subtraction.
++The kernel engine itself launches no subprocesses.
++
++Controlled EOF, error, cancellation and unwind cannot return to `main` while collection is unknown.
++The real foreground Worker retains its Child, pipe ends and full resource holding; parent/bootstrap, signal and inherited-descriptor scopes remain live around it.
++Each M3 collection attempt is bounded to two seconds, followed by a sleep and bounded pending diagnostics rather than a leaked global or CPU busy loop.
++External forced SIGKILL is not successful settlement.
++See the [repair record](../../docs/changes/2026-11-05-foreground-native-extraction.md) for actual controls and remaining platform evidence.
++
+ ## R2 Build Supply
+ 
+ Root Turbo tasks include this package. NanoCore builds depend on its build, so a clean built-artifact smoke supplies the executable before serving Tasks. NanoCore tests also depend on its build, and the release test recipe builds it before collecting/executing the real stdio seam tests. Package Cargo scripts use `scripts/retrieval-cargo.sh`, which verifies the vendored IPADIC archive before exposing the fixed Lindera cache. The CI development image seeds that same verified archive. The App Dockerfile builds a target-native executable for each selected Linux platform and copies it with dictionary and dependency notices into the runtime image. The CLI/MCP are not installed into Sandbox images. Image qualification and remaining product cutover evidence belong in the R2 change record.
+diff --git c/VENDOR.md w/VENDOR.md
+index 3f11d00..bb41171 100644
+--- c/VENDOR.md
++++ w/VENDOR.md
+@@ -2,7 +2,7 @@
+ 
+ This guide owns provenance and the local patch ledger.
+ It does not claim that the mount, archive, or large-library interfaces are implemented.
+-The unchanged [upstream README](README.md) describes the original repository layout and its historical evidence, not Omni's packaging or platform qualification.
++The [README](README.md) retains the upstream overview and adds the native adapter guide. Its original/current hashes and replay are recorded below; it is not Omni's platform qualification.
+ 
+ ## Source And Licenses
+ 
+@@ -22,7 +22,7 @@ No dictionary or model download is required by the seeded probe.
+ 
+ ## Applied Patches
+ 
+-[The replayable patch](../../tools/kernel-probe/patches/m0-vendoring.patch) contains every upstream-to-vendored adaptation listed below.
++Apply the historical [M0 patch](../../tools/kernel-probe/patches/m0-vendoring.patch), then the [native adapter overlay](../../tools/kernel-probe/patches/m3-native-owned.patch), to the exact pinned upstream crate. The ordered pair replays all adaptations below, including the two new local source/test files. Original hashes stay unchanged; current hashes cover all52 source entries. Metadata and the patch ledger are not a new license or platform proof.
+ M0-P01 and M0-P02 change no analyzer, scoring, coverage, source admission, generation publication, or test assertion.
+ 
+ | Patch | Necessity and effect | Future OpenKit candidate |
+@@ -46,11 +46,30 @@ They do not change production path handling, resource ceilings, or controller po
+ | OBS-01: canonical directory-race target | The fixture fault path now uses the canonical root that `Directory::new` binds. A `TMPDIR` symlink alias otherwise misses the pre-stat and pre-open removal. | Fixture setup only. Coverage, hit, unavailable-count, and privacy-marker assertions stay unchanged. No production path normalization. |
+ | OBS-02: `ru_maxrss` unit | Darwin bytes come from XNU copying `resident_size_max`, which Mach `task_info` defines in bytes. Linux `getrusage(2)` reports kibibytes. The observer converts to bytes and keeps the 512 MiB ceiling. | The 48 MiB source bound, allocator check, exact-query checks, and child identity stay unchanged. This is not a budget increase. Native macOS execution remains unobserved. |
+ 
+-## Dependency Identity Is Not Yet A Production Binding
++## M4 Native Invocation Seams
++
++M4-P01 adds an explicit consuming-build fingerprint to actual kernel machinery checks at publication and reader open.
++The prototype `Kernel::new` retains its historical upstream-only identity; product callers use `Kernel::with_build_identity` through `knowledge-retrieval`.
++M4-P02 adds shared caller cancellation/deadline checks to actual publication/query operations without raising the existing per-shard or per-format ceilings.
++M4-P03 exposes a real native generation reader pin; its filesystem reader lock remains live until the pin ends.
++These are generic future upstream candidates and import no Omni authority, library, service or model types.
++The replay and current source hashes include these patches; all original upstream hashes, licenses, locks, diagnostic numbers and AS/EINVAL evidence remain unchanged.
++The facade and its guide state the still-required source/Directory/streaming-orchestration boundaries; these seams alone do not certify the final product bound.
++
++M4-P04 supplies a live caller guard in `Control`; actual work checks its native current policy as well as deadline/cancellation. The generic library seam imports no authority types.
++M4-P05 is an Omni-local standalone-executable host adapter, **not an OpenKit library candidate**. The binary uses the actual Core account, admits parent/worker costs, launches one exact owned pure-kernel process group, observes native full RSS and `wait4` peak RSS (Linux KiB converted to bytes; Darwin bytes), and collects on cancellation/error before releasing resources. Native parent identity and parent-death/watch mechanisms reject a forged internal role. A bounded 100 ms missing-sample window retains the full promise and uses real exit peak evidence, never a fabricated zero sample. The private account directory is created on the selected store volume without changing existing directory permissions.
++M4-P06 replaces the old executable AS oracle with preserved-inheritance plus real owned-worker RSS assertions. No `RLIMIT_AS` ceiling is installed on either OS; the historical 2 GiB/EINVAL receipts and DIAG rows above remain historical facts, not current enforcement. Existing CPU/file ceilings and the 48 MiB/512 MiB library stress oracles remain. The live one-byte worker-promise test requires a numeric real-RSS refusal; Linux execution does not certify native macOS.
++`PROVENANCE.json` records original files unchanged in scope and separately lists new local source/test hashes. The complete upstream-to-current replay includes additions. The owned pure kernel creates no descendants; this proof does not close the separate product processing descendant-executor review.
++
++M4-P07 adds operation-only scan-field selection to the same exact/regex scanner: body-only for generic text, or body plus display name/title/description for ordinary Root navigation. Tags/digests/private identity metadata cannot become pseudo-body grep matches. Eligibility, current-document identity, complete scanning and the shared analyzer/ranking implementation are unchanged.
++M4-P08 repairs consequential native settlement: only exact successful wait4 sets reaped; bounded stop/poll keeps the full child/native resource capability quarantined on unknown collection, and ECHILD refuses signalling a stale PID. Owned reads/writes have nonblocking monotonic deadlines, the supervisor bounds its pure-worker lifetime, and diagnostics cannot block collection. Normal owned pipe-backpressure and unknown-reaper controls run in addition to the live RSS/inherited-AS tests. This is not native macOS qualification, a new executor, or product durable recovery.
++
++## Dependency Identity Binding
+ 
+ The retained [upstream Cargo.lock](../upstream/openkit-b67cd0f2.Cargo.lock) has SHA-256 `88be6b21f6430d1aa5bf3b730822905e37ed7514a2378a49b454265797a0947a`.
+ `machinery()` still binds this exact upstream evidence and the existing dictionary/schema/settings inputs.
+-It does not automatically bind the actual consuming workspace's resolved dependencies.
++The historical prototype constructor does not automatically bind the actual consuming workspace's resolved dependencies.
++The explicit M4 constructor incorporates the caller's consuming fingerprint into the same manifest compatibility checks.
+ The Git and path probes retain their actual Cargo-generated locks separately.
+ The standalone crate lock records the M0 vendor test build, not Omni's future production resolution.
+ 
+@@ -75,5 +94,4 @@ They must not introduce Omni library, GUI, package, or OpenKit authorization con
+ 
+ No M4 seam trait or alternative production engine is introduced at M0.
+ The Git probe is historical feasibility evidence in an isolated workspace; the path probe is the selected vendor consumer.
+-The existing application search is not replaced by this dependency-only landing.
+-The retrieval milestone owns that single-engine cutover and its independent old/new public conformance suite.
++The original M0 dependency-only landing did not replace application search. The subsequent rootlib integration now publishes/queries the actual kernel through `knowledge-retrieval`, with bounded deterministic legacy-snapshot shards and file-deduplicated rank-list fusion. Its old lexical/trigram construction is retired. This does not implement the admitted arbitrary-byte reader, archive Directory or streaming orchestration interfaces above, and does not assert final acceptance.
+diff --git c/src/lib.rs w/src/lib.rs
+index 73d4432..3cd8a07 100644
+--- c/src/lib.rs
++++ w/src/lib.rs
+@@ -6,8 +6,8 @@ mod query;
+ mod store;
+ mod text;
+ pub use model::*;
+-pub use store::Kernel;
+-pub use text::{analyze, tokens};
++pub use store::{GenerationPin, Kernel};
++pub use text::{Control, analyze, tokens};
+ 
+ #[cfg(test)]
+ mod tests;
+diff --git c/src/main.rs w/src/main.rs
+index d2db881..7314875 100644
+--- c/src/main.rs
++++ w/src/main.rs
+@@ -2,14 +2,20 @@
+ use retrieval_kernel::{directory::Directory, *};
+ use serde::Deserialize;
+ use serde_json::{Value, json};
+-use std::io::{BufRead, Write};
++use std::io::BufRead;
+ use std::path::PathBuf;
++use std::time::{Duration, Instant};
++mod owned;
+ 
+-/// Dispatch one face. Runtime performs no network operations or subprocess launches.
+-fn main() {
+-    if let Err(error) = run() {
+-        eprintln!("{}", serde_json::to_string(&error).unwrap());
+-        std::process::exit(1);
++/// Dispatch a face through the actual native Core/RSS worker boundary; the engine has no subprocesses.
++fn main() -> std::process::ExitCode {
++    match run() {
++        Ok(()) => std::process::ExitCode::SUCCESS,
++        Err(error) => {
++            // The foreground native owner has completed controlled shutdown before run returns.
++            owned::diagnostic(serde_json::to_string(&error).unwrap().as_bytes());
++            std::process::ExitCode::FAILURE
++        }
+     }
+ }
+ /// Local bounded error constructor.
+@@ -24,7 +30,7 @@ fn run() -> Result<()> {
+     process_limits()?;
+     let mut args: Vec<String> = std::env::args().skip(1).collect();
+     if args.first().is_some_and(|a| a == "--version") {
+-        println!("retrieval-kernel {}", env!("CARGO_PKG_VERSION"));
++        owned::output(format!("retrieval-kernel {}", env!("CARGO_PKG_VERSION")).as_bytes())?;
+         return Ok(());
+     }
+     if args.is_empty() {
+@@ -53,7 +59,14 @@ fn run() -> Result<()> {
+                 "service requires an owner-assigned derived store",
+             )
+         })?;
+-        let kernel = Kernel::new(&PathBuf::from(root), &PathBuf::from(store))?;
++        let store = PathBuf::from(store);
++        let kernel = Kernel::new(&PathBuf::from(root), &store)?;
++        if let Some(status) = owned::supervise(&store)? {
++            if !status.success() {
++                return Err(error("worker-failed", "collected kernel worker failed"));
++            }
++            return Ok(());
++        }
+         return stdio(|request| service(&kernel, request), true);
+     }
+     if source_flag.is_some() {
+@@ -82,22 +95,31 @@ fn run() -> Result<()> {
+         .map(PathBuf::from)
+         .unwrap_or_else(|| root.join(".retrieval-kernel"));
+     let kernel = Kernel::new(&root, &store)?;
++    if let Some(status) = owned::supervise(&store)? {
++        if !status.success() {
++            return Err(error("worker-failed", "collected kernel worker failed"));
++        }
++        return Ok(());
++    }
+     let directory = Directory::new(&root, &store)?;
+     match command.as_str() {
+         "index" => {
+             let view = directory.inventory()?;
+             let expected = kernel.generation(&view.scope)?;
+             let generation = kernel.publish(view, expected)?;
+-            println!(
+-                "{}",
++            owned::output(
+                 json!({"generation":generation,"scope":directory.scope()})
+-            );
++                    .to_string()
++                    .as_bytes(),
++            )?;
+             Ok(())
+         }
+         "search" => {
+             let (mode, query) = query_args.unwrap();
+             let result = directory.search(&kernel, mode, query, limit)?;
+-            println!("{}", serde_json::to_string(&result).unwrap());
++            owned::output(
++                &serde_json::to_vec(&result).map_err(|_| error("io", "serialization failed"))?,
++            )?;
+             Ok(())
+         }
+         "mcp" => stdio(|request| mcp(&kernel, &directory, request), false),
+@@ -121,11 +143,17 @@ fn flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
+ }
+ /// Consume newline-delimited JSON with bounded frame storage and stdout reserved for replies.
+ fn stdio(mut handle: impl FnMut(Value) -> Option<Value>, local_service: bool) -> Result<()> {
+-    let stdin = std::io::stdin();
+-    let mut input = stdin.lock();
+-    let stdout = std::io::stdout();
+-    let mut output = stdout.lock();
+-    while let Some(frame) = frame(&mut input)? {
++    let mut input = std::io::BufReader::new(
++        owned::Channel::new(0, Instant::now() + Duration::from_secs(30))
++            .map_err(|_| error("io", "owned input unavailable"))?,
++    );
++    loop {
++        input
++            .get_mut()
++            .deadline(Instant::now() + Duration::from_secs(30));
++        let Some(frame) = frame(&mut input)? else {
++            break;
++        };
+         cpu_limit()?;
+         let reply = match frame.and_then(|b| {
+             serde_json::from_slice::<Value>(&b)
+@@ -144,11 +172,7 @@ fn stdio(mut handle: impl FnMut(Value) -> Option<Value>, local_service: bool) ->
+             if bytes.len() > 8 * 1024 * 1024 {
+                 return Err(error("resource-limited", "response byte budget exhausted"));
+             }
+-            output
+-                .write_all(&bytes)
+-                .and_then(|_| output.write_all(b"\n"))
+-                .and_then(|_| output.flush())
+-                .map_err(|_| error("io", "stdio output failed"))?;
++            owned::output(&bytes)?;
+         }
+     }
+     Ok(())
+@@ -372,7 +396,8 @@ fn process_limits() -> Result<()> {
+             "file-growth signal enforcement unavailable",
+         ));
+     }
+-    set_limit(libc::RLIMIT_AS, 2 * 1024 * 1024 * 1024)?;
++    // Darwin EINVAL remains historical evidence. No blanket address-space ceiling overrides
++    // the selected native budget on either OS; owned full-RSS observation is the active bound.
+     set_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024)?;
+     cpu_limit()?;
+     eprintln!("{}", self_vm_summary("installed"));
+diff --git c/src/owned.rs w/src/owned.rs
+new file mode 100644
+index 0000000..44c6083
+--- /dev/null
++++ w/src/owned.rs
+@@ -0,0 +1,896 @@
++//! Prototype host boundary: one actual Core account and one exact owned pure-kernel worker.
++//!
++//! The kernel worker launches no subprocesses. Its complete thread/runtime/model RSS belongs to
++//! this one process reservation. This is not the product's opaque processing/descendant executor.
++use knowledge_core::admission::{Account, Configuration, Decision, Holding, Origin, Scheduling};
++use knowledge_core::jobs::Reservation;
++use retrieval_kernel::{Error, Result};
++use std::fs::{self, File};
++use std::io::{Read, Write};
++use std::os::unix::fs::MetadataExt;
++use std::os::unix::process::CommandExt;
++use std::path::Path;
++use std::process::{Child, Command, ExitStatus, Stdio};
++use std::sync::atomic::{AtomicI32, Ordering};
++use std::time::{Duration, Instant};
++
++/// Internal native parent identity, never read from protocol input or accepted as authority.
++const PARENT: &str = "OMNI_KERNEL_OWNED_PARENT";
++static SIGNAL: AtomicI32 = AtomicI32::new(0);
++/// Emit fixed classifications and numeric observations, never source paths/arguments.
++fn error(code: &str, message: &str) -> Error {
++    Error {
++        code: code.into(),
++        message: message.into(),
++    }
++}
++/// A source-free budget refusal; the actual Core distinction is retained in its Debug classification.
++fn admission(error: impl std::fmt::Debug) -> Error {
++    self::error(
++        "resource-limited",
++        &format!("native process admission: {error:?}"),
++    )
++}
++/// Settled parent/bootstrap or actual child lifetime; declare before the owned child guard.
++struct Resource(Holding);
++impl Drop for Resource {
++    /// A live child guard always settles before these scope resources end.
++    fn drop(&mut self) {
++        let _ = self.0.finish();
++    }
++}
++/// Reserve actual simultaneous parent/child resources, with no second pool/controller.
++fn reserve(account: &Account, reservation: Reservation) -> Result<Resource> {
++    match account
++        .reserve(reservation, Origin::BeforeVerification)
++        .map_err(admission)?
++    {
++        Decision::Ready(holding) => Ok(Resource(holding)),
++        Decision::Waiting(reason) => Err(admission(reason)),
++    }
++}
++/// Native signal handler does only an atomic store; cleanup remains on the actual owning thread.
++extern "C" fn cancelled(signal: libc::c_int) {
++    SIGNAL.store(signal, Ordering::Release);
++}
++/// Restore exact previous handlers; never change unrelated process configuration.
++struct Signals(Vec<(libc::c_int, libc::sighandler_t)>);
++impl Signals {
++    /// Forward cancellation by settling the one owned group, not by exiting while it runs.
++    fn install() -> Result<Self> {
++        SIGNAL.store(0, Ordering::Release);
++        let mut guard = Self(Vec::new());
++        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
++            // SAFETY: handler has the native signal ABI and only stores an atomic integer.
++            let previous =
++                unsafe { libc::signal(signal, cancelled as *const () as libc::sighandler_t) };
++            if previous == libc::SIG_ERR {
++                return Err(error(
++                    "resource-limited",
++                    "native signal installation failed",
++                ));
++            }
++            guard.0.push((signal, previous));
++        }
++        Ok(guard)
++    }
++}
++impl Drop for Signals {
++    /// Restore only handlers replaced by this actual scope.
++    fn drop(&mut self) {
++        for (signal, previous) in self.0.drain(..).rev() {
++            unsafe {
++                libc::signal(signal, previous);
++            }
++        }
++    }
++}
++/// Exact worker capability. An unreaped owned PID cannot be reused during observation/signalling.
++struct Worker {
++    child: Child,
++    reaped: bool,
++    start: Option<(u64, u64)>,
++    stdout_eof: bool,
++    stderr_eof: bool,
++    // Last field: child descriptors die before their credit can finish.
++    resources: Resource,
++}
++impl Worker {
++    /// Observe exit without consuming the PID that pins the owned group against reuse.
++    fn exited(&self) -> Result<bool> {
++        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
++        let result = unsafe {
++            libc::waitid(
++                libc::P_PID,
++                self.child.id(),
++                &mut info,
++                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
++            )
++        };
++        if result != 0 {
++            return Err(error("unsettled", "owned worker wait evidence unavailable"));
++        }
++        Ok(unsafe { info.si_pid() } != 0)
++    }
++    /// Relay finite nonblocking batches. A stopped consumer cannot hide cancellation or RSS work.
++    fn relay(&mut self) -> Result<()> {
++        self.stdout_eof = relay(self.child.stdout.as_mut(), libc::STDOUT_FILENO)?;
++        self.stderr_eof = relay(self.child.stderr.as_mut(), libc::STDERR_FILENO)?;
++        Ok(())
++    }
++    /// Collect the actual group and pipe EOF before accepting terminal status or native peak RSS.
++    fn poll(&mut self) -> Result<Option<(ExitStatus, u64)>> {
++        self.relay()?;
++        if !self.exited()? || !self.stdout_eof || !self.stderr_eof {
++            return Ok(None);
++        }
++        self.stop()?;
++        let status = self
++            .child
++            .try_wait()
++            .map_err(|_| error("unsettled", "collected worker status unavailable"))?
++            .ok_or_else(|| error("unsettled", "collected worker status missing"))?;
++        // This executable owns exactly one child. RUSAGE_CHILDREN is its complete native
++        // collected high-water RSS, including short work missed by live sampling, not a delta.
++        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
++        if unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) } != 0 {
++            return Err(error(
++                "resource-limited",
++                "collected native RSS unavailable",
++            ));
++        }
++        let peak = u64::try_from(usage.ru_maxrss)
++            .map_err(|_| error("resource-limited", "native RSS observation invalid"))?;
++        #[cfg(target_os = "linux")]
++        let peak = peak
++            .checked_mul(1024)
++            .ok_or_else(|| error("resource-limited", "native RSS unit overflow"))?;
++        Ok(Some((status, peak)))
++    }
++    /// One bounded collection attempt through M3's existing native group/I/O collector.
++    /// No private collector copy, direct-child-only receipt, or successful kill implies settlement.
++    fn stop(&mut self) -> Result<()> {
++        if self.reaped {
++            return Ok(());
++        }
++        let exited = self.exited()?;
++        match observation(self.child.id()) {
++            Ok(observed) => {
++                if observed.group != self.child.id()
++                    || self.start.is_some_and(|start| start != observed.start)
++                {
++                    return Err(error("unsettled", "owned worker identity changed"));
++                }
++                self.start = Some(observed.start);
++            }
++            Err(_) if exited => {} // Native exit evidence still pins this exact unreaped PID.
++            Err(failure) => return Err(failure),
++        }
++        knowledge_processing::worker::settle(&mut self.child)
++            .map_err(|_| error("unsettled", "owned group or IO collection unconfirmed"))?;
++        self.reaped = true;
++        Ok(())
++    }
++}
++impl Drop for Worker {
++    /// Foreground controlled shutdown retains this reachable owner, descriptors and ONE account.
++    /// EOF/error/signal/unwind cannot return to main while native collection remains unknown.
++    fn drop(&mut self) {
++        while let Err(failure) = self.stop() {
++            diagnostic(
++                format!(
++                    "unsettled owned-kernel pid={} start={:?} pending=true charged_bytes={:?}: {}",
++                    self.child.id(),
++                    self.start,
++                    self.resources.0.remaining().ok(),
++                    failure.message
++                )
++                .as_bytes(),
++            );
++            // Each attempt is bounded; failed native evidence is visible, never a CPU busy loop
++            // or an invented completion. The parent/bootstrap/handler/cache scopes stay live too.
++            std::thread::sleep(Duration::from_millis(250));
++        }
++    }
++}
++/// Forward at most 64 KiB from an owned nonblocking pipe without an unbounded buffer or writer thread.
++/// Return true only for actual EOF; a stopped consumer returns an error before the next native check.
++fn relay(pipe: Option<&mut impl Read>, fd: i32) -> Result<bool> {
++    let Some(pipe) = pipe else { return Ok(true) };
++    let deadline = Instant::now() + Duration::from_millis(100);
++    let mut bytes = [0u8; 8192];
++    for _ in 0..8 {
++        match pipe.read(&mut bytes) {
++            Ok(0) => return Ok(true),
++            Ok(n) => Channel::new(fd, deadline)
++                .and_then(|mut channel| channel.write_all(&bytes[..n]))
++                .map_err(|_| error("io", "owned relay consumer unavailable"))?,
++            Err(failure) if failure.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
++            Err(failure) if failure.kind() == std::io::ErrorKind::Interrupted => continue,
++            Err(_) => return Err(error("io", "owned relay read unavailable")),
++        }
++    }
++    Ok(false)
++}
++/// Owned face IO: nonblocking syscalls and a finite monotonic deadline, including partial writes.
++/// The face owns these descriptors. Normal completion restores the exact inherited flags.
++pub struct Channel {
++    fd: i32,
++    flags: i32,
++    deadline: Instant,
++}
++impl Channel {
++    pub fn new(fd: i32, deadline: Instant) -> std::io::Result<Self> {
++        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
++        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
++            return Err(std::io::Error::last_os_error());
++        }
++        Ok(Self {
++            fd,
++            flags,
++            deadline,
++        })
++    }
++    pub fn deadline(&mut self, deadline: Instant) {
++        self.deadline = deadline;
++    }
++    fn ready(&self, events: i16) -> std::io::Result<()> {
++        loop {
++            let remaining = self.deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::TimedOut,
++                    "owned IO deadline",
++                ));
++            }
++            let mut poll = libc::pollfd {
++                fd: self.fd,
++                events,
++                revents: 0,
++            };
++            let n = unsafe { libc::poll(&mut poll, 1, remaining.as_millis().clamp(1, 100) as i32) };
++            if n > 0 {
++                return Ok(());
++            }
++            if n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
++                return Err(std::io::Error::last_os_error());
++            }
++        }
++    }
++}
++impl Read for Channel {
++    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
++        loop {
++            self.ready(libc::POLLIN)?;
++            let n = unsafe { libc::read(self.fd, bytes.as_mut_ptr().cast(), bytes.len()) };
++            if n >= 0 {
++                return Ok(n as usize);
++            }
++            let error = std::io::Error::last_os_error();
++            if !matches!(
++                error.kind(),
++                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
++            ) {
++                return Err(error);
++            }
++        }
++    }
++}
++impl Write for Channel {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        loop {
++            self.ready(libc::POLLOUT)?;
++            let n = unsafe { libc::write(self.fd, bytes.as_ptr().cast(), bytes.len()) };
++            if n >= 0 {
++                return Ok(n as usize);
++            }
++            let error = std::io::Error::last_os_error();
++            if !matches!(
++                error.kind(),
++                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
++            ) {
++                return Err(error);
++            }
++        }
++    }
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++impl Drop for Channel {
++    fn drop(&mut self) {
++        unsafe {
++            libc::fcntl(self.fd, libc::F_SETFL, self.flags);
++        }
++    }
++}
++/// Best-effort diagnostics cannot block collection behind a stopped stderr consumer.
++pub fn diagnostic(bytes: &[u8]) {
++    if let Ok(mut stderr) = Channel::new(
++        libc::STDERR_FILENO,
++        Instant::now() + Duration::from_millis(100),
++    ) {
++        let _ = stderr.write_all(bytes);
++        let _ = stderr.write_all(b"\n");
++    }
++}
++struct InheritedFlags(Vec<(i32, i32)>);
++impl InheritedFlags {
++    fn capture() -> Self {
++        Self(
++            [0, 1, 2]
++                .into_iter()
++                .map(|fd| (fd, unsafe { libc::fcntl(fd, libc::F_GETFL) }))
++                .collect(),
++        )
++    }
++}
++impl Drop for InheritedFlags {
++    fn drop(&mut self) {
++        for (fd, flags) in &self.0 {
++            if *flags >= 0 {
++                unsafe {
++                    libc::fcntl(*fd, libc::F_SETFL, *flags);
++                }
++            }
++        }
++    }
++}
++pub fn output(bytes: &[u8]) -> Result<()> {
++    let mut output = Channel::new(
++        libc::STDOUT_FILENO,
++        Instant::now() + Duration::from_secs(30),
++    )
++    .map_err(|_| error("io", "owned output unavailable"))?;
++    output
++        .write_all(bytes)
++        .and_then(|_| output.write_all(b"\n"))
++        .map_err(|_| error("resource-limited", "owned output deadline or IO failure"))
++}
++/// Full native process identity and resident bytes, not subtraction from a preexisting baseline.
++struct Observation {
++    start: (u64, u64),
++    group: u32,
++    resident: u64,
++}
++#[cfg(target_os = "linux")]
++fn observation(pid: u32) -> Result<Observation> {
++    let mut stat = String::new();
++    File::open(format!("/proc/{pid}/stat"))
++        .and_then(|file| file.take(16 * 1024).read_to_string(&mut stat))
++        .map_err(|_| error("resource-limited", "owned worker identity unavailable"))?;
++    let fields: Vec<_> = stat
++        .rsplit_once(')')
++        .ok_or_else(|| error("resource-limited", "owned worker identity invalid"))?
++        .1
++        .split_whitespace()
++        .collect();
++    let group = fields
++        .get(2)
++        .and_then(|v| v.parse().ok())
++        .ok_or_else(|| error("resource-limited", "owned worker group invalid"))?;
++    let start = fields
++        .get(19)
++        .and_then(|v| v.parse().ok())
++        .ok_or_else(|| error("resource-limited", "owned worker start invalid"))?;
++    let mut status = String::new();
++    File::open(format!("/proc/{pid}/status"))
++        .and_then(|file| file.take(16 * 1024).read_to_string(&mut status))
++        .map_err(|_| error("resource-limited", "owned worker RSS unavailable"))?;
++    let resident = status
++        .lines()
++        .find_map(|line| line.strip_prefix("VmRSS:"))
++        .and_then(|v| v.split_whitespace().next())
++        .and_then(|v| v.parse::<u64>().ok())
++        .and_then(|v| v.checked_mul(1024))
++        .ok_or_else(|| error("resource-limited", "owned worker RSS invalid"))?;
++    Ok(Observation {
++        start: (start, 0),
++        group,
++        resident,
++    })
++}
++#[cfg(target_os = "macos")]
++fn observation(pid: u32) -> Result<Observation> {
++    // SAFETY: native calls receive exact owned PID and correctly sized zeroed native result buffers.
++    unsafe {
++        let mut bsd = std::mem::zeroed::<libc::proc_bsdinfo>();
++        let mut task = std::mem::zeroed::<libc::proc_taskinfo>();
++        if libc::proc_pidinfo(
++            pid as i32,
++            libc::PROC_PIDTBSDINFO,
++            0,
++            (&mut bsd as *mut libc::proc_bsdinfo).cast(),
++            std::mem::size_of_val(&bsd) as i32,
++        ) != std::mem::size_of_val(&bsd) as i32
++            || libc::proc_pidinfo(
++                pid as i32,
++                libc::PROC_PIDTASKINFO,
++                0,
++                (&mut task as *mut libc::proc_taskinfo).cast(),
++                std::mem::size_of_val(&task) as i32,
++            ) != std::mem::size_of_val(&task) as i32
++        {
++            return Err(error(
++                "resource-limited",
++                "owned native worker observation unavailable",
++            ));
++        }
++        Ok(Observation {
++            start: (bsd.pbi_start_tvsec, bsd.pbi_start_tvusec),
++            group: bsd.pbi_pgid,
++            resident: task.pti_resident_size,
++        })
++    }
++}
++/// Verify the native internal parent is this exact executable, not an environment boolean grant.
++fn parent_matches(parent: u32) -> Result<bool> {
++    let current = fs::metadata(
++        std::env::current_exe()
++            .map_err(|_| error("resource-limited", "worker executable unavailable"))?,
++    )
++    .map_err(|_| error("resource-limited", "worker executable unavailable"))?;
++    #[cfg(target_os = "linux")]
++    let other = fs::metadata(format!("/proc/{parent}/exe"))
++        .map_err(|_| error("resource-limited", "native worker parent unavailable"))?;
++    #[cfg(target_os = "macos")]
++    let other = {
++        let mut bytes = [0_u8; 4096];
++        let size = unsafe {
++            libc::proc_pidpath(parent as i32, bytes.as_mut_ptr().cast(), bytes.len() as u32)
++        };
++        if size <= 0 {
++            return Err(error(
++                "resource-limited",
++                "native worker parent unavailable",
++            ));
++        }
++        use std::os::unix::ffi::OsStrExt;
++        let length = bytes.iter().position(|v| *v == 0).unwrap_or(bytes.len());
++        fs::metadata(std::ffi::OsStr::from_bytes(&bytes[..length]))
++            .map_err(|_| error("resource-limited", "native worker parent unavailable"))?
++    };
++    Ok(current.dev() == other.dev() && current.ino() == other.ino())
++}
++/// Bind worker termination to its actual native parent before any input is processed.
++fn parent_watch(parent: u32) -> Result<()> {
++    if unsafe { libc::getppid() } as u32 != parent || !parent_matches(parent)? {
++        return Err(error(
++            "invalid-request",
++            "unowned internal worker invocation",
++        ));
++    }
++    #[cfg(target_os = "linux")]
++    {
++        let mut signal = 0;
++        if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) } != 0
++            || signal != libc::SIGKILL
++        {
++            return Err(error(
++                "invalid-request",
++                "native parent-death binding missing",
++            ));
++        }
++    }
++    #[cfg(target_os = "macos")]
++    {
++        // Register the exact live parent in the native kernel event queue; no process scan or timer.
++        let queue = unsafe { libc::kqueue() };
++        if queue < 0 {
++            return Err(error("resource-limited", "native parent watch unavailable"));
++        }
++        let event = libc::kevent {
++            ident: parent as libc::uintptr_t,
++            filter: libc::EVFILT_PROC,
++            flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
++            fflags: libc::NOTE_EXIT,
++            data: 0,
++            udata: std::ptr::null_mut(),
++        };
++        if unsafe { libc::kevent(queue, &event, 1, std::ptr::null_mut(), 0, std::ptr::null()) } != 0
++            || unsafe { libc::getppid() } as u32 != parent
++        {
++            unsafe {
++                libc::close(queue);
++            }
++            return Err(error("resource-limited", "native parent watch failed"));
++        }
++        std::thread::spawn(move || {
++            let mut event = std::mem::MaybeUninit::<libc::kevent>::zeroed();
++            unsafe {
++                libc::kevent(
++                    queue,
++                    std::ptr::null(),
++                    0,
++                    event.as_mut_ptr(),
++                    1,
++                    std::ptr::null(),
++                );
++                libc::close(queue);
++                libc::_exit(1);
++            }
++        });
++    }
++    Ok(())
++}
++/// Run one actual owned kernel worker under the process-wide account, or admit its native child role.
++/// The child inherits protocol IO unchanged; this module adds no command/authority registry.
++pub(super) fn supervise(store: &Path) -> Result<Option<ExitStatus>> {
++    if let Some(parent) = std::env::var_os(PARENT) {
++        let parent = parent
++            .to_str()
++            .and_then(|v| v.parse::<u32>().ok())
++            .ok_or_else(|| error("invalid-request", "invalid internal worker parent"))?;
++        parent_watch(parent)?;
++        return Ok(None);
++    }
++    let memory = std::env::var("OMNI_KERNEL_MEMORY_BYTES")
++        .ok()
++        .map(|value| {
++            if value.is_empty()
++                || !value.bytes().all(|v| v.is_ascii_digit())
++                || value.len() > 1 && value.starts_with('0')
++            {
++                return Err(error("invalid-request", "invalid native memory override"));
++            }
++            value
++                .parse::<u64>()
++                .map_err(|_| error("invalid-request", "invalid native memory override"))
++        })
++        .transpose()?;
++    // The selected derived store may have historical public directory permissions. Never chmod
++    // that existing user-selected directory: create an owned private native account directory on
++    // its actual volume, then let Core validate the opened descriptor's owner/mode/device.
++    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
++    let native = store.join(".native-account");
++    match fs::DirBuilder::new().mode(0o700).create(&native) {
++        Ok(()) => {}
++        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
++        Err(_) => {
++            return Err(error(
++                "resource-limited",
++                "native account directory unavailable",
++            ));
++        }
++    }
++    let directory = fs::OpenOptions::new()
++        .read(true)
++        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
++        .open(native)
++        .map_err(|_| error("resource-limited", "selected native store unavailable"))?;
++    let account = Account::start(
++        directory,
++        Configuration {
++            memory_bytes: memory,
++            storage_bytes: None,
++        },
++        Scheduling {
++            max_pending: 0,
++            max_records: 32,
++            max_descriptor_bytes: 4096,
++            per_mount: 1,
++        },
++    )
++    .map_err(admission)?;
++    let _parent = reserve(
++        account,
++        Reservation {
++            memory_bytes: 16 * 1024 * 1024,
++            temporary_bytes: 0,
++        },
++    )?;
++    let allowance = account.status().map_err(admission)?.memory_available;
++    let _work = reserve(
++        account,
++        Reservation {
++            memory_bytes: allowance,
++            temporary_bytes: 512 * 1024 * 1024,
++        },
++    )?;
++    let _signals = Signals::install()?;
++    let mut command = Command::new(
++        std::env::current_exe()
++            .map_err(|_| error("resource-limited", "worker executable unavailable"))?,
++    );
++    command
++        .args(std::env::args_os().skip(1))
++        .env(PARENT, std::process::id().to_string())
++        .stdin(Stdio::inherit())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .process_group(0);
++    #[cfg(target_os = "linux")]
++    {
++        let parent = std::process::id() as i32;
++        // SAFETY: fork-before-exec hook calls only native prctl/getppid and creates no Rust allocation.
++        unsafe {
++            command.pre_exec(move || {
++                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
++                    || libc::getppid() != parent
++                {
++                    return Err(std::io::Error::last_os_error());
++                }
++                Ok(())
++            });
++        }
++    }
++    let _inherited_flags = InheritedFlags::capture();
++    let mut worker = Worker {
++        child: command
++            .spawn()
++            .map_err(|_| error("resource-limited", "owned kernel worker could not start"))?,
++        resources: _work,
++        reaped: false,
++        start: None,
++        stdout_eof: false,
++        stderr_eof: false,
++    };
++    for fd in [
++        worker
++            .child
++            .stdout
++            .as_ref()
++            .map(std::os::fd::AsRawFd::as_raw_fd),
++        worker
++            .child
++            .stderr
++            .as_ref()
++            .map(std::os::fd::AsRawFd::as_raw_fd),
++    ]
++    .into_iter()
++    .flatten()
++    {
++        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
++        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
++            return Err(error("io", "owned relay unavailable"));
++        }
++    }
++    let mut unseen = 0u8;
++    let deadline = Instant::now() + Duration::from_secs(60);
++    loop {
++        if Instant::now() >= deadline {
++            worker.stop()?;
++            return Err(error(
++                "resource-limited",
++                "owned worker IO/work deadline exhausted; collection confirmed",
++            ));
++        }
++        if SIGNAL.load(Ordering::Acquire) != 0 {
++            worker.stop()?;
++            return Err(error(
++                "cancelled",
++                "owned kernel worker cancelled and collected",
++            ));
++        }
++        if let Some((status, peak)) = worker.poll()? {
++            if peak > allowance {
++                return Err(error(
++                    "resource-limited",
++                    &format!("owned worker peak RSS {peak} exceeded admitted bytes {allowance}"),
++                ));
++            }
++            return Ok(Some(status));
++        }
++        match observation(worker.child.id()) {
++            Ok(observed) => {
++                unseen = 0;
++                if observed.group != worker.child.id()
++                    || worker.start.is_some_and(|start| start != observed.start)
++                {
++                    return Err(error("resource-limited", "owned worker identity changed"));
++                }
++                if worker.start.is_none() {
++                    worker.start = Some(observed.start);
++                    diagnostic(
++                        format!(
++                            "owned-kernel pid={} start={}:{} group={} rss_budget_bytes={allowance}",
++                            worker.child.id(),
++                            observed.start.0,
++                            observed.start.1,
++                            observed.group
++                        )
++                        .as_bytes(),
++                    );
++                }
++                if observed.resident > allowance {
++                    worker.stop()?;
++                    return Err(error(
++                        "resource-limited",
++                        &format!(
++                            "owned worker RSS {} exceeded admitted bytes {allowance}",
++                            observed.resident
++                        ),
++                    ));
++                }
++            }
++            Err(failure) => {
++                if let Some((status, peak)) = worker.poll()? {
++                    if peak > allowance {
++                        return Err(error(
++                            "resource-limited",
++                            "owned short worker exceeded admitted RSS",
++                        ));
++                    }
++                    return Ok(Some(status));
++                }
++                // Exec/exit teardown can temporarily omit VmRSS before wait4 is ready. Do not
++                // invent a zero measurement: keep the FULL admitted charge, retry for <=100 ms,
++                // and collect real peak RSS if this exact unreaped child exits in that window.
++                if unseen < 10 {
++                    unseen += 1;
++                } else {
++                    return Err(failure);
++                }
++            }
++        }
++        std::thread::sleep(Duration::from_millis(10));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    /// A full native pipe refuses at its finite deadline instead of trapping controlled shutdown.
++    #[test]
++    fn full_owned_pipe_refuses_at_io_deadline() {
++        use std::os::fd::FromRawFd;
++        let mut fds = [0; 2];
++        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
++        let _reader = unsafe { File::from_raw_fd(fds[0]) };
++        let _writer = unsafe { File::from_raw_fd(fds[1]) };
++        let mut channel = Channel::new(fds[1], Instant::now() + Duration::from_millis(25)).unwrap();
++        let start = Instant::now();
++        let error = channel.write_all(&vec![0u8; 1024 * 1024]).unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
++        assert!(start.elapsed() < Duration::from_secs(1));
++    }
++    /// ECHILD leaves the actual owner foreground and charged; test-only SIGKILL is containment, not settlement.
++    #[test]
++    fn unconfirmed_collection_never_releases_the_worker_promise() {
++        if std::env::var_os("OMNI_TEST_UNKNOWN_OWNER").is_none() {
++            let containment = tempfile::tempdir().unwrap();
++            let mut subject = Command::new(std::env::current_exe().unwrap())
++                .args([
++                    "--exact",
++                    "owned::tests::unconfirmed_collection_never_releases_the_worker_promise",
++                    "--nocapture",
++                ])
++                .env("OMNI_TEST_UNKNOWN_OWNER", containment.path())
++                .stdout(Stdio::null())
++                .stderr(Stdio::piped())
++                .spawn()
++                .unwrap();
++            let stderr = subject.stderr.take().unwrap();
++            use std::io::BufRead;
++            let mut lines = std::io::BufReader::new(stderr).lines();
++            let evidence = lines.next().unwrap().unwrap();
++            assert!(evidence.contains("pending=true"), "{evidence}");
++            assert!(evidence.contains("67108864"), "{evidence}");
++            std::thread::sleep(Duration::from_millis(300));
++            assert!(
++                subject.try_wait().unwrap().is_none(),
++                "unknown owner exited"
++            );
++            // Test-only containment of an intentionally irrecoverable ECHILD fixture, NOT settlement.
++            subject.kill().unwrap();
++            subject.wait().unwrap();
++            return;
++        }
++        static CACHE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
++        let cache = CACHE.get_or_init(|| {
++            let dir =
++                tempfile::tempdir_in(std::env::var_os("OMNI_TEST_UNKNOWN_OWNER").unwrap()).unwrap();
++            use std::os::unix::fs::PermissionsExt;
++            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
++            dir
++        });
++        let account = Account::start(
++            File::open(cache.path()).unwrap(),
++            Configuration {
++                memory_bytes: None,
++                storage_bytes: None,
++            },
++            Scheduling {
++                max_pending: 0,
++                max_records: 32,
++                max_descriptor_bytes: 4096,
++                per_mount: 1,
++            },
++        )
++        .unwrap();
++        let before = account.status().unwrap().memory_available;
++        let resources = reserve(
++            account,
++            Reservation {
++                memory_bytes: 64 * 1024 * 1024,
++                temporary_bytes: 0,
++            },
++        )
++        .unwrap();
++        let child = Command::new("/usr/bin/true")
++            .process_group(0)
++            .spawn()
++            .unwrap();
++        let mut worker = Worker {
++            child,
++            resources,
++            reaped: false,
++            start: None,
++            stdout_eof: false,
++            stderr_eof: false,
++        };
++        // Simulate another reaper consuming this exact child: the owner has no wait4 receipt.
++        worker.child.wait().unwrap();
++        assert_eq!(worker.stop().unwrap_err().code, "unsettled");
++        assert!(!worker.reaped);
++        assert_eq!(
++            account.status().unwrap().memory_available,
++            before - 64 * 1024 * 1024
++        );
++        // This must stay in controlled foreground shutdown; the outer native test observes it.
++        drop(worker);
++        panic!("unknown native owner returned to main");
++    }
++
++    /// An escaped pipe writer prevents settlement after leader exit, then permits real foreground recovery at EOF.
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn foreground_shutdown_waits_for_actual_pipe_collection_and_returns_credit() {
++        use std::io::BufRead;
++        use std::os::unix::fs::PermissionsExt;
++        let cache = tempfile::tempdir().unwrap();
++        fs::set_permissions(cache.path(), fs::Permissions::from_mode(0o700)).unwrap();
++        let account = Account::start(
++            File::open(cache.path()).unwrap(),
++            Configuration {
++                memory_bytes: None,
++                storage_bytes: None,
++            },
++            Scheduling {
++                max_pending: 0,
++                max_records: 32,
++                max_descriptor_bytes: 4096,
++                per_mount: 1,
++            },
++        )
++        .unwrap();
++        let before = account.status().unwrap().memory_available;
++        let resources = reserve(
++            account,
++            Reservation {
++                memory_bytes: 4096,
++                temporary_bytes: 0,
++            },
++        )
++        .unwrap();
++        let child = Command::new("/bin/sh")
++            .args(["-c", "setsid sh -c 'echo ready; sleep 5' & wait"])
++            .stdin(Stdio::null())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::piped())
++            .process_group(0)
++            .spawn()
++            .unwrap();
++        let mut worker = Worker {
++            child,
++            resources,
++            reaped: false,
++            start: None,
++            stdout_eof: false,
++            stderr_eof: false,
++        };
++        let mut ready = String::new();
++        std::io::BufReader::new(worker.child.stdout.as_mut().unwrap())
++            .read_line(&mut ready)
++            .unwrap();
++        assert_eq!(ready.trim(), "ready");
++        // The escaped writer already owns its pipe; killing the original group cannot close it.
++        assert_eq!(worker.stop().unwrap_err().code, "unsettled");
++        assert!(!worker.reaped);
++        assert_eq!(account.status().unwrap().memory_available, before - 4096);
++        let pending = Instant::now();
++        drop(worker);
++        assert!(pending.elapsed() >= Duration::from_millis(500));
++        assert_eq!(account.status().unwrap().memory_available, before);
++    }
++}
+diff --git c/src/query.rs w/src/query.rs
+index 9814ff4..6f8ee1c 100644
+--- c/src/query.rs
++++ w/src/query.rs
+@@ -17,6 +17,11 @@ impl Kernel {
+     pub fn search(&self, query: Query) -> Result<SearchResult> {
+         self.search_inner(query, &Budget::new())
+     }
++    /// Search under a caller-shared cancellation state and monotonic deadline.
++    pub fn search_controlled(&self, query: Query, control: &Control) -> Result<SearchResult> {
++        control.check()?;
++        self.search_inner(query, &Budget::controlled(control))
++    }
+     /// Run a query under its request-local cancellation and wall budget.
+     pub(crate) fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
+         let regex = validate_query(&query)?;
+@@ -148,6 +153,9 @@ impl Kernel {
+                             self.representation(&pin, record, live[&record.document.key])?;
+                         for (unit_id, unit) in record.units.iter().enumerate() {
+                             budget.check()?;
++                            if !budget.scan_field(unit.field.as_deref()) {
++                                continue;
++                            }
+                             file.seek(SeekFrom::Start(unit.start)).map_err(io_error)?;
+                             let mut emit = |start: u64, end: u64, preview: &str| {
+                                 occurrences += 1;
+diff --git c/src/store.rs w/src/store.rs
+index 9f5f2e8..1c5eae6 100644
+--- c/src/store.rs
++++ w/src/store.rs
+@@ -54,10 +54,21 @@ pub(crate) struct Pin {
+     _lock: LockFile,
+ }
+ 
++/// Native immutable generation reader lease, not a path or permission grant.
++pub struct GenerationPin(Pin);
++impl GenerationPin {
++    /// Exact selected generation identity; the native reader lock remains held by this value.
++    pub fn id(&self) -> &str {
++        &self.0.id
++    }
++}
++
+ /// Shared kernel owner. Source and derived storage roots are fixed at process startup.
+ pub struct Kernel {
+     pub(crate) source: File,
+     pub(crate) store: PathBuf,
++    /// Explicit consuming build binding; None preserves historical prototype compatibility.
++    pub(crate) build_identity: Option<String>,
+ }
+ impl Kernel {
+     /// Bind the admitted source root and caller-owned derived storage root.
+@@ -70,8 +81,34 @@ impl Kernel {
+         Ok(Self {
+             source,
+             store: fs::canonicalize(store).map_err(io_error)?,
++            build_identity: None,
+         })
+     }
++    /// Bind the caller's consuming dependency/feature/target/source fingerprint before any reuse.
++    /// A changed fingerprint opens a different machinery identity and requires a rebuild.
++    pub fn with_build_identity(source: &Path, store: &Path, identity: &str) -> Result<Self> {
++        if identity.is_empty() || identity.len() > 4096 {
++            return Err(error("invalid-request", "invalid consuming build identity"));
++        }
++        let mut kernel = Self::new(source, store)?;
++        kernel.build_identity = Some(identity.to_owned());
++        Ok(kernel)
++    }
++    /// Combine the unchanged upstream machinery and explicit consuming fingerprint.
++    fn machinery(&self) -> String {
++        match &self.build_identity {
++            None => machinery(),
++            Some(identity) => digest(format!("{};consumer={identity}", machinery()).as_bytes()),
++        }
++    }
++    /// Hold an actual native reader lock across caller-owned generation use.
++    pub fn pin_generation(&self, scope: &str, control: &Control) -> Result<GenerationPin> {
++        control.check()?;
++        validate_scope(scope)?;
++        let pin = self.pin(scope)?;
++        control.check()?;
++        Ok(GenerationPin(pin))
++    }
+     /// Scope identifiers select safe hashed storage locations, never caller-provided paths.
+     pub(crate) fn scope_path(&self, scope: &str) -> PathBuf {
+         self.store.join(digest(scope.as_bytes()))
+@@ -103,7 +140,7 @@ impl Kernel {
+         }
+         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+             .map_err(|_| error("unavailable", "committed manifest invalid; rebuild scope"))?;
+-        if manifest.scope != scope || manifest.machinery != machinery() {
++        if manifest.scope != scope || manifest.machinery != self.machinery() {
+             return Err(error(
+                 "unavailable",
+                 "index identity mismatch; rebuild scope",
+@@ -170,6 +207,22 @@ impl Kernel {
+     pub fn publish(&self, view: ScopeView, expected: Option<String>) -> Result<String> {
+         self.publish_inner(view, expected, &Budget::new(), INDEX_BYTES, |_| Ok(()))
+     }
++    /// Publish under the actual caller cancellation/deadline and unchanged temporary format ceiling.
++    pub fn publish_controlled(
++        &self,
++        view: ScopeView,
++        expected: Option<String>,
++        control: &Control,
++    ) -> Result<String> {
++        control.check()?;
++        self.publish_inner(
++            view,
++            expected,
++            &Budget::controlled(control),
++            INDEX_BYTES,
++            |_| control.check(),
++        )
++    }
+     /// Build and publish with a checkpoint callback used by in-module crash fixtures.
+     pub(crate) fn publish_inner(
+         &self,
+@@ -208,7 +261,7 @@ impl Kernel {
+                     .filter(|b| digest(b) == *id)
+             })
+             .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+-            .filter(|m| m.machinery == machinery());
++            .filter(|m| m.machinery == self.machinery());
+         if let Some(old) = &old {
+             for next in &view.documents {
+                 if let Some(prior) = old
+@@ -507,7 +560,7 @@ impl Kernel {
+             records.push(record);
+         }
+         let manifest = Manifest {
+-            machinery: machinery(),
++            machinery: self.machinery(),
+             nonce: std::time::SystemTime::now()
+                 .duration_since(std::time::UNIX_EPOCH)
+                 .map_err(io_error)?
+diff --git c/src/text.rs w/src/text.rs
+index 538340f..333e84a 100644
+--- c/src/text.rs
++++ w/src/text.rs
+@@ -5,7 +5,8 @@ use std::borrow::Cow;
+ use std::fs::File;
+ use std::io::{Read, Seek, SeekFrom};
+ use std::path::{Component, Path};
+-use std::sync::OnceLock;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, OnceLock};
+ use std::time::{Duration, Instant};
+ use tantivy::tokenizer::{
+     LowerCaser, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
+@@ -37,10 +38,81 @@ pub const WRITER_BYTES: usize = 32 * 1024 * 1024;
+ pub const DICTIONARY_SHA256: &str =
+     "a7ba9f645ffe7094e56ae1c4a81d100df8fbb1e28bbe1792622e9728e162db3d";
+ 
++/// Caller-owned cooperative deadline and cancellation shared with actual running work.
++/// This is not a memory reservation or an authorization capability.
++#[derive(Clone)]
++pub struct Control {
++    deadline: Instant,
++    cancelled: Arc<AtomicBool>,
++    guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
++    scan_body_only: bool,
++    scan_identity: bool,
++}
++impl std::fmt::Debug for Control {
++    /// Show only the deadline, never host context or callback captures.
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Control")
++            .field("deadline", &self.deadline)
++            .finish_non_exhaustive()
++    }
++}
++impl Control {
++    /// Bind a monotonic deadline; an elapsed deadline starts stopped, never unlimited.
++    pub fn new(deadline: Instant) -> Self {
++        Self {
++            deadline,
++            cancelled: Arc::new(AtomicBool::new(false)),
++            guard: None,
++            scan_body_only: false,
++            scan_identity: false,
++        }
++    }
++    /// Add a trusted caller's live stop check without importing host policy into the kernel.
++    /// False requests cooperative cancellation; it never creates permission or a resource account.
++    pub fn guarded(deadline: Instant, guard: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
++        let mut control = Self::new(deadline);
++        control.guard = Some(guard);
++        control
++    }
++    /// Restrict exact/regex evidence to admitted body units, without changing eligibility or authority.
++    pub fn body_scans(mut self) -> Self {
++        self.scan_body_only = true;
++        self
++    }
++    /// Scan admitted bodies plus display name/title/description, not tags/digests/other metadata.
++    /// This preserves ordinary file/text navigation; it never changes source eligibility or policy.
++    pub fn text_scans(mut self) -> Self {
++        self.scan_body_only = true;
++        self.scan_identity = true;
++        self
++    }
++    /// The actual caller deadline, for owned child adapters sharing the same operation.
++    pub fn deadline(&self) -> Instant {
++        self.deadline
++    }
++    /// Request cancellation; return does not assert that work or publication has settled.
++    pub fn cancel(&self) {
++        self.cancelled.store(true, Ordering::Release);
++    }
++    /// Refuse further cooperative work after cancellation or deadline.
++    pub fn check(&self) -> Result<()> {
++        if self.cancelled.load(Ordering::Acquire)
++            || self.guard.as_ref().is_some_and(|guard| !guard())
++        {
++            return Err(error("partial", "operation cancelled"));
++        }
++        if Instant::now() >= self.deadline {
++            return Err(error("resource-limited", "wall-time budget exhausted"));
++        }
++        Ok(())
++    }
++}
++
+ /// A cooperative request deadline. Cancellation uses the same stopped-work path.
+ pub(crate) struct Budget {
+     pub deadline: Instant,
+     pub cancelled: bool,
++    control: Option<Control>,
+ }
+ impl Budget {
+     /// Start a fixed operation budget.
+@@ -48,10 +120,33 @@ impl Budget {
+         Self {
+             deadline: Instant::now() + Duration::from_secs(WALL_SECONDS),
+             cancelled: false,
++            control: None,
+         }
+     }
++    /// Retain the caller's shared stop state without extending the prototype work ceiling.
++    pub fn controlled(control: &Control) -> Self {
++        Self {
++            deadline: control
++                .deadline
++                .min(Instant::now() + Duration::from_secs(WALL_SECONDS)),
++            cancelled: false,
++            control: Some(control.clone()),
++        }
++    }
++    /// Whether the caller requested body-only exact/regex evidence.
++    pub fn scan_field(&self, field: Option<&str>) -> bool {
++        self.control.as_ref().is_none_or(|control| {
++            !control.scan_body_only
++                || field.is_none()
++                || (control.scan_identity
++                    && matches!(field, Some("name" | "title" | "metadata.description")))
++        })
++    }
+     /// Stop before the next read, allocation, or chunk when the operation cannot continue.
+     pub fn check(&self) -> Result<()> {
++        if let Some(control) = &self.control {
++            control.check()?;
++        }
+         if self.cancelled {
+             return Err(error("partial", "operation cancelled"));
+         }
+diff --git c/tests/faces.rs w/tests/faces.rs
+index bd3d235..de11df0 100644
+--- c/tests/faces.rs
++++ w/tests/faces.rs
+@@ -199,7 +199,33 @@ fn executable_process_resource_limits() {
+         .lines()
+         .find(|l| l.starts_with("Max address space"))
+         .unwrap();
+-    assert!(memory.contains("2147483648"), "{memory}");
++    let caller_limits = fs::read_to_string("/proc/self/limits").unwrap();
++    assert_eq!(
++        memory,
++        caller_limits
++            .lines()
++            .find(|line| line.starts_with("Max address space"))
++            .unwrap(),
++        "AS is not the native memory authority"
++    );
++    let children =
++        fs::read_to_string(format!("/proc/{}/task/{}/children", child.id(), child.id())).unwrap();
++    let owned: Vec<u32> = children
++        .split_whitespace()
++        .map(|pid| pid.parse().unwrap())
++        .collect();
++    assert_eq!(owned.len(), 1, "one actual owned pure-kernel worker");
++    let status = fs::read_to_string(format!("/proc/{}/status", owned[0])).unwrap();
++    assert!(status.lines().any(|line| {
++        line.starts_with("VmRSS:")
++            && line
++                .split_whitespace()
++                .nth(1)
++                .unwrap()
++                .parse::<u64>()
++                .unwrap()
++                > 0
++    }));
+     let file = limits
+         .lines()
+         .find(|l| l.starts_with("Max file size"))
+diff --git c/tests/native_rss.rs w/tests/native_rss.rs
+new file mode 100644
+index 0000000..e6987eb
+--- /dev/null
++++ w/tests/native_rss.rs
+@@ -0,0 +1,168 @@
++//! The active native bound is a real owned-child resident observation, not RLIMIT_AS.
++#![cfg(unix)]
++use std::process::{Command, Stdio};
++
++/// A real running worker exceeds its actual one-byte RSS promise and is natively collected.
++#[test]
++fn actual_live_owned_worker_exceeds_its_native_rss_promise_and_is_collected() {
++    let root = tempfile::tempdir().unwrap();
++    let store = tempfile::tempdir().unwrap();
++    let mut child = Command::new(env!("CARGO_BIN_EXE_retrieval-kernel"))
++        .args([
++            "service",
++            "--sources",
++            root.path().to_str().unwrap(),
++            "--store",
++            store.path().to_str().unwrap(),
++        ])
++        // A real parent baseline plus ONE byte for its actual live owned worker.
++        .env(
++            "OMNI_KERNEL_MEMORY_BYTES",
++            (16 * 1024 * 1024 + 1u64).to_string(),
++        )
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .spawn()
++        .unwrap();
++    // Keep the actual input open: the pure worker is LIVE, not merely an EOF/exit-status fixture.
++    let input = child.stdin.take().unwrap();
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++    while child.try_wait().unwrap().is_none() {
++        if std::time::Instant::now() >= deadline {
++            child.kill().unwrap();
++            child.wait().unwrap();
++            drop(input);
++            panic!("native RSS controller failed to settle its live worker within ten seconds");
++        }
++        std::thread::sleep(std::time::Duration::from_millis(10));
++    }
++    let output = child.wait_with_output().unwrap();
++    drop(input);
++    assert!(!output.status.success());
++    let evidence = format!(
++        "{}{}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    assert!(evidence.contains("resource-limited"), "{evidence}");
++    assert!(
++        evidence.contains("RSS") && evidence.contains("exceeded admitted"),
++        "{evidence}"
++    );
++    assert!(evidence.contains("rss_budget_bytes=1"), "{evidence}");
++}
++
++/// Test-only exact-PID containment on assertion failure; forced kill is never a passing shutdown observation.
++#[cfg(target_os = "linux")]
++struct Subject(std::process::Child);
++#[cfg(target_os = "linux")]
++impl Drop for Subject {
++    /// Reap only this test's parent process if its ordinary bounded check did not finish.
++    fn drop(&mut self) {
++        if self.0.try_wait().ok().flatten().is_none() {
++            let _ = self.0.kill();
++            let _ = self.0.wait();
++        }
++    }
++}
++
++/// Controlled EOF, failed output and SIGTERM all collect the real live worker before the parent can exit.
++#[cfg(target_os = "linux")]
++#[test]
++fn controlled_shutdown_collects_the_actual_worker_before_parent_exit() {
++    use std::io::{Read, Write};
++    use std::os::fd::AsRawFd;
++    use std::time::{Duration, Instant};
++    for trigger in ["eof", "output-error", "sigterm"] {
++        let root = tempfile::tempdir().unwrap();
++        let store = tempfile::tempdir().unwrap();
++        let mut subject = Subject(
++            Command::new(env!("CARGO_BIN_EXE_retrieval-kernel"))
++                .arg("service")
++                .arg("--sources")
++                .arg(root.path())
++                .arg("--store")
++                .arg(store.path())
++                .stdin(Stdio::piped())
++                .stdout(Stdio::piped())
++                .stderr(Stdio::piped())
++                .spawn()
++                .unwrap(),
++        );
++        let parent = subject.0.id();
++        let mut stderr = subject.0.stderr.take().unwrap();
++        let flags = unsafe { libc::fcntl(stderr.as_raw_fd(), libc::F_GETFL) };
++        assert!(flags >= 0);
++        assert_eq!(
++            unsafe { libc::fcntl(stderr.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
++            0
++        );
++        let deadline = Instant::now() + Duration::from_secs(5);
++        let mut evidence = String::new();
++        let worker: u32 = loop {
++            let mut bytes = [0; 4096];
++            match stderr.read(&mut bytes) {
++                Ok(n) => evidence.push_str(std::str::from_utf8(&bytes[..n]).unwrap()),
++                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
++                Err(error) => panic!("native diagnostic read: {error}"),
++            }
++            if let Some(pid) = evidence.lines().find_map(|line| {
++                line.strip_prefix("owned-kernel pid=")
++                    .and_then(|line| line.split_whitespace().next())
++                    .and_then(|pid| pid.parse().ok())
++            }) {
++                break pid;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "missing native worker ownership: {evidence}"
++            );
++            std::thread::sleep(Duration::from_millis(10));
++        };
++        let identity = std::fs::read_to_string(format!("/proc/{worker}/stat")).unwrap();
++        let start = identity
++            .rsplit_once(')')
++            .unwrap()
++            .1
++            .split_whitespace()
++            .nth(19)
++            .unwrap()
++            .to_owned();
++        match trigger {
++            "eof" => drop(subject.0.stdin.take()),
++            "output-error" => {
++                drop(subject.0.stdout.take());
++                subject.0.stdin.as_mut().unwrap().write_all(b"{\"version\":1,\"id\":1,\"op\":\"analyze\",\"query\":\"x\",\"title\":\"\",\"body\":\"\"}\n").unwrap();
++            }
++            "sigterm" => assert_eq!(unsafe { libc::kill(parent as i32, libc::SIGTERM) }, 0),
++            _ => unreachable!(),
++        }
++        let deadline = Instant::now() + Duration::from_secs(5);
++        let status = loop {
++            if let Some(status) = subject.0.try_wait().unwrap() {
++                break status;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "controlled {trigger} failed to collect"
++            );
++            std::thread::sleep(Duration::from_millis(10));
++        };
++        assert_eq!(status.success(), trigger == "eof");
++        let same_worker = std::fs::read_to_string(format!("/proc/{worker}/stat"))
++            .ok()
++            .is_some_and(|stat| {
++                stat.rsplit_once(')').unwrap().1.split_whitespace().nth(19) == Some(start.as_str())
++            });
++        assert!(
++            !same_worker,
++            "{trigger} parent exited before actual worker collection"
++        );
++        drop(stderr);
++        drop(subject);
++        eprintln!(
++            "CONTROL {trigger} owner_pid={parent} worker_pid={worker} start={start} collected=true test_pipe_handles_closed=true"
++        );
++    }
++}

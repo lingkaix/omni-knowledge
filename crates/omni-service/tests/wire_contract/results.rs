@@ -113,6 +113,7 @@ fn safe_manifest_versions_encode_as_numbers() {
 #[test]
 fn status_mount_source_and_listing_shapes() {
     let status = omni_service::Status {
+        resource_budgets: None,
         library: library(),
         coverage: coverage(),
         jobs: vec![],

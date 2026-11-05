@@ -1,0 +1,18 @@
+[package]
+name = "knowledge-search"
+version = "0.1.0"
+edition = "2024"
+description = "Retrieval orchestration over the vendored kernel and one disk vector generation"
+license = "Apache-2.0"
+
+[dependencies]
+knowledge-core = { path = "../knowledge-core" }
+knowledge-retrieval = { path = "../knowledge-retrieval" }
+fs2 = "0.4"
+rustix = { version = "1", features = ["fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

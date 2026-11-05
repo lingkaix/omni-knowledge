@@ -1,5 +1,10 @@
 //! Public-API regressions using bounded, valid, owned native files only.
+mod compatibility;
 mod files_budget;
+mod foreign;
+mod frozen;
+mod phase2;
+mod stored_controls;
 
 use super::*;
 use sha2::{Digest, Sha256};

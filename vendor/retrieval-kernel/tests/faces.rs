@@ -199,7 +199,33 @@ fn executable_process_resource_limits() {
         .lines()
         .find(|l| l.starts_with("Max address space"))
         .unwrap();
-    assert!(memory.contains("2147483648"), "{memory}");
+    let caller_limits = fs::read_to_string("/proc/self/limits").unwrap();
+    assert_eq!(
+        memory,
+        caller_limits
+            .lines()
+            .find(|line| line.starts_with("Max address space"))
+            .unwrap(),
+        "AS is not the native memory authority"
+    );
+    let children =
+        fs::read_to_string(format!("/proc/{}/task/{}/children", child.id(), child.id())).unwrap();
+    let owned: Vec<u32> = children
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .collect();
+    assert_eq!(owned.len(), 1, "one actual owned pure-kernel worker");
+    let status = fs::read_to_string(format!("/proc/{}/status", owned[0])).unwrap();
+    assert!(status.lines().any(|line| {
+        line.starts_with("VmRSS:")
+            && line
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+    }));
     let file = limits
         .lines()
         .find(|l| l.starts_with("Max file size"))

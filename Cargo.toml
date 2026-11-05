@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/knowledge-processing", "crates/omni-service", "crates/knowledge-daemon", "crates/knowledge-history", "crates/knowledge-package", "crates/knowledge-storage"]
+members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/knowledge-processing", "crates/omni-service", "crates/knowledge-retrieval", "crates/knowledge-search", "crates/knowledge-daemon", "crates/knowledge-history", "crates/knowledge-package", "crates/knowledge-storage"]
 resolver = "3"
 
 [package]
@@ -22,6 +22,10 @@ path = "src/lib.rs"
 name = "omni"
 path = "src/main.rs"
 
+[[test]]
+name = "product_boundaries"
+path = "tests/product_boundaries/main.rs"
+
 [[bin]]
 name = "omni-knowledge-gui"
 path = "src/bin/omni-knowledge-gui.rs"
@@ -29,8 +33,12 @@ required-features = ["gui"]
 
 [dependencies]
 knowledge-core = { path = "crates/knowledge-core" }
-knowledge-storage = { path = "crates/knowledge-storage" }
+knowledge-retrieval = { path = "crates/knowledge-retrieval" }
+omni-service = { path = "crates/omni-service" }
+rustix = { version = "1", features = ["process", "fs", "pipe"] }
 knowledge-processing = { path = "crates/knowledge-processing" }
+knowledge-search = { path = "crates/knowledge-search" }
+knowledge-storage = { path = "crates/knowledge-storage" }
 anyhow = "1"
 knowledge-daemon = { path = "crates/knowledge-daemon" }
 ammonia = "4"
