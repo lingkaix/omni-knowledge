@@ -190,12 +190,12 @@
     {
       "path": "src/directory.rs",
       "upstream_sha256": "29cadb3d79bd9f7e169c5e296a00772ad6547e1aa446e407e7f4d3b9830d9563",
-      "vendored_sha256": "29cadb3d79bd9f7e169c5e296a00772ad6547e1aa446e407e7f4d3b9830d9563"
+      "vendored_sha256": "538bbfcff2d7417168b9a71a1b71a7210645a3c21ee642a096376968172cb937"
     },
     {
       "path": "src/lib.rs",
       "upstream_sha256": "c525feb0644dd781813ce14622a407c89835bd414262e35029180e2e5bf6c12a",
-      "vendored_sha256": "af466a4f4671154758f9e3c4b9406dab3437a12a81facd62379f7beb9695586f"
+      "vendored_sha256": "4f25e392880e94ba77f819e4b702ed0032d86b2c90cfa3b933324d1d2f148f80"
     },
     {
       "path": "src/main.rs",
@@ -210,12 +210,12 @@
     {
       "path": "src/query.rs",
       "upstream_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c",
-      "vendored_sha256": "a694b4ec1128005fac962ffce5704a7140902f8df3bd5ef9f74dc7a379e243ee"
+      "vendored_sha256": "2958690cdb91f7eac07ea74d45bb5d9f51ddb88b206d2f464db5c3b02de86111"
     },
     {
       "path": "src/store.rs",
       "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
-      "vendored_sha256": "788b5206c78484819994999fad20ca8500ab3a6b8523d8353bbf0c71e28c9751"
+      "vendored_sha256": "8f913a8966ffc53008a4ff9d6f08230c2474bb4ace98098b238ab12980f4fa98"
     },
     {
       "path": "src/tests.rs",

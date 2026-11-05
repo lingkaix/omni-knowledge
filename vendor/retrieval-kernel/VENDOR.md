@@ -22,7 +22,7 @@ No dictionary or model download is required by the seeded probe.
 
 ## Applied Patches
 
-Apply the historical [M0 patch](../../tools/kernel-probe/patches/m0-vendoring.patch), then the [native adapter overlay](../../tools/kernel-probe/patches/m3-native-owned.patch), to the exact pinned upstream crate. The ordered pair replays all adaptations below, including the two new local source/test files. Original hashes stay unchanged; current hashes cover all52 source entries. Metadata and the patch ledger are not a new license or platform proof.
+Apply the historical [M0 patch](../../tools/kernel-probe/patches/m0-vendoring.patch), the [native adapter overlay](../../tools/kernel-probe/patches/m3-native-owned.patch), then the [STORED directory overlay](../../tools/kernel-probe/patches/m4-stored-directory.patch), to the exact pinned upstream crate. The ordered patches replay all adaptations below, including the two new local source/test files. Original hashes stay unchanged; current hashes cover all52 source entries. Metadata and the patch ledger are not a new license or platform proof.
 M0-P01 and M0-P02 change no analyzer, scoring, coverage, source admission, generation publication, or test assertion.
 
 | Patch | Necessity and effect | Future OpenKit candidate |
@@ -63,6 +63,8 @@ M4-P06 replaces the old executable AS oracle with preserved-inheritance plus rea
 
 M4-P07 adds operation-only scan-field selection to the same exact/regex scanner: body-only for generic text, or body plus display name/title/description for ordinary Root navigation. Tags/digests/private identity metadata cannot become pseudo-body grep matches. Eligibility, current-document identity, complete scanning and the shared analyzer/ranking implementation are unchanged.
 M4-P08 repairs consequential native settlement: only exact successful wait4 sets reaped; bounded stop/poll keeps the full child/native resource capability quarantined on unknown collection, and ECHILD refuses signalling a stale PID. Owned reads/writes have nonblocking monotonic deadlines, the supervisor bounds its pure-worker lifetime, and diagnostics cannot block collection. Normal owned pipe-backpressure and unknown-reaper controls run in addition to the live RSS/inherited-AS tests. This is not native macOS qualification, a new executor, or product durable recovery.
+
+M4-P09 extends the same native query implementation with immutable generic byte directories and `SourceGeneration`. M5 supplies verified held archive ranges; actual Tantivy postings and canonical literal/regex readers query those ranges without extraction or a second engine. Query/refill currentness and the complete source/reader/cost lifetime remain with the real caller. The consuming adapter now passes its actual source/Claim guard through initial M5 verification as well. Streamed publication, full-corpus orchestration and native vector/model-space work remain separate required work; this overlay is not full activation or platform proof.
 
 ## Dependency Identity Binding
 

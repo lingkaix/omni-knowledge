@@ -6,7 +6,6 @@ use flate2::{Decompress, FlushDecompress, Status};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
 const SCRATCH: usize = 8192;
@@ -686,9 +685,23 @@ fn read_exact_at(
     if work.read_bytes.checked_add(len).ok_or(Error::Quota)? > work.bounds.budget.max_bytes {
         return Err(Error::Quota);
     }
+    gate(work)?;
     file.seek(SeekFrom::Start(pos)).map_err(|_| Error::Io)?;
-    file.read_exact(buf).map_err(|_| Error::Truncated)?;
-    work.read_bytes += len;
+    let mut done = 0;
+    while done < buf.len() {
+        gate(work)?;
+        let end = done.saturating_add(SCRATCH).min(buf.len());
+        let read = match file.read(&mut buf[done..end]) {
+            Ok(0) => return Err(Error::Truncated),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Error::Io),
+        };
+        // Count actual consumed bytes even if currentness changed during the native read.
+        crate::note_read(work, read as u64)?;
+        gate(work)?;
+        done += read;
+    }
     Ok(())
 }
 
@@ -698,13 +711,7 @@ fn account(work: &mut Work<'_>, memory: u64, temporary: u64) -> Result<(), Error
 }
 
 fn gate(work: &Work<'_>) -> Result<(), Error> {
-    if work.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err(Error::Cancelled);
-    }
-    if Instant::now() >= work.deadline {
-        return Err(Error::Deadline);
-    }
-    Ok(())
+    crate::gate(work)
 }
 
 fn u16_at(buf: &[u8], at: usize) -> Result<u16, Error> {

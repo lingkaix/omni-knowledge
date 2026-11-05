@@ -4232,10 +4232,15 @@ name = "knowledge-retrieval"
 version = "0.1.0"
 dependencies = [
  "knowledge-core",
+ "knowledge-package",
+ "omni-service",
  "retrieval-kernel",
+ "rustix 1.1.5",
  "serde_json",
  "sha2 0.10.9",
+ "tantivy",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

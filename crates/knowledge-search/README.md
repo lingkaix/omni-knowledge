@@ -19,7 +19,9 @@ Root's production search wrappers use its existing current-generation planner an
 
 `VectorStore` writes little-endian f32 bytes and identity/row locations; eligible rows are chosen before row IO. Its nine original orchestration cases remain owned controls. At this checkpoint Root still uses its retained-v1 vector carrier; actual Root disk publication/reopen/pin/current-source qualification is the next implementation slice, not completed by this crate's existence. The original vector pin/storage implementation also needs native lifetime strengthening before activation.
 
-Full arbitrary byte/generation/archive Directory composition and full-corpus streaming remain required. Retained snapshots, borrowed labels and partial compatibility declarations cannot waive them.
+The [retrieval adapter](../knowledge-retrieval/README.md#generic-native-generations-and-stored-queries) now provides a compiled generic native-generation query and verified STORED Directory mechanism using the same mature kernel.
+Root caller activation, streamed generic publication, full-corpus streaming, funded vector lifetime strengthening and combined generation composition remain required.
+Retained snapshots, borrowed labels and partial compatibility declarations cannot waive them.
 
 ## Provider evidence
 

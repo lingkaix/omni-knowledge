@@ -4,6 +4,12 @@
 //! or create another queue. Caller work and retained reader resources use the same process account.
 #![deny(missing_docs)]
 
+mod stored;
+/// Package-owned verification ceilings for native callers, not admission or permission grants.
+pub use knowledge_package::{Bounds as ArchiveBounds, Quotas as ArchiveQuotas};
+pub use retrieval_kernel::{ByteDirectory, SourceGeneration, consumer_machinery};
+pub use stored::{ArchiveSource, StoredGeneration, StoredIdentity, StoredPlan, StoredResult};
+
 use knowledge_core::admission::{Account, Decision, Holding, Origin};
 use knowledge_core::jobs::Reservation;
 pub use retrieval_kernel::{
@@ -23,6 +29,14 @@ pub enum Error {
     Kernel(retrieval_kernel::Error),
     /// Checked accounting arithmetic or bounded inventory encoding failed.
     Inventory,
+    /// Verified package omission, quota, waiting, drift or cancellation refusal.
+    Package(knowledge_package::Error),
+}
+impl From<knowledge_package::Error> for Error {
+    /// Keep optional-index omission distinct from source/admission failure.
+    fn from(error: knowledge_package::Error) -> Self {
+        Self::Package(error)
+    }
 }
 impl std::fmt::Display for Error {
     /// Write classifications only, without source identities or paths.

@@ -19,6 +19,93 @@ pub(crate) fn machinery() -> String {
 /// Identity-only phase-1 processor; changes require fresh representations.
 pub(crate) const PROCESSOR: &str = "identity-markdown-v1";
 
+/// Native frozen-generation format facts supplied by the actual consuming kernel.
+/// These are compatibility data, never source authority or a manifest-selected processor.
+#[derive(Clone, Debug)]
+pub struct GenerationFormat {
+    /// Schema, processor, dictionary, upstream machinery and consuming-build binding.
+    pub kernel_build: String,
+    /// Exact pinned lexical storage format/schema.
+    pub lexical_format: &'static str,
+    /// Exact immutable vector-segment format, not a claim that vectors were built.
+    pub segment_format: &'static str,
+    /// Actual representation processor fingerprint.
+    pub processor: &'static str,
+    /// Actual packaged dictionary fingerprint.
+    pub dictionary: &'static str,
+}
+/// Return native consumer identities without trusting a producer's compatible flag.
+pub fn generation_format(identity: &str) -> Result<GenerationFormat> {
+    Ok(GenerationFormat {
+        kernel_build: consumer_machinery(identity)?,
+        lexical_format: "tantivy-0.26.2-schema5",
+        segment_format: "exact-f32le-v1",
+        processor: PROCESSOR,
+        dictionary: DICTIONARY_SHA256,
+    })
+}
+
+/// Exact native machinery binding for generic generation consumers, not source authorization.
+pub fn consumer_machinery(identity: &str) -> Result<String> {
+    if identity.is_empty() || identity.len() > 4096 {
+        return Err(error("invalid-request", "invalid consuming build identity"));
+    }
+    Ok(digest(
+        format!("{};consumer={identity}", machinery()).as_bytes(),
+    ))
+}
+
+/// Validate the bounded inventory and representation coordinates identically for every backend.
+pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
+    validate_view(
+        &ScopeView {
+            scope: manifest.scope.clone(),
+            unavailable_objects: manifest.unavailable_objects,
+            documents: manifest
+                .documents
+                .iter()
+                .map(|r| r.document.clone())
+                .collect(),
+        },
+        false,
+    )
+    .map_err(|_| error("unavailable", "committed inventory invalid; rebuild scope"))?;
+    for record in &manifest.documents {
+        let ceiling = if record.sidecar.is_some() {
+            SIDECAR_BYTES as u64
+        } else if let Content::Representation { size, .. } = &record.document.content {
+            *size
+        } else {
+            record.document.size
+        };
+        if !["zh", "ja", "unicode"].contains(&record.language.as_str())
+            || record.units.len() > 256
+            || record
+                .units
+                .iter()
+                .any(|u| u.end < u.start || u.end > ceiling)
+            || record
+                .sidecar
+                .as_ref()
+                .is_some_and(|p| *p != cache_path(&record.document, &record.representation_digest))
+            || (record.sidecar.is_none()
+                && matches!(
+                    record.document.content,
+                    Content::Text { .. }
+                        | Content::InlineText { .. }
+                        | Content::Representation { .. }
+                )
+                && record.units != text_units(&record.document))
+        {
+            return Err(error(
+                "unavailable",
+                "committed representation identity invalid; rebuild scope",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// All members of a committed scope generation are bound by this manifest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -51,7 +138,21 @@ pub(crate) struct Pin {
     pub id: String,
     pub path: PathBuf,
     pub manifest: Manifest,
-    _lock: LockFile,
+    pub(crate) provider: Option<crate::directory::SourceGeneration>,
+    _lock: Option<LockFile>,
+}
+
+impl Pin {
+    /// Retain the actual owned generic provider through the last native reader and result build.
+    pub(crate) fn provided(provider: crate::directory::SourceGeneration) -> Self {
+        Self {
+            id: provider.id.clone(),
+            path: PathBuf::new(),
+            manifest: (*provider.manifest).clone(),
+            provider: Some(provider),
+            _lock: None,
+        }
+    }
 }
 
 /// Native immutable generation reader lease, not a path or permission grant.
@@ -146,56 +247,13 @@ impl Kernel {
                 "index identity mismatch; rebuild scope",
             ));
         }
-        validate_view(
-            &ScopeView {
-                scope: manifest.scope.clone(),
-                unavailable_objects: manifest.unavailable_objects,
-                documents: manifest
-                    .documents
-                    .iter()
-                    .map(|r| r.document.clone())
-                    .collect(),
-            },
-            false,
-        )
-        .map_err(|_| error("unavailable", "committed inventory invalid; rebuild scope"))?;
-        for record in &manifest.documents {
-            let ceiling = if record.sidecar.is_some() {
-                SIDECAR_BYTES as u64
-            } else if let Content::Representation { size, .. } = &record.document.content {
-                *size
-            } else {
-                record.document.size
-            };
-            if !["zh", "ja", "unicode"].contains(&record.language.as_str())
-                || record.units.len() > 256
-                || record
-                    .units
-                    .iter()
-                    .any(|u| u.end < u.start || u.end > ceiling)
-                || record.sidecar.as_ref().is_some_and(|p| {
-                    *p != cache_path(&record.document, &record.representation_digest)
-                })
-                || (record.sidecar.is_none()
-                    && matches!(
-                        record.document.content,
-                        Content::Text { .. }
-                            | Content::InlineText { .. }
-                            | Content::Representation { .. }
-                    )
-                    && record.units != text_units(&record.document))
-            {
-                return Err(error(
-                    "unavailable",
-                    "committed representation identity invalid; rebuild scope",
-                ));
-            }
-        }
+        validate_manifest(&manifest)?;
         Ok(Pin {
             id,
             path: generation,
             manifest,
-            _lock: reader,
+            provider: None,
+            _lock: Some(reader),
         })
     }
     /// Inspect the committed pointer without opening another scope or canonical content.

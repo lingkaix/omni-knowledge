@@ -7,9 +7,14 @@ description = "Admitted native adapter for the shared retrieval kernel"
 
 [dependencies]
 knowledge-core = { path = "../knowledge-core" }
+knowledge-package = { path = "../knowledge-package" }
+tantivy = "0.26.2"
 retrieval-kernel = { path = "../../vendor/retrieval-kernel" }
 serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
 sha2 = "0.10"
+omni-service = { path = "../omni-service" }
+rustix = { version = "1", features = ["fs"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }

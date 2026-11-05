@@ -8,6 +8,302 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use tantivy::HasLen;
+
+/// Owned, current-policy-checked byte directory supplied by a native host.
+/// Implementations retain their actual descriptors, generation pins and prepaid concurrent costs.
+/// Names and bytes are facts, not read grants; every open/read must check the live caller lease.
+/// Returned handles own that SAME lease, not a borrow into a finished callback.
+pub trait ByteDirectory: std::fmt::Debug + Send + Sync + 'static {
+    /// Recheck cancellation, current selection/policy and the held source version.
+    fn check(&self) -> Result<()>;
+    /// Open one confined component without reopening a display path or extracting an archive.
+    fn open(&self, name: &str) -> Result<std::sync::Arc<dyn tantivy::directory::FileHandle>>;
+    /// Test membership without probing paths outside this admitted directory.
+    fn exists(&self, name: &str) -> Result<bool>;
+}
+
+/// Immutable native generation over generic byte directories, using the SAME kernel query engine.
+/// The host prepays opaque reader/runtime plus buffer/table/output peaks before construction.
+#[derive(Clone)]
+pub struct SourceGeneration {
+    pub(crate) id: String,
+    pub(crate) manifest: std::sync::Arc<crate::store::Manifest>,
+    pub(crate) components: std::sync::Arc<dyn ByteDirectory>,
+    pub(crate) originals: std::sync::Arc<dyn ByteDirectory>,
+}
+impl SourceGeneration {
+    /// Open a bounded, integrity-checked native manifest and exact consuming machinery identity.
+    /// Optional package compatibility must be checked by its owner BEFORE this native format check.
+    pub fn open(
+        scope: &str,
+        generation: &str,
+        build_identity: &str,
+        components: std::sync::Arc<dyn ByteDirectory>,
+        originals: std::sync::Arc<dyn ByteDirectory>,
+        control: &Control,
+    ) -> Result<Self> {
+        control.check()?;
+        crate::store::validate_scope(scope)?;
+        components.check()?;
+        originals.check()?;
+        let handle = components.open("manifest.json")?;
+        if handle.len() > FRAME_BYTES {
+            return Err(error(
+                "resource-limited",
+                "generation manifest exceeds byte budget",
+            ));
+        }
+        let bytes = handle.read_bytes(0..handle.len()).map_err(io_error)?;
+        if digest(&bytes) != generation {
+            return Err(error(
+                "unavailable",
+                "committed manifest integrity failed; rebuild scope",
+            ));
+        }
+        let manifest: crate::store::Manifest = serde_json::from_slice(&bytes)
+            .map_err(|_| error("unavailable", "committed manifest invalid; rebuild scope"))?;
+        if manifest.scope != scope
+            || manifest.machinery != crate::store::consumer_machinery(build_identity)?
+        {
+            return Err(error(
+                "unavailable",
+                "index identity mismatch; rebuild scope",
+            ));
+        }
+        crate::store::validate_manifest(&manifest)?;
+        components.check()?;
+        originals.check()?;
+        control.check()?;
+        Ok(Self {
+            id: generation.to_owned(),
+            manifest: std::sync::Arc::new(manifest),
+            components,
+            originals,
+        })
+    }
+    /// Exact immutable native manifest identity. This value is not permission to read a source.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// Search a current admitted view with the mature analyzer, ranking, verification and scanners.
+    pub fn search(&self, query: Query, control: &Control) -> Result<SearchResult> {
+        control.check()?;
+        self.components.check()?;
+        self.originals.check()?;
+        let result = crate::query::search_generation(self, query, &Budget::controlled(control))?;
+        self.components.check()?;
+        self.originals.check()?;
+        control.check()?;
+        Ok(result)
+    }
+}
+
+/// Tantivy's read-only Directory over actual owned range handles, never a writable fake filesystem.
+#[derive(Clone)]
+pub(crate) struct IndexDirectory(pub std::sync::Arc<dyn ByteDirectory>);
+impl std::fmt::Debug for IndexDirectory {
+    /// Do not disclose source names through native diagnostics.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PinnedIndexDirectory")
+    }
+}
+impl IndexDirectory {
+    /// Convert Tantivy's single component to its verified generation-relative name.
+    fn name(path: &Path) -> std::io::Result<String> {
+        if path.components().count() != 1
+            || !matches!(
+                path.components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "invalid index component",
+            ));
+        }
+        let name = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("non UTF-8 index component"))?;
+        Ok(format!("index/{name}"))
+    }
+}
+impl tantivy::directory::Directory for IndexDirectory {
+    /// Open only a member of the pinned generation, with no extraction or native-path fallback.
+    fn get_file_handle(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<
+        std::sync::Arc<dyn tantivy::directory::FileHandle>,
+        tantivy::directory::error::OpenReadError,
+    > {
+        use tantivy::directory::error::OpenReadError;
+        let name =
+            Self::name(path).map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))?;
+        self.0
+            .check()
+            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))?;
+        if !self
+            .0
+            .exists(&name)
+            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))?
+        {
+            return Err(OpenReadError::FileDoesNotExist(path.to_owned()));
+        }
+        self.0
+            .open(&name)
+            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))
+    }
+    /// An immutable generation cannot be deleted through a reader.
+    fn delete(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<(), tantivy::directory::error::DeleteError> {
+        Err(tantivy::directory::error::DeleteError::IoError {
+            io_error: std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only generation",
+            )),
+            filepath: path.to_owned(),
+        })
+    }
+    /// Check admitted membership only, rechecking the actual source lease.
+    fn exists(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<bool, tantivy::directory::error::OpenReadError> {
+        use tantivy::directory::error::OpenReadError;
+        let name =
+            Self::name(path).map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))?;
+        self.0
+            .check()
+            .and_then(|()| self.0.exists(&name))
+            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))
+    }
+    /// Writers must use the existing native generation owner, never this read-only directory.
+    fn open_write(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<tantivy::directory::WritePtr, tantivy::directory::error::OpenWriteError>
+    {
+        Err(tantivy::directory::error::OpenWriteError::wrap_io_error(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "read-only generation"),
+            path.to_owned(),
+        ))
+    }
+    /// Read bounded native control components under the retained reader envelope.
+    fn atomic_read(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Vec<u8>, tantivy::directory::error::OpenReadError> {
+        use tantivy::directory::error::OpenReadError;
+        let handle = self.get_file_handle(path)?;
+        if handle.len() > FRAME_BYTES {
+            return Err(OpenReadError::wrap_io_error(
+                std::io::Error::other("index control component exceeds byte budget"),
+                path.to_owned(),
+            ));
+        }
+        handle
+            .read_bytes(0..handle.len())
+            .map(|v| v.to_vec())
+            .map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))
+    }
+    /// Refuse mutations, including lockfile creation.
+    fn atomic_write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "read-only generation",
+        ))
+    }
+    /// No writes exist to synchronize; current-source validation still applies.
+    fn sync_directory(&self) -> std::io::Result<()> {
+        self.0.check().map_err(std::io::Error::other)
+    }
+    /// Immutable native providers already pin every component against collection.
+    /// A metadata lock retains that actual lease; writer or unknown locks remain refused.
+    fn acquire_lock(
+        &self,
+        lock: &tantivy::directory::Lock,
+    ) -> std::result::Result<tantivy::directory::DirectoryLock, tantivy::directory::error::LockError>
+    {
+        if lock.filepath != tantivy::directory::META_LOCK.filepath {
+            return Err(tantivy::directory::error::LockError::IoError(
+                std::sync::Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "read-only generation",
+                )),
+            ));
+        }
+        self.0.check().map_err(|e| {
+            tantivy::directory::error::LockError::IoError(std::sync::Arc::new(
+                std::io::Error::other(e),
+            ))
+        })?;
+        Ok(Box::new(self.0.clone()).into())
+    }
+    /// Frozen generations use manual reload; no watcher thread or mutable pointer is created.
+    fn watch(
+        &self,
+        _: tantivy::directory::WatchCallback,
+    ) -> tantivy::Result<tantivy::directory::WatchHandle> {
+        Ok(tantivy::directory::WatchHandle::empty())
+    }
+}
+
+/// Owned range cursor for canonical source/representation verification and bounded scans.
+pub(crate) struct RangeReader {
+    slice: tantivy::directory::FileSlice,
+    position: u64,
+}
+impl RangeReader {
+    /// Slice a held range before any read. Checked extents cannot reach neighbouring entries.
+    pub(crate) fn new(
+        handle: std::sync::Arc<dyn tantivy::directory::FileHandle>,
+        range: Option<&ByteRange>,
+    ) -> Result<Self> {
+        let slice = tantivy::directory::FileSlice::new(handle);
+        let slice = if let Some(range) = range {
+            if range.end < range.start || range.end > slice.len() as u64 {
+                return Err(error("stale", "source range changed"));
+            }
+            slice.slice(range.start as usize..range.end as usize)
+        } else {
+            slice
+        };
+        Ok(Self { slice, position: 0 })
+    }
+}
+impl std::io::Read for RangeReader {
+    /// Read only the requested bounded window; do not materialize the whole source.
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let count = output.len().min(self.slice.len() - self.position as usize);
+        if count == 0 {
+            return Ok(0);
+        }
+        let bytes = self
+            .slice
+            .read_bytes_slice(self.position as usize..self.position as usize + count)?;
+        output[..count].copy_from_slice(&bytes);
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+impl Seek for RangeReader {
+    /// Refuse seeks outside the current verified entry.
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
+            SeekFrom::End(n) => self.slice.len() as i128 + i128::from(n),
+        };
+        if position < 0 || position > self.slice.len() as i128 {
+            return Err(std::io::Error::other("source seek outside range"));
+        }
+        self.position = position as u64;
+        Ok(self.position)
+    }
+}
 
 /// Fixed local view; MCP cannot change its root through a tool argument.
 pub struct Directory {

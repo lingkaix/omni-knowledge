@@ -1,0 +1,656 @@
+diff --git a/src/directory.rs b/src/directory.rs
+index 5c1aadd..76d13a2 100644
+--- a/src/directory.rs
++++ b/src/directory.rs
+@@ -8,6 +8,302 @@ use std::os::fd::{AsRawFd, FromRawFd};
+ use std::os::unix::ffi::{OsStrExt, OsStringExt};
+ use std::os::unix::fs::MetadataExt;
+ use std::path::{Path, PathBuf};
++use tantivy::HasLen;
++
++/// Owned, current-policy-checked byte directory supplied by a native host.
++/// Implementations retain their actual descriptors, generation pins and prepaid concurrent costs.
++/// Names and bytes are facts, not read grants; every open/read must check the live caller lease.
++/// Returned handles own that SAME lease, not a borrow into a finished callback.
++pub trait ByteDirectory: std::fmt::Debug + Send + Sync + 'static {
++    /// Recheck cancellation, current selection/policy and the held source version.
++    fn check(&self) -> Result<()>;
++    /// Open one confined component without reopening a display path or extracting an archive.
++    fn open(&self, name: &str) -> Result<std::sync::Arc<dyn tantivy::directory::FileHandle>>;
++    /// Test membership without probing paths outside this admitted directory.
++    fn exists(&self, name: &str) -> Result<bool>;
++}
++
++/// Immutable native generation over generic byte directories, using the SAME kernel query engine.
++/// The host prepays opaque reader/runtime plus buffer/table/output peaks before construction.
++#[derive(Clone)]
++pub struct SourceGeneration {
++    pub(crate) id: String,
++    pub(crate) manifest: std::sync::Arc<crate::store::Manifest>,
++    pub(crate) components: std::sync::Arc<dyn ByteDirectory>,
++    pub(crate) originals: std::sync::Arc<dyn ByteDirectory>,
++}
++impl SourceGeneration {
++    /// Open a bounded, integrity-checked native manifest and exact consuming machinery identity.
++    /// Optional package compatibility must be checked by its owner BEFORE this native format check.
++    pub fn open(
++        scope: &str,
++        generation: &str,
++        build_identity: &str,
++        components: std::sync::Arc<dyn ByteDirectory>,
++        originals: std::sync::Arc<dyn ByteDirectory>,
++        control: &Control,
++    ) -> Result<Self> {
++        control.check()?;
++        crate::store::validate_scope(scope)?;
++        components.check()?;
++        originals.check()?;
++        let handle = components.open("manifest.json")?;
++        if handle.len() > FRAME_BYTES {
++            return Err(error(
++                "resource-limited",
++                "generation manifest exceeds byte budget",
++            ));
++        }
++        let bytes = handle.read_bytes(0..handle.len()).map_err(io_error)?;
++        if digest(&bytes) != generation {
++            return Err(error(
++                "unavailable",
++                "committed manifest integrity failed; rebuild scope",
++            ));
++        }
++        let manifest: crate::store::Manifest = serde_json::from_slice(&bytes)
++            .map_err(|_| error("unavailable", "committed manifest invalid; rebuild scope"))?;
++        if manifest.scope != scope
++            || manifest.machinery != crate::store::consumer_machinery(build_identity)?
++        {
++            return Err(error(
++                "unavailable",
++                "index identity mismatch; rebuild scope",
++            ));
++        }
++        crate::store::validate_manifest(&manifest)?;
++        components.check()?;
++        originals.check()?;
++        control.check()?;
++        Ok(Self {
++            id: generation.to_owned(),
++            manifest: std::sync::Arc::new(manifest),
++            components,
++            originals,
++        })
++    }
++    /// Exact immutable native manifest identity. This value is not permission to read a source.
++    pub fn id(&self) -> &str {
++        &self.id
++    }
++    /// Search a current admitted view with the mature analyzer, ranking, verification and scanners.
++    pub fn search(&self, query: Query, control: &Control) -> Result<SearchResult> {
++        control.check()?;
++        self.components.check()?;
++        self.originals.check()?;
++        let result = crate::query::search_generation(self, query, &Budget::controlled(control))?;
++        self.components.check()?;
++        self.originals.check()?;
++        control.check()?;
++        Ok(result)
++    }
++}
++
++/// Tantivy's read-only Directory over actual owned range handles, never a writable fake filesystem.
++#[derive(Clone)]
++pub(crate) struct IndexDirectory(pub std::sync::Arc<dyn ByteDirectory>);
++impl std::fmt::Debug for IndexDirectory {
++    /// Do not disclose source names through native diagnostics.
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("PinnedIndexDirectory")
++    }
++}
++impl IndexDirectory {
++    /// Convert Tantivy's single component to its verified generation-relative name.
++    fn name(path: &Path) -> std::io::Result<String> {
++        if path.components().count() != 1
++            || !matches!(
++                path.components().next(),
++                Some(std::path::Component::Normal(_))
++            )
++        {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "invalid index component",
++            ));
++        }
++        let name = path
++            .to_str()
++            .ok_or_else(|| std::io::Error::other("non UTF-8 index component"))?;
++        Ok(format!("index/{name}"))
++    }
++}
++impl tantivy::directory::Directory for IndexDirectory {
++    /// Open only a member of the pinned generation, with no extraction or native-path fallback.
++    fn get_file_handle(
++        &self,
++        path: &Path,
++    ) -> std::result::Result<
++        std::sync::Arc<dyn tantivy::directory::FileHandle>,
++        tantivy::directory::error::OpenReadError,
++    > {
++        use tantivy::directory::error::OpenReadError;
++        let name =
++            Self::name(path).map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))?;
++        self.0
++            .check()
++            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))?;
++        if !self
++            .0
++            .exists(&name)
++            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))?
++        {
++            return Err(OpenReadError::FileDoesNotExist(path.to_owned()));
++        }
++        self.0
++            .open(&name)
++            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))
++    }
++    /// An immutable generation cannot be deleted through a reader.
++    fn delete(
++        &self,
++        path: &Path,
++    ) -> std::result::Result<(), tantivy::directory::error::DeleteError> {
++        Err(tantivy::directory::error::DeleteError::IoError {
++            io_error: std::sync::Arc::new(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "read-only generation",
++            )),
++            filepath: path.to_owned(),
++        })
++    }
++    /// Check admitted membership only, rechecking the actual source lease.
++    fn exists(
++        &self,
++        path: &Path,
++    ) -> std::result::Result<bool, tantivy::directory::error::OpenReadError> {
++        use tantivy::directory::error::OpenReadError;
++        let name =
++            Self::name(path).map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))?;
++        self.0
++            .check()
++            .and_then(|()| self.0.exists(&name))
++            .map_err(|e| OpenReadError::wrap_io_error(std::io::Error::other(e), path.to_owned()))
++    }
++    /// Writers must use the existing native generation owner, never this read-only directory.
++    fn open_write(
++        &self,
++        path: &Path,
++    ) -> std::result::Result<tantivy::directory::WritePtr, tantivy::directory::error::OpenWriteError>
++    {
++        Err(tantivy::directory::error::OpenWriteError::wrap_io_error(
++            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "read-only generation"),
++            path.to_owned(),
++        ))
++    }
++    /// Read bounded native control components under the retained reader envelope.
++    fn atomic_read(
++        &self,
++        path: &Path,
++    ) -> std::result::Result<Vec<u8>, tantivy::directory::error::OpenReadError> {
++        use tantivy::directory::error::OpenReadError;
++        let handle = self.get_file_handle(path)?;
++        if handle.len() > FRAME_BYTES {
++            return Err(OpenReadError::wrap_io_error(
++                std::io::Error::other("index control component exceeds byte budget"),
++                path.to_owned(),
++            ));
++        }
++        handle
++            .read_bytes(0..handle.len())
++            .map(|v| v.to_vec())
++            .map_err(|e| OpenReadError::wrap_io_error(e, path.to_owned()))
++    }
++    /// Refuse mutations, including lockfile creation.
++    fn atomic_write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
++        Err(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "read-only generation",
++        ))
++    }
++    /// No writes exist to synchronize; current-source validation still applies.
++    fn sync_directory(&self) -> std::io::Result<()> {
++        self.0.check().map_err(std::io::Error::other)
++    }
++    /// Immutable native providers already pin every component against collection.
++    /// A metadata lock retains that actual lease; writer or unknown locks remain refused.
++    fn acquire_lock(
++        &self,
++        lock: &tantivy::directory::Lock,
++    ) -> std::result::Result<tantivy::directory::DirectoryLock, tantivy::directory::error::LockError>
++    {
++        if lock.filepath != tantivy::directory::META_LOCK.filepath {
++            return Err(tantivy::directory::error::LockError::IoError(
++                std::sync::Arc::new(std::io::Error::new(
++                    std::io::ErrorKind::PermissionDenied,
++                    "read-only generation",
++                )),
++            ));
++        }
++        self.0.check().map_err(|e| {
++            tantivy::directory::error::LockError::IoError(std::sync::Arc::new(
++                std::io::Error::other(e),
++            ))
++        })?;
++        Ok(Box::new(self.0.clone()).into())
++    }
++    /// Frozen generations use manual reload; no watcher thread or mutable pointer is created.
++    fn watch(
++        &self,
++        _: tantivy::directory::WatchCallback,
++    ) -> tantivy::Result<tantivy::directory::WatchHandle> {
++        Ok(tantivy::directory::WatchHandle::empty())
++    }
++}
++
++/// Owned range cursor for canonical source/representation verification and bounded scans.
++pub(crate) struct RangeReader {
++    slice: tantivy::directory::FileSlice,
++    position: u64,
++}
++impl RangeReader {
++    /// Slice a held range before any read. Checked extents cannot reach neighbouring entries.
++    pub(crate) fn new(
++        handle: std::sync::Arc<dyn tantivy::directory::FileHandle>,
++        range: Option<&ByteRange>,
++    ) -> Result<Self> {
++        let slice = tantivy::directory::FileSlice::new(handle);
++        let slice = if let Some(range) = range {
++            if range.end < range.start || range.end > slice.len() as u64 {
++                return Err(error("stale", "source range changed"));
++            }
++            slice.slice(range.start as usize..range.end as usize)
++        } else {
++            slice
++        };
++        Ok(Self { slice, position: 0 })
++    }
++}
++impl std::io::Read for RangeReader {
++    /// Read only the requested bounded window; do not materialize the whole source.
++    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
++        let count = output.len().min(self.slice.len() - self.position as usize);
++        if count == 0 {
++            return Ok(0);
++        }
++        let bytes = self
++            .slice
++            .read_bytes_slice(self.position as usize..self.position as usize + count)?;
++        output[..count].copy_from_slice(&bytes);
++        self.position += count as u64;
++        Ok(count)
++    }
++}
++impl Seek for RangeReader {
++    /// Refuse seeks outside the current verified entry.
++    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
++        let position = match from {
++            SeekFrom::Start(n) => i128::from(n),
++            SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
++            SeekFrom::End(n) => self.slice.len() as i128 + i128::from(n),
++        };
++        if position < 0 || position > self.slice.len() as i128 {
++            return Err(std::io::Error::other("source seek outside range"));
++        }
++        self.position = position as u64;
++        Ok(self.position)
++    }
++}
+ 
+ /// Fixed local view; MCP cannot change its root through a tool argument.
+ pub struct Directory {
+diff --git a/src/lib.rs b/src/lib.rs
+index 3cd8a07..658a67f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,8 +5,9 @@ mod model;
+ mod query;
+ mod store;
+ mod text;
++pub use directory::{ByteDirectory, SourceGeneration};
+ pub use model::*;
+-pub use store::{GenerationPin, Kernel};
++pub use store::{GenerationFormat, GenerationPin, Kernel, consumer_machinery, generation_format};
+ pub use text::{Control, analyze, tokens};
+ 
+ #[cfg(test)]
+diff --git a/src/query.rs b/src/query.rs
+index 6f8ee1c..089e839 100644
+--- a/src/query.rs
++++ b/src/query.rs
+@@ -24,6 +24,48 @@ impl Kernel {
+     }
+     /// Run a query under its request-local cancellation and wall budget.
+     pub(crate) fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
++        QueryContext::Native(self).search_inner(query, budget)
++    }
++}
++
++/// One query implementation for ordinary native and held generic generations.
++enum QueryContext<'a> {
++    Native(&'a Kernel),
++    Provided(&'a crate::directory::SourceGeneration),
++}
++/// Enter the same mature query implementation without fabricating a filesystem kernel.
++pub(crate) fn search_generation(
++    generation: &crate::directory::SourceGeneration,
++    query: Query,
++    budget: &Budget,
++) -> Result<SearchResult> {
++    QueryContext::Provided(generation).search_inner(query, budget)
++}
++/// Read/seek contract shared by native files and actual held source ranges.
++trait ReadSeek: Read + Seek {}
++impl<T: Read + Seek> ReadSeek for T {}
++impl QueryContext<'_> {
++    /// Pin exactly the selected generation, never a different latest pointer.
++    fn pin(&self, scope: &str) -> Result<Pin> {
++        match self {
++            Self::Native(kernel) => kernel.pin(scope),
++            Self::Provided(generation) if scope == generation.manifest.scope => {
++                generation.components.check()?;
++                generation.originals.check()?;
++                Ok(Pin::provided((*generation).clone()))
++            }
++            Self::Provided(_) => Err(error("unavailable", "selected generation scope mismatch")),
++        }
++    }
++    /// Only the native mutable store can retire unpinned generations.
++    fn collect(&self, scope: &str) -> Result<()> {
++        match self {
++            Self::Native(kernel) => kernel.collect(scope),
++            Self::Provided(_) => Ok(()),
++        }
++    }
++    /// Execute the unchanged kernel eligibility, analyzer, scanner and ranking pipeline.
++    fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
+         let regex = validate_query(&query)?;
+         let mut result = SearchResult {
+             generations: BTreeMap::new(),
+@@ -289,13 +331,48 @@ impl Kernel {
+         Ok(result)
+     }
+     /// Open direct canonical text or the exact immutable sidecar bound by this reader pin.
+-    fn representation(&self, pin: &Pin, record: &Record, current: &Document) -> Result<TextFile> {
+-        match &record.document.content {
++    fn representation(
++        &self,
++        pin: &Pin,
++        record: &Record,
++        current: &Document,
++    ) -> Result<Box<dyn ReadSeek>> {
++        if let Some(provider) = &pin.provider {
++            provider.components.check()?;
++            provider.originals.check()?;
++            let (directory, name, range) = if let Some(sidecar) = &record.sidecar {
++                (&provider.components, sidecar.as_str(), None)
++            } else {
++                match &record.document.content {
++                    Content::Text { path, range } => {
++                        (&provider.originals, path.as_str(), range.as_ref())
++                    }
++                    Content::Representation { path, .. } => {
++                        (&provider.originals, path.as_str(), None)
++                    }
++                    Content::InlineText { .. } => {
++                        return Ok(Box::new(match &current.content {
++                            Content::InlineText { text } => TextFile::inline(text)?,
++                            _ => return Err(error("stale", "canonical text handle changed")),
++                        }));
++                    }
++                    _ => return Err(error("unavailable", "canonical source unavailable")),
++                }
++            };
++            return Ok(Box::new(crate::directory::RangeReader::new(
++                directory.open(name)?,
++                range,
++            )?));
++        }
++        let Self::Native(kernel) = self else {
++            return Err(error("unavailable", "generation provider missing"));
++        };
++        let file = match &record.document.content {
+             Content::Text { path, range } => {
+-                TextFile::new(open_source(&self.source, path)?, range.as_ref())
++                TextFile::new(open_source(&kernel.source, path)?, range.as_ref())
+             }
+             Content::Representation { path, .. } => {
+-                TextFile::new(open_source(&self.source, path)?, None)
++                TextFile::new(open_source(&kernel.source, path)?, None)
+             }
+             Content::InlineText { .. } => match &current.content {
+                 Content::InlineText { text } => TextFile::inline(text),
+@@ -318,7 +395,8 @@ impl Kernel {
+                 TextFile::new(file, None)
+             }
+             Content::Unavailable => Err(error("unavailable", "canonical source unavailable")),
+-        }
++        }?;
++        Ok(Box::new(file))
+     }
+     /// Verify the pinned representation before admitting any hit, then repeat after scans.
+     fn verify(
+@@ -406,7 +484,7 @@ pub(crate) fn validate_query(query: &Query) -> Result<Option<RegexMatcher>> {
+ }
+ /// Build an ordinary any-term query; source language fields use their own matching analyzer.
+ fn lexical(
+-    kernel: &Kernel,
++    kernel: &QueryContext<'_>,
+     pin: &Pin,
+     query: &Query,
+     usable: &BTreeSet<usize>,
+@@ -414,7 +492,13 @@ fn lexical(
+     result: &mut SearchResult,
+     budget: &Budget,
+ ) -> Result<()> {
+-    let index = Index::open_in_dir(pin.path.join("index")).map_err(|_| {
++    let index = match &pin.provider {
++        Some(provider) => Index::open(crate::directory::IndexDirectory(
++            provider.components.clone(),
++        )),
++        None => Index::open_in_dir(pin.path.join("index")),
++    }
++    .map_err(|_| {
+         error(
+             "unavailable",
+             "committed lexical index unavailable; rebuild scope",
+@@ -499,7 +583,11 @@ fn lexical(
+             ));
+         }
+     }
+-    let reader = index.reader().map_err(io_error)?;
++    let reader = index
++        .reader_builder()
++        .reload_policy(tantivy::ReloadPolicy::Manual)
++        .try_into()
++        .map_err(io_error)?;
+     let searcher = reader.searcher();
+     let count = usize::try_from(searcher.num_docs()).map_err(io_error)?;
+     if count == 0 {
+diff --git a/src/store.rs b/src/store.rs
+index 1c5eae6..8164010 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -19,6 +19,93 @@ pub(crate) fn machinery() -> String {
+ /// Identity-only phase-1 processor; changes require fresh representations.
+ pub(crate) const PROCESSOR: &str = "identity-markdown-v1";
+ 
++/// Native frozen-generation format facts supplied by the actual consuming kernel.
++/// These are compatibility data, never source authority or a manifest-selected processor.
++#[derive(Clone, Debug)]
++pub struct GenerationFormat {
++    /// Schema, processor, dictionary, upstream machinery and consuming-build binding.
++    pub kernel_build: String,
++    /// Exact pinned lexical storage format/schema.
++    pub lexical_format: &'static str,
++    /// Exact immutable vector-segment format, not a claim that vectors were built.
++    pub segment_format: &'static str,
++    /// Actual representation processor fingerprint.
++    pub processor: &'static str,
++    /// Actual packaged dictionary fingerprint.
++    pub dictionary: &'static str,
++}
++/// Return native consumer identities without trusting a producer's compatible flag.
++pub fn generation_format(identity: &str) -> Result<GenerationFormat> {
++    Ok(GenerationFormat {
++        kernel_build: consumer_machinery(identity)?,
++        lexical_format: "tantivy-0.26.2-schema5",
++        segment_format: "exact-f32le-v1",
++        processor: PROCESSOR,
++        dictionary: DICTIONARY_SHA256,
++    })
++}
++
++/// Exact native machinery binding for generic generation consumers, not source authorization.
++pub fn consumer_machinery(identity: &str) -> Result<String> {
++    if identity.is_empty() || identity.len() > 4096 {
++        return Err(error("invalid-request", "invalid consuming build identity"));
++    }
++    Ok(digest(
++        format!("{};consumer={identity}", machinery()).as_bytes(),
++    ))
++}
++
++/// Validate the bounded inventory and representation coordinates identically for every backend.
++pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
++    validate_view(
++        &ScopeView {
++            scope: manifest.scope.clone(),
++            unavailable_objects: manifest.unavailable_objects,
++            documents: manifest
++                .documents
++                .iter()
++                .map(|r| r.document.clone())
++                .collect(),
++        },
++        false,
++    )
++    .map_err(|_| error("unavailable", "committed inventory invalid; rebuild scope"))?;
++    for record in &manifest.documents {
++        let ceiling = if record.sidecar.is_some() {
++            SIDECAR_BYTES as u64
++        } else if let Content::Representation { size, .. } = &record.document.content {
++            *size
++        } else {
++            record.document.size
++        };
++        if !["zh", "ja", "unicode"].contains(&record.language.as_str())
++            || record.units.len() > 256
++            || record
++                .units
++                .iter()
++                .any(|u| u.end < u.start || u.end > ceiling)
++            || record
++                .sidecar
++                .as_ref()
++                .is_some_and(|p| *p != cache_path(&record.document, &record.representation_digest))
++            || (record.sidecar.is_none()
++                && matches!(
++                    record.document.content,
++                    Content::Text { .. }
++                        | Content::InlineText { .. }
++                        | Content::Representation { .. }
++                )
++                && record.units != text_units(&record.document))
++        {
++            return Err(error(
++                "unavailable",
++                "committed representation identity invalid; rebuild scope",
++            ));
++        }
++    }
++    Ok(())
++}
++
+ /// All members of a committed scope generation are bound by this manifest.
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ pub(crate) struct Manifest {
+@@ -51,7 +138,21 @@ pub(crate) struct Pin {
+     pub id: String,
+     pub path: PathBuf,
+     pub manifest: Manifest,
+-    _lock: LockFile,
++    pub(crate) provider: Option<crate::directory::SourceGeneration>,
++    _lock: Option<LockFile>,
++}
++
++impl Pin {
++    /// Retain the actual owned generic provider through the last native reader and result build.
++    pub(crate) fn provided(provider: crate::directory::SourceGeneration) -> Self {
++        Self {
++            id: provider.id.clone(),
++            path: PathBuf::new(),
++            manifest: (*provider.manifest).clone(),
++            provider: Some(provider),
++            _lock: None,
++        }
++    }
+ }
+ 
+ /// Native immutable generation reader lease, not a path or permission grant.
+@@ -146,56 +247,13 @@ impl Kernel {
+                 "index identity mismatch; rebuild scope",
+             ));
+         }
+-        validate_view(
+-            &ScopeView {
+-                scope: manifest.scope.clone(),
+-                unavailable_objects: manifest.unavailable_objects,
+-                documents: manifest
+-                    .documents
+-                    .iter()
+-                    .map(|r| r.document.clone())
+-                    .collect(),
+-            },
+-            false,
+-        )
+-        .map_err(|_| error("unavailable", "committed inventory invalid; rebuild scope"))?;
+-        for record in &manifest.documents {
+-            let ceiling = if record.sidecar.is_some() {
+-                SIDECAR_BYTES as u64
+-            } else if let Content::Representation { size, .. } = &record.document.content {
+-                *size
+-            } else {
+-                record.document.size
+-            };
+-            if !["zh", "ja", "unicode"].contains(&record.language.as_str())
+-                || record.units.len() > 256
+-                || record
+-                    .units
+-                    .iter()
+-                    .any(|u| u.end < u.start || u.end > ceiling)
+-                || record.sidecar.as_ref().is_some_and(|p| {
+-                    *p != cache_path(&record.document, &record.representation_digest)
+-                })
+-                || (record.sidecar.is_none()
+-                    && matches!(
+-                        record.document.content,
+-                        Content::Text { .. }
+-                            | Content::InlineText { .. }
+-                            | Content::Representation { .. }
+-                    )
+-                    && record.units != text_units(&record.document))
+-            {
+-                return Err(error(
+-                    "unavailable",
+-                    "committed representation identity invalid; rebuild scope",
+-                ));
+-            }
+-        }
++        validate_manifest(&manifest)?;
+         Ok(Pin {
+             id,
+             path: generation,
+             manifest,
+-            _lock: reader,
++            provider: None,
++            _lock: Some(reader),
+         })
+     }
+     /// Inspect the committed pointer without opening another scope or canonical content.

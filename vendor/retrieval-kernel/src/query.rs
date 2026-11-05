@@ -24,6 +24,48 @@ impl Kernel {
     }
     /// Run a query under its request-local cancellation and wall budget.
     pub(crate) fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
+        QueryContext::Native(self).search_inner(query, budget)
+    }
+}
+
+/// One query implementation for ordinary native and held generic generations.
+enum QueryContext<'a> {
+    Native(&'a Kernel),
+    Provided(&'a crate::directory::SourceGeneration),
+}
+/// Enter the same mature query implementation without fabricating a filesystem kernel.
+pub(crate) fn search_generation(
+    generation: &crate::directory::SourceGeneration,
+    query: Query,
+    budget: &Budget,
+) -> Result<SearchResult> {
+    QueryContext::Provided(generation).search_inner(query, budget)
+}
+/// Read/seek contract shared by native files and actual held source ranges.
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+impl QueryContext<'_> {
+    /// Pin exactly the selected generation, never a different latest pointer.
+    fn pin(&self, scope: &str) -> Result<Pin> {
+        match self {
+            Self::Native(kernel) => kernel.pin(scope),
+            Self::Provided(generation) if scope == generation.manifest.scope => {
+                generation.components.check()?;
+                generation.originals.check()?;
+                Ok(Pin::provided((*generation).clone()))
+            }
+            Self::Provided(_) => Err(error("unavailable", "selected generation scope mismatch")),
+        }
+    }
+    /// Only the native mutable store can retire unpinned generations.
+    fn collect(&self, scope: &str) -> Result<()> {
+        match self {
+            Self::Native(kernel) => kernel.collect(scope),
+            Self::Provided(_) => Ok(()),
+        }
+    }
+    /// Execute the unchanged kernel eligibility, analyzer, scanner and ranking pipeline.
+    fn search_inner(&self, query: Query, budget: &Budget) -> Result<SearchResult> {
         let regex = validate_query(&query)?;
         let mut result = SearchResult {
             generations: BTreeMap::new(),
@@ -289,13 +331,48 @@ impl Kernel {
         Ok(result)
     }
     /// Open direct canonical text or the exact immutable sidecar bound by this reader pin.
-    fn representation(&self, pin: &Pin, record: &Record, current: &Document) -> Result<TextFile> {
-        match &record.document.content {
+    fn representation(
+        &self,
+        pin: &Pin,
+        record: &Record,
+        current: &Document,
+    ) -> Result<Box<dyn ReadSeek>> {
+        if let Some(provider) = &pin.provider {
+            provider.components.check()?;
+            provider.originals.check()?;
+            let (directory, name, range) = if let Some(sidecar) = &record.sidecar {
+                (&provider.components, sidecar.as_str(), None)
+            } else {
+                match &record.document.content {
+                    Content::Text { path, range } => {
+                        (&provider.originals, path.as_str(), range.as_ref())
+                    }
+                    Content::Representation { path, .. } => {
+                        (&provider.originals, path.as_str(), None)
+                    }
+                    Content::InlineText { .. } => {
+                        return Ok(Box::new(match &current.content {
+                            Content::InlineText { text } => TextFile::inline(text)?,
+                            _ => return Err(error("stale", "canonical text handle changed")),
+                        }));
+                    }
+                    _ => return Err(error("unavailable", "canonical source unavailable")),
+                }
+            };
+            return Ok(Box::new(crate::directory::RangeReader::new(
+                directory.open(name)?,
+                range,
+            )?));
+        }
+        let Self::Native(kernel) = self else {
+            return Err(error("unavailable", "generation provider missing"));
+        };
+        let file = match &record.document.content {
             Content::Text { path, range } => {
-                TextFile::new(open_source(&self.source, path)?, range.as_ref())
+                TextFile::new(open_source(&kernel.source, path)?, range.as_ref())
             }
             Content::Representation { path, .. } => {
-                TextFile::new(open_source(&self.source, path)?, None)
+                TextFile::new(open_source(&kernel.source, path)?, None)
             }
             Content::InlineText { .. } => match &current.content {
                 Content::InlineText { text } => TextFile::inline(text),
@@ -318,7 +395,8 @@ impl Kernel {
                 TextFile::new(file, None)
             }
             Content::Unavailable => Err(error("unavailable", "canonical source unavailable")),
-        }
+        }?;
+        Ok(Box::new(file))
     }
     /// Verify the pinned representation before admitting any hit, then repeat after scans.
     fn verify(
@@ -406,7 +484,7 @@ pub(crate) fn validate_query(query: &Query) -> Result<Option<RegexMatcher>> {
 }
 /// Build an ordinary any-term query; source language fields use their own matching analyzer.
 fn lexical(
-    kernel: &Kernel,
+    kernel: &QueryContext<'_>,
     pin: &Pin,
     query: &Query,
     usable: &BTreeSet<usize>,
@@ -414,7 +492,13 @@ fn lexical(
     result: &mut SearchResult,
     budget: &Budget,
 ) -> Result<()> {
-    let index = Index::open_in_dir(pin.path.join("index")).map_err(|_| {
+    let index = match &pin.provider {
+        Some(provider) => Index::open(crate::directory::IndexDirectory(
+            provider.components.clone(),
+        )),
+        None => Index::open_in_dir(pin.path.join("index")),
+    }
+    .map_err(|_| {
         error(
             "unavailable",
             "committed lexical index unavailable; rebuild scope",
@@ -499,7 +583,11 @@ fn lexical(
             ));
         }
     }
-    let reader = index.reader().map_err(io_error)?;
+    let reader = index
+        .reader_builder()
+        .reload_policy(tantivy::ReloadPolicy::Manual)
+        .try_into()
+        .map_err(io_error)?;
     let searcher = reader.searcher();
     let count = usize::try_from(searcher.num_docs()).map_err(io_error)?;
     if count == 0 {

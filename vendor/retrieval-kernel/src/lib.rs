@@ -5,8 +5,9 @@ mod model;
 mod query;
 mod store;
 mod text;
+pub use directory::{ByteDirectory, SourceGeneration};
 pub use model::*;
-pub use store::{GenerationPin, Kernel};
+pub use store::{GenerationFormat, GenerationPin, Kernel, consumer_machinery, generation_format};
 pub use text::{Control, analyze, tokens};
 
 #[cfg(test)]
