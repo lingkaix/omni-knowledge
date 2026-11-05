@@ -9,9 +9,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+mod rows;
+pub use rows::VectorBuildPlan;
+use rows::{JsonBuffer, Output, hash_file, read_row};
 
 /// Exact baseline metric. Unknown metrics cannot silently reuse cosine data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,14 +55,20 @@ pub struct VectorRow {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
+    format_version: u32,
     identity: ModelIdentity,
-    rows: Vec<RowMeta>,
+    rows: u64,
+    metadata_sha256: String,
+    metadata_bytes: u64,
+    max_row_bytes: u64,
     segment_sha256: String,
     segment_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RowMeta {
     source_id: String,
     source_digest: String,
@@ -75,11 +84,17 @@ struct NativeReader {
     root: File,
     directory: File,
     segment: File,
+    metadata: File,
+    metadata_stamp: NativeStamp,
     pin: File,
     segment_bytes: u64,
 }
 impl NativeReader {
-    fn open(root: &Path, generation: &str, created: Option<File>) -> Result<Self, VectorError> {
+    fn open(
+        root: &Path,
+        generation: &str,
+        created: Option<(File, File)>,
+    ) -> Result<Self, VectorError> {
         use std::os::unix::fs::OpenOptionsExt;
         let root = fs::OpenOptions::new()
             .read(true)
@@ -91,10 +106,14 @@ impl NativeReader {
         let directory = Self::component(&root, generation, true)?;
         let pin = Self::component(&directory, "READERS", false)?;
         fs2::FileExt::try_lock_shared(&pin).map_err(|_| VectorError::Pinned)?;
-        let segment = match created {
-            Some(file) => file,
-            None => Self::component(&directory, "segment.bin", false)?,
+        let (segment, metadata) = match created {
+            Some(files) => files,
+            None => (
+                Self::component(&directory, "segment.bin", false)?,
+                Self::component(&directory, "rows.bin", false)?,
+            ),
         };
+        let metadata_stamp = NativeStamp::of(&metadata)?;
         if !segment.metadata().map_err(io)?.is_file() {
             return Err(VectorError::Identity("nonregular vector segment".into()));
         }
@@ -103,6 +122,8 @@ impl NativeReader {
             root,
             directory,
             segment,
+            metadata,
+            metadata_stamp,
             pin,
             segment_bytes,
         };
@@ -126,6 +147,10 @@ impl NativeReader {
         Self::entry(&self.root, generation, &self.directory)?;
         Self::entry(&self.directory, "READERS", &self.pin)?;
         Self::entry(&self.directory, "segment.bin", &self.segment)?;
+        Self::entry(&self.directory, "rows.bin", &self.metadata)?;
+        if NativeStamp::of(&self.metadata)? != self.metadata_stamp {
+            return Err(invalid("vector metadata version drift"));
+        }
         if self.segment.metadata().map_err(io)?.len() != self.segment_bytes {
             return Err(VectorError::Identity("vector segment length drift".into()));
         }
@@ -149,6 +174,27 @@ impl NativeReader {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct NativeStamp(u64, u64, u64, i64, i64, i64, i64);
+impl NativeStamp {
+    fn of(file: &File) -> Result<Self, VectorError> {
+        use std::os::unix::fs::MetadataExt;
+        let m = file.metadata().map_err(io)?;
+        if !m.is_file() {
+            return Err(invalid("nonregular row metadata"));
+        }
+        Ok(Self(
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        ))
+    }
+}
+
 pub struct VectorStore {
     _root: PathBuf,
     generation: String,
@@ -160,7 +206,8 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
-    /// Build a private generation and switch the current pointer only after the segment is complete.
+    /// Compatibility input slice; native producers use the owned, bounded stream below.
+    /// The caller retains separate input-buffer funding if it keeps the borrowed slice.
     pub fn build(
         root: &Path,
         identity: &ModelIdentity,
@@ -168,45 +215,59 @@ impl VectorStore {
         grant: &AccountGrant,
         deadline: Option<Instant>,
     ) -> Result<Self, VectorError> {
+        let plan = row_plan(rows)?;
+        Self::build_stream(
+            root,
+            identity,
+            &plan,
+            rows.iter().map(|row| {
+                if !valid_vector(identity, &row.vector) {
+                    return Err(VectorError::Vector(row.source_id.clone()));
+                }
+                Ok(row.clone())
+            }),
+            grant,
+            deadline,
+        )
+    }
+
+    /// Stream one admitted row at a time; neither float payload nor corpus metadata is assembled.
+    /// Plan facts grant nothing: the actual complete same-account envelope is consumed BEFORE IO.
+    /// This standalone CURRENT is a compatibility seam, not a native whole-tuple publisher.
+    pub fn build_stream<I>(
+        root: &Path,
+        identity: &ModelIdentity,
+        plan: &VectorBuildPlan,
+        rows: I,
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+    ) -> Result<Self, VectorError>
+    where
+        I: IntoIterator<Item = Result<VectorRow, VectorError>>,
+    {
         validate_identity(identity)?;
-        let bytes = (rows.len() as u64)
-            .checked_mul(identity.dimension as u64)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| VectorError::Identity("segment size overflow".into()))?;
-        let identity_bytes = [
-            &identity.provider,
-            &identity.model,
-            &identity.revision,
-            &identity.package_fingerprint,
-            &identity.embedding_space,
-            &identity.preprocessing,
-        ]
-        .iter()
-        .try_fold(4096u64, |sum, field| {
-            sum.checked_add((field.len() as u64).checked_mul(6)?)
-        })
-        .ok_or_else(|| VectorError::Identity("model metadata size overflow".into()))?;
-        let metadata_bound = rows
-            .iter()
-            .try_fold(identity_bytes, |total, row| {
-                let strings = (row.source_id.len() as u64)
-                    .checked_add(row.source_digest.len() as u64)?
-                    .checked_add(row.locator.len() as u64)?;
-                total.checked_add(strings.checked_mul(6)?.checked_add(256)?)
-            })
-            .ok_or_else(|| VectorError::Identity("metadata size overflow".into()))?;
-        let memory = bytes
-            .checked_add(
-                metadata_bound
-                    .checked_mul(8)
-                    .ok_or_else(|| VectorError::Identity("metadata size overflow".into()))?,
-            )
-            .and_then(|n| n.checked_add(32768))
-            .ok_or_else(|| VectorError::Identity("working size overflow".into()))?;
+        let row_bytes = (identity.dimension as u64)
+            .checked_mul(4)
+            .ok_or_else(|| invalid("row length overflow"))?;
+        let bytes = row_bytes
+            .checked_mul(plan.rows)
+            .ok_or_else(|| invalid("segment size overflow"))?;
+        if plan.max_row_bytes == 0 || plan.max_row_bytes > u32::MAX as u64 {
+            return Err(invalid("invalid row metadata frame plan"));
+        }
+        let header = identity_bound(identity)?;
+        let memory = plan
+            .max_row_bytes
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(row_bytes.checked_mul(4)?))
+            .and_then(|n| n.checked_add(header.checked_mul(8)?))
+            .and_then(|n| n.checked_add(65536))
+            .ok_or_else(|| invalid("complete working plan overflow"))?;
         let storage = bytes
-            .checked_add(metadata_bound)
-            .and_then(|n| n.checked_add(4096))
-            .ok_or_else(|| VectorError::Identity("storage size overflow".into()))?;
+            .checked_add(plan.metadata_bytes)
+            .and_then(|n| n.checked_add(header))
+            .and_then(|n| n.checked_add(65536))
+            .ok_or_else(|| invalid("complete storage plan overflow"))?;
         before_work(grant, memory, deadline).map_err(VectorError::Grant)?;
         grant.covers(memory, storage).map_err(VectorError::Grant)?;
         let mut work = grant.take().map_err(VectorError::Grant)?;
@@ -221,31 +282,30 @@ impl VectorStore {
                 .as_nanos()
         ));
         fs::create_dir(&stage).map_err(io)?;
-        let mut segment = {
-            use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(stage.join("segment.bin"))
-                .map_err(io)?
-        };
-        let mut segment_hash = Sha256::new();
-        let mut segment_bytes = 0u64;
-        let mut meta = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut payload = Output::new(create_component(&stage.join("segment.bin"))?, bytes);
+        let mut table = Output::new(
+            create_component(&stage.join("rows.bin"))?,
+            plan.metadata_bytes,
+        );
+        let mut encoder = JsonBuffer::new(plan.max_row_bytes)?;
+        let mut count = 0u64;
+        let mut maximum = 0u64;
         for row in rows {
             if deadline.is_some_and(|limit| Instant::now() >= limit) {
                 return Err(VectorError::Grant(GrantError::Deadline));
             }
-            if !seen.insert(row.source_id.clone()) {
-                return Err(VectorError::Identity("duplicate source id".into()));
+            if count >= plan.rows {
+                return Err(invalid("producer exceeded complete row count"));
             }
-            if !valid_vector(identity, &row.vector) {
-                return Err(VectorError::Vector(row.source_id.clone()));
+            let row = row?;
+            if !valid_vector(identity, &row.vector)
+                || row.source_id.is_empty()
+                || row.source_digest.len() != 64
+                || !row.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || row.locator.is_empty()
+            {
+                return Err(VectorError::Vector(row.source_id));
             }
-            let offset = segment_bytes;
             let mut row_hash = Sha256::new();
             let mut encoded = [0u8; 8192];
             for values in row.vector.chunks(encoded.len() / 4) {
@@ -253,55 +313,72 @@ impl VectorStore {
                     slot.copy_from_slice(&value.to_le_bytes());
                 }
                 let block = &encoded[..values.len() * 4];
-                write_funded(&mut segment, block, &mut work, deadline)?;
                 row_hash.update(block);
-                segment_hash.update(block);
-                segment_bytes = segment_bytes
-                    .checked_add(block.len() as u64)
-                    .ok_or_else(|| VectorError::Identity("segment size overflow".into()))?;
+                payload.push(block, &mut work, deadline)?;
             }
-            meta.push(RowMeta {
-                source_id: row.source_id.clone(),
-                source_digest: row.source_digest.clone(),
-                locator: row.locator.clone(),
-                offset,
+            let meta = RowMeta {
+                source_id: row.source_id,
+                source_digest: row.source_digest,
+                locator: row.locator,
+                offset: count
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| invalid("row offset overflow"))?,
                 sha256: format!("{:x}", row_hash.finalize()),
-            });
+            };
+            let frame = encoder.encode(&meta)?;
+            maximum = maximum.max(frame.len() as u64);
+            table.push(
+                &(u32::try_from(frame.len()).map_err(invalid)?).to_le_bytes(),
+                &mut work,
+                deadline,
+            )?;
+            table.push(frame, &mut work, deadline)?;
+            count += 1;
         }
-        segment.sync_all().map_err(io)?;
+        if count != plan.rows {
+            return Err(invalid("producer ended before complete row count"));
+        }
+        let (segment, segment_sha256, segment_bytes) = payload.finish(&mut work, deadline)?;
+        let (row_file, metadata_sha256, metadata_bytes) = table.finish(&mut work, deadline)?;
         let manifest = Manifest {
+            format_version: 2,
             identity: identity.clone(),
-            rows: meta,
-            segment_sha256: format!("{:x}", segment_hash.finalize()),
+            rows: count,
+            metadata_sha256,
+            metadata_bytes,
+            max_row_bytes: maximum,
+            segment_sha256,
             segment_bytes,
         };
-        let generation = sha256(serde_json::to_vec(&manifest).map_err(invalid)?.as_slice());
+        let metadata = serde_json::to_vec(&manifest).map_err(invalid)?;
+        if metadata.len() as u64 > header {
+            return Err(invalid("manifest exceeds complete plan"));
+        }
+        let generation = sha256(&metadata);
         let directory = root.join(&generation);
         if directory.exists() {
-            return Err(VectorError::Identity("generation already exists".into()));
+            return Err(invalid("generation already exists"));
         }
-        let metadata = serde_json::to_vec(&manifest).map_err(invalid)?;
-        let mut metadata_file = File::create(stage.join("manifest.json")).map_err(io)?;
+        let mut metadata_file = create_component(&stage.join("manifest.json"))?;
         write_funded(&mut metadata_file, &metadata, &mut work, deadline)?;
         metadata_file.sync_all().map_err(io)?;
         drop(metadata_file);
         drop(metadata);
-        let marker = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(stage.join("READERS"))
-            .map_err(io)?;
+        let marker = create_component(&stage.join("READERS"))?;
         marker.sync_all().map_err(io)?;
         drop(marker);
         fs::rename(&stage, &directory).map_err(io)?;
-        let native = NativeReader::open(root, &generation, Some(segment))?;
-        let current = root.join("CURRENT");
+        let native = NativeReader::open(root, &generation, Some((segment, row_file)))?;
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            return Err(VectorError::Grant(GrantError::Deadline));
+        }
         let temporary = root.join("CURRENT.next");
-        let mut pointer = File::create(&temporary).map_err(io)?;
+        let mut pointer = create_component(&temporary)?;
         write_funded(&mut pointer, generation.as_bytes(), &mut work, deadline)?;
         pointer.sync_all().map_err(io)?;
         drop(pointer);
-        fs::rename(&temporary, &current).map_err(io)?;
+        native.check(&generation)?;
+        fs::rename(&temporary, root.join("CURRENT")).map_err(io)?;
         Ok(Self {
             _root: root.to_path_buf(),
             generation,
@@ -366,27 +443,29 @@ impl VectorStore {
         if &manifest.identity != identity {
             return Err(VectorError::Identity("model identity mismatch".into()));
         }
-        let mut file = native.segment.try_clone().map_err(io)?;
-        let mut hash = Sha256::new();
-        let mut bytes = [0u8; 8192];
-        let mut total = 0u64;
-        loop {
-            let n = file.read(&mut bytes).map_err(io)?;
-            if n == 0 {
-                break;
-            }
-            total = total
-                .checked_add(n as u64)
-                .ok_or_else(|| VectorError::Identity("segment size overflow".into()))?;
-            if total > manifest.segment_bytes {
-                return Err(VectorError::Identity("segment length mismatch".into()));
-            }
-            hash.update(&bytes[..n]);
-        }
-        if total != manifest.segment_bytes
-            || format!("{:x}", hash.finalize()) != manifest.segment_sha256
+        if manifest.format_version != 2
+            || manifest.segment_bytes
+                != manifest
+                    .rows
+                    .checked_mul(identity.dimension as u64)
+                    .and_then(|n| n.checked_mul(4))
+                    .ok_or_else(|| invalid("manifest segment length overflow"))?
+            || (manifest.rows == 0 && (manifest.metadata_bytes != 0 || manifest.max_row_bytes != 0))
+            || (manifest.rows != 0 && manifest.max_row_bytes == 0)
         {
-            return Err(VectorError::Identity("segment hash mismatch".into()));
+            return Err(invalid("incompatible paged vector manifest"));
+        }
+        if reader_need(&manifest, 0)? > work.remaining().map_err(invalid)?.memory_bytes {
+            return Err(VectorError::Grant(GrantError::TooSmall));
+        }
+        if hash_file(&native.segment, manifest.segment_bytes, || {
+            native.check(&generation)
+        })? != manifest.segment_sha256
+            || hash_file(&native.metadata, manifest.metadata_bytes, || {
+                native.check(&generation)
+            })? != manifest.metadata_sha256
+        {
+            return Err(invalid("vector component hash mismatch"));
         }
         native.check(&generation)?;
         Ok(Self {
@@ -398,7 +477,8 @@ impl VectorStore {
         })
     }
 
-    /// Accept an already validated STORED payload. This does not open or extract a ZIP.
+    /// Compatibility byte-slice seam, NOT an archive reader or activation grant.
+    /// Decode just one paid row at a time; generic held archive IO is a separate adapter.
     pub fn import_stored(
         root: &Path,
         identity: &ModelIdentity,
@@ -406,107 +486,182 @@ impl VectorStore {
         segment: &[u8],
         grant: &AccountGrant,
     ) -> Result<Self, VectorError> {
-        if sha256(segment) != expected_segment(identity, rows)? {
-            return Err(VectorError::Identity(
-                "stored segment does not match the rows".into(),
-            ));
+        validate_identity(identity)?;
+        let row_bytes = identity
+            .dimension
+            .checked_mul(4)
+            .ok_or_else(|| invalid("row size overflow"))?;
+        if rows.len().checked_mul(row_bytes) != Some(segment.len()) {
+            return Err(invalid("stored segment length mismatch"));
         }
-        let mut owned = Vec::new();
-        for (row, chunk) in rows.iter().zip(segment.chunks(identity.dimension * 4)) {
-            let mut vector = Vec::new();
-            for bytes in chunk.chunks(4) {
-                let mut le = [0; 4];
-                le.copy_from_slice(bytes);
-                vector.push(f32::from_le_bytes(le));
+        let plan = row_plan(rows)?;
+        let mut checked = false;
+        let producer = rows.iter().enumerate().map(|(number, row)| {
+            if !checked {
+                if sha256(segment) != expected_segment(identity, rows)? {
+                    return Err(invalid("stored segment does not match the rows"));
+                }
+                checked = true;
             }
-            owned.push(VectorRow {
+            let start = number
+                .checked_mul(row_bytes)
+                .ok_or_else(|| invalid("row offset overflow"))?;
+            let vector = segment[start..start + row_bytes]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            Ok(VectorRow {
                 source_id: row.source_id.clone(),
                 source_digest: row.source_digest.clone(),
                 locator: row.locator.clone(),
                 vector,
-            });
-        }
-        Self::build(root, identity, &owned, grant, None)
+            })
+        });
+        Self::build_stream(root, identity, &plan, producer, grant, None)
     }
 
-    /// Rank eligible rows. Ineligible offsets are not read.
+    /// Rank DISTINCT eligible files by their best exact row, never limit fragments first.
     pub fn query(
         self,
         eligible: &BTreeSet<String>,
         query: &[f32],
     ) -> Result<VectorResult, VectorError> {
+        self.query_filtered(query, eligible.len().max(1), |source| {
+            Ok(eligible.contains(source))
+        })
+    }
+
+    /// Exact whole-corpus scan with paged metadata and bounded distinct-file output.
+    /// The predicate runs before any vector payload read/distance. A native caller must
+    /// supply actual current source/tag eligibility, not treat this data predicate as a grant.
+    pub fn query_filtered<F>(
+        self,
+        query: &[f32],
+        limit: usize,
+        mut eligible: F,
+    ) -> Result<VectorResult, VectorError>
+    where
+        F: FnMut(&str) -> Result<bool, VectorError>,
+    {
+        use std::os::unix::fs::FileExt;
         if !valid_vector(&self.manifest.identity, query) {
             return Err(VectorError::Vector("query".into()));
         }
+        if limit == 0 {
+            return Err(invalid("zero distinct-file limit"));
+        }
+        let maximum = limit.min(usize::try_from(self.manifest.rows).map_err(invalid)?);
+        if reader_need(&self.manifest, maximum)?
+            > self._work.remaining().map_err(invalid)?.memory_bytes
+        {
+            return Err(VectorError::Grant(GrantError::TooSmall));
+        }
+        self.native.check(&self.generation)?;
+        let file = self.native.segment.try_clone().map_err(io)?;
         let row_bytes = self
             .manifest
             .identity
             .dimension
             .checked_mul(4)
-            .ok_or_else(|| VectorError::Identity("row size overflow".into()))?;
-        let result_bytes = self
-            .manifest
-            .rows
-            .iter()
-            .try_fold(0u64, |sum, row| {
-                sum.checked_add(row.source_id.len() as u64 + 96)
-            })
-            .ok_or_else(|| VectorError::Identity("result size overflow".into()))?;
-        let resident = (self.manifest.rows.capacity() as u64)
-            .checked_mul(std::mem::size_of::<RowMeta>() as u64)
-            .and_then(|base| {
-                self.manifest.rows.iter().try_fold(base, |sum, row| {
-                    sum.checked_add(row.source_id.capacity() as u64)?
-                        .checked_add(row.source_digest.capacity() as u64)?
-                        .checked_add(row.locator.capacity() as u64)?
-                        .checked_add(row.sha256.capacity() as u64)
-                })
-            })
-            .ok_or_else(|| VectorError::Identity("resident metadata size overflow".into()))?;
-        let need = result_bytes
-            .checked_add(resident)
-            .ok_or_else(|| VectorError::Identity("query size overflow".into()))?
-            .checked_add(
-                (row_bytes as u64)
-                    .checked_mul(3)
-                    .ok_or_else(|| VectorError::Identity("row size overflow".into()))?,
-            )
-            .and_then(|n| n.checked_add(32768))
-            .ok_or_else(|| VectorError::Identity("query size overflow".into()))?;
-        if self._work.remaining().map_err(invalid)?.memory_bytes < need {
-            return Err(VectorError::Grant(GrantError::TooSmall));
-        }
-        self.native.check(&self.generation)?;
-        let mut file = self.native.segment.try_clone().map_err(io)?;
-        let mut ranked = Vec::new();
-        for row in &self.manifest.rows {
-            if !eligible.contains(&row.source_id) {
+            .ok_or_else(|| invalid("row size overflow"))?;
+        let mut winners = std::collections::BTreeMap::<String, (f32, RowMeta)>::new();
+        let mut order = BTreeSet::<RankKey>::new();
+        let mut offset = 0u64;
+        let mut bytes = vec![0; row_bytes];
+        for number in 0..self.manifest.rows {
+            self.native.check(&self.generation)?;
+            let row = read_row(
+                &self.native.metadata,
+                &mut offset,
+                self.manifest.metadata_bytes,
+                self.manifest.max_row_bytes,
+            )?;
+            self.native.check(&self.generation)?;
+            if row.offset
+                != number
+                    .checked_mul(row_bytes as u64)
+                    .ok_or_else(|| invalid("row offset overflow"))?
+                || row.sha256.len() != 64
+                || row.source_digest.len() != 64
+                || row.source_id.is_empty()
+                || row.locator.is_empty()
+            {
+                return Err(invalid("invalid paged row identity or order"));
+            }
+            if !eligible(&row.source_id)? {
                 continue;
             }
             self.native.check(&self.generation)?;
-            file.seek(SeekFrom::Start(row.offset)).map_err(io)?;
-            let mut bytes = vec![0; row_bytes];
-            file.read_exact(&mut bytes).map_err(io)?;
+            file.read_exact_at(&mut bytes, row.offset).map_err(io)?;
             self.native.check(&self.generation)?;
             if sha256(&bytes) != row.sha256 {
-                return Err(VectorError::Identity("eligible row hash mismatch".into()));
+                return Err(invalid("eligible row hash mismatch"));
             }
             let vector: Vec<f32> = bytes
-                .chunks(4)
-                .map(|chunk| {
-                    let mut le = [0; 4];
-                    le.copy_from_slice(chunk);
-                    f32::from_le_bytes(le)
-                })
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             if !valid_vector(&self.manifest.identity, &vector) {
-                return Err(VectorError::Vector(row.source_id.clone()));
+                return Err(VectorError::Vector(row.source_id));
             }
-            ranked.push((row.source_id.clone(), cosine(query, &vector)));
+            let score = cosine(query, &vector);
+            let rank = RankKey {
+                score,
+                source: row.source_id.clone(),
+            };
+            if let Some((old, _)) = winners.get(&row.source_id) {
+                if score.total_cmp(old) != std::cmp::Ordering::Greater {
+                    continue;
+                }
+                order.remove(&RankKey {
+                    score: *old,
+                    source: row.source_id.clone(),
+                });
+            } else if winners.len() == maximum {
+                let worst = order
+                    .first()
+                    .ok_or_else(|| invalid("rank table contradiction"))?;
+                if rank <= *worst {
+                    continue;
+                }
+                let removed = order
+                    .pop_first()
+                    .ok_or_else(|| invalid("rank table contradiction"))?;
+                winners.remove(&removed.source);
+            }
+            order.insert(rank);
+            winners.insert(row.source_id.clone(), (score, row));
         }
-        ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        if offset != self.manifest.metadata_bytes {
+            return Err(invalid("row count does not cover complete metadata"));
+        }
+        self.native.check(&self.generation)?;
+        let mut evidence = Vec::with_capacity(winners.len());
+        for (score, row) in winners.into_values() {
+            evidence.push(VectorEvidence {
+                source_id: row.source_id,
+                source_digest: row.source_digest,
+                locator: row.locator,
+                score,
+            });
+        }
+        evidence.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.source_id.cmp(&b.source_id))
+        });
+        let ranked = evidence
+            .iter()
+            .map(|hit| (hit.source_id.clone(), hit.score))
+            .collect();
         Ok(VectorResult {
             ranked,
+            evidence,
+            query: query.to_vec(),
             file,
             store: self,
         })
@@ -569,7 +724,7 @@ impl VectorStore {
         for entry in fs::read_dir(&directory).map_err(io)? {
             let entry = entry.map_err(io)?;
             if !entry.file_type().map_err(io)?.is_file()
-                || !["manifest.json", "segment.bin", "READERS"]
+                || !["manifest.json", "segment.bin", "rows.bin", "READERS"]
                     .iter()
                     .any(|name| entry.file_name() == *name)
             {
@@ -578,7 +733,7 @@ impl VectorStore {
                 ));
             }
         }
-        for name in ["manifest.json", "segment.bin", "READERS"] {
+        for name in ["manifest.json", "segment.bin", "rows.bin", "READERS"] {
             fs::remove_file(directory.join(name)).map_err(io)?;
         }
         fs::remove_dir(&directory).map_err(io)?;
@@ -587,6 +742,37 @@ impl VectorStore {
 
     pub fn generation(&self) -> &str {
         &self.generation
+    }
+}
+
+/// Best exact row for a ranked file; more locations stream through `visit_evidence`.
+#[derive(Clone, Debug)]
+pub struct VectorEvidence {
+    pub source_id: String,
+    pub source_digest: String,
+    pub locator: String,
+    pub score: f32,
+}
+struct RankKey {
+    score: f32,
+    source: String,
+}
+impl PartialEq for RankKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for RankKey {}
+impl PartialOrd for RankKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RankKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.source.cmp(&self.source))
     }
 }
 
@@ -603,6 +789,8 @@ impl VectorStore {
 /// ```
 pub struct VectorResult {
     ranked: Vec<(String, f32)>,
+    evidence: Vec<VectorEvidence>,
+    query: Vec<f32>,
     file: File,
     store: VectorStore,
 }
@@ -613,13 +801,79 @@ impl std::ops::Deref for VectorResult {
     }
 }
 impl VectorResult {
+    pub fn evidence(&self) -> &[VectorEvidence] {
+        &self.evidence
+    }
+    /// Stream all row locations of winning files under the same pin; the native
+    /// caller rechecks actual source scope before delivery and pays for collection.
+    pub fn visit_evidence(
+        &self,
+        mut visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
+    ) -> Result<(), VectorError> {
+        use std::os::unix::fs::FileExt;
+        let selected: BTreeSet<_> = self.ranked.iter().map(|(id, _)| id.as_str()).collect();
+        let mut offset = 0;
+        let mut bytes = vec![
+            0;
+            self.store
+                .manifest
+                .identity
+                .dimension
+                .checked_mul(4)
+                .ok_or_else(|| invalid("row size overflow"))?
+        ];
+        for _ in 0..self.store.manifest.rows {
+            self.store.native.check(&self.store.generation)?;
+            let row = read_row(
+                &self.store.native.metadata,
+                &mut offset,
+                self.store.manifest.metadata_bytes,
+                self.store.manifest.max_row_bytes,
+            )?;
+            self.store.native.check(&self.store.generation)?;
+            if !selected.contains(row.source_id.as_str()) {
+                continue;
+            }
+            self.file
+                .read_exact_at(&mut bytes, row.offset)
+                .map_err(io)?;
+            self.store.native.check(&self.store.generation)?;
+            if sha256(&bytes) != row.sha256 {
+                return Err(invalid("eligible evidence row hash mismatch"));
+            }
+            let vector: Vec<f32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            if !valid_vector(&self.store.manifest.identity, &vector) {
+                return Err(VectorError::Vector(row.source_id));
+            }
+            visit(&VectorEvidence {
+                source_id: row.source_id,
+                source_digest: row.source_digest,
+                locator: row.locator,
+                score: cosine(&self.query, &vector),
+            })?;
+            self.store.native.check(&self.store.generation)?;
+        }
+        if offset != self.store.manifest.metadata_bytes {
+            return Err(invalid("incomplete evidence metadata"));
+        }
+        Ok(())
+    }
     pub fn into_store(self) -> VectorStore {
         let Self {
             ranked,
+            evidence,
+            query,
             file,
             store,
         } = self;
         drop(ranked);
+        drop(evidence);
+        drop(query);
         drop(file);
         store
     }
@@ -690,6 +944,73 @@ fn write_funded(
         bytes = &bytes[n..];
     }
     Ok(())
+}
+
+fn row_plan(rows: &[VectorRow]) -> Result<VectorBuildPlan, VectorError> {
+    let mut metadata_bytes = 0u64;
+    let mut max_row_bytes = 1u64;
+    for row in rows {
+        let strings = (row.source_id.len() as u64)
+            .checked_add(row.source_digest.len() as u64)
+            .and_then(|n| n.checked_add(row.locator.len() as u64))
+            .ok_or_else(|| invalid("row size overflow"))?;
+        let bound = strings
+            .checked_mul(6)
+            .and_then(|n| n.checked_add(384))
+            .ok_or_else(|| invalid("row size overflow"))?;
+        metadata_bytes = metadata_bytes
+            .checked_add(bound)
+            .and_then(|n| n.checked_add(4))
+            .ok_or_else(|| invalid("metadata size overflow"))?;
+        max_row_bytes = max_row_bytes.max(bound);
+    }
+    Ok(VectorBuildPlan {
+        rows: rows.len() as u64,
+        metadata_bytes,
+        max_row_bytes,
+    })
+}
+
+fn create_component(path: &Path) -> Result<File, VectorError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+        .map_err(io)
+}
+fn identity_bound(identity: &ModelIdentity) -> Result<u64, VectorError> {
+    [
+        &identity.provider,
+        &identity.model,
+        &identity.revision,
+        &identity.package_fingerprint,
+        &identity.embedding_space,
+        &identity.preprocessing,
+    ]
+    .iter()
+    .try_fold(4096u64, |sum, s| {
+        sum.checked_add((s.len() as u64).checked_mul(6)?)
+    })
+    .ok_or_else(|| invalid("identity serialization bound overflow"))
+}
+fn reader_need(manifest: &Manifest, files: usize) -> Result<u64, VectorError> {
+    manifest
+        .max_row_bytes
+        .checked_mul(10)
+        .and_then(|n| n.checked_add((manifest.identity.dimension as u64).checked_mul(16)?))
+        .and_then(|n| n.checked_add(identity_bound(&manifest.identity).ok()?.checked_mul(8)?))
+        .and_then(|n| {
+            n.checked_add(
+                (files as u64)
+                    .checked_mul(manifest.max_row_bytes.checked_mul(8)?.checked_add(256)?)?,
+            )
+        })
+        .and_then(|n| n.checked_add(65536))
+        .ok_or_else(|| invalid("complete reader plan overflow"))
 }
 
 fn expected_segment(identity: &ModelIdentity, rows: &[VectorRow]) -> Result<String, VectorError> {

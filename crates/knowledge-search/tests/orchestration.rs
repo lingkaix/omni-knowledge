@@ -284,6 +284,184 @@ fn declared_l2_contract_rejects_bad_rows_and_queries_without_changing_current() 
 }
 
 #[test]
+fn paged_vector_metadata_reopens_a_large_corpus_under_a_small_reader_envelope() {
+    let root = vector_root();
+    let rows: Vec<_> = (0..10_000)
+        .map(|n| VectorRow {
+            source_id: format!("source-{n:05}-{}", "x".repeat(32)),
+            source_digest: "dd".repeat(32),
+            locator: "line:1".into(),
+            vector: vec![1.0, 0.0],
+        })
+        .collect();
+    let selected = rows[123].source_id.clone();
+    let built = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    drop(rows); // Input buffers die while their complete original funding is still retained.
+    drop(built);
+    let reader = AccountGrant::reserve(
+        knowledge_core::jobs::Reservation {
+            memory_bytes: 2 * 1024 * 1024,
+            temporary_bytes: 0,
+        },
+        knowledge_core::admission::Origin::BeforeVerification,
+    )
+    .unwrap();
+    let reopened = VectorStore::open_funded(root.path(), &identity(), &reader)
+        .expect("corpus row metadata must be paged, not a resident JSON array");
+    let eligible = BTreeSet::from([selected.clone()]);
+    let result = reopened.query(&eligible, &[1.0, 0.0]).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, selected);
+}
+
+#[test]
+fn streaming_admission_refuses_before_advancing_the_real_producer_or_creating_a_root() {
+    let root = vector_root();
+    let destination = root.path().join("not-created");
+    let mut called = 0;
+    let producer = std::iter::from_fn(|| {
+        called += 1;
+        Some(Ok(VectorRow {
+            source_id: "source".into(),
+            source_digest: "dd".repeat(32),
+            locator: "line:1".into(),
+            vector: vec![1.0, 0.0],
+        }))
+    });
+    let plan = knowledge_search::VectorBuildPlan {
+        rows: 1,
+        metadata_bytes: 1024,
+        max_row_bytes: 1024,
+    };
+    assert!(
+        VectorStore::build_stream(&destination, &identity(), &plan, producer, &grant(1), None)
+            .is_err()
+    );
+    assert_eq!(called, 0);
+    assert!(!destination.exists());
+}
+
+#[test]
+fn incomplete_or_unfunded_row_stream_never_replaces_the_complete_pointer() {
+    let root = vector_root();
+    let row = VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    };
+    drop(
+        VectorStore::build(
+            root.path(),
+            &identity(),
+            std::slice::from_ref(&row),
+            &grant(1024),
+            None,
+        )
+        .unwrap(),
+    );
+    let previous = fs::read(root.path().join("CURRENT")).unwrap();
+    let short = knowledge_search::VectorBuildPlan {
+        rows: 2,
+        metadata_bytes: 2048,
+        max_row_bytes: 1024,
+    };
+    assert!(
+        VectorStore::build_stream(
+            root.path(),
+            &identity(),
+            &short,
+            [Ok(row.clone())],
+            &grant(1024),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), previous);
+    let under = knowledge_search::VectorBuildPlan {
+        rows: 1,
+        metadata_bytes: 16,
+        max_row_bytes: 16,
+    };
+    assert!(
+        VectorStore::build_stream(
+            root.path(),
+            &identity(),
+            &under,
+            [Ok(row)],
+            &grant(1024),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), previous);
+}
+
+#[test]
+fn fragment_count_never_displaces_another_eligible_file_before_limit() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let rows = vec![
+        VectorRow {
+            source_id: "a".into(),
+            source_digest: "aa".repeat(32),
+            locator: "line:1".into(),
+            vector: vec![1.0, 0.0],
+        },
+        VectorRow {
+            source_id: "a".into(),
+            source_digest: "aa".repeat(32),
+            locator: "line:2".into(),
+            vector: vec![0.99, 0.1],
+        },
+        VectorRow {
+            source_id: "a".into(),
+            source_digest: "aa".repeat(32),
+            locator: "line:3".into(),
+            vector: vec![0.98, 0.2],
+        },
+        VectorRow {
+            source_id: "b".into(),
+            source_digest: "bb".repeat(32),
+            locator: "line:1".into(),
+            vector: vec![0.8, 0.6],
+        },
+    ];
+    let built = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let result = built
+        .query(&BTreeSet::from(["a".into(), "b".into()]), &[1.0, 0.0])
+        .unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].0, "a");
+    assert_eq!(result[1].0, "b");
+}
+
+#[test]
+fn distinct_fragment_evidence_streams_without_multiplying_the_file_rank() {
+    let root = vector_root();
+    let rows: Vec<_> = (1..=3)
+        .map(|n| VectorRow {
+            source_id: "a".into(),
+            source_digest: "aa".repeat(32),
+            locator: format!("line:{n}"),
+            vector: vec![1.0, 0.0],
+        })
+        .collect();
+    let built = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let result = built.query_filtered(&[1.0, 0.0], 1, |_| Ok(true)).unwrap();
+    assert_eq!(result.len(), 1);
+    let mut locations = Vec::new();
+    result
+        .visit_evidence(|hit| {
+            locations.push(hit.locator.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(locations, ["line:1", "line:2", "line:3"]);
+}
+
+#[test]
 fn actual_open_reader_keeps_its_generation_pinned_without_a_manual_marker() {
     let root = vector_root();
     let rows = vec![VectorRow {
