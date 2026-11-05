@@ -148,6 +148,21 @@ Use finite classified retries/backoff; offline waits for reconnect, invalid mode
 Publish only complete derived generations; interruption preserves the previous generation and truthful coverage.
 Interactive exact/regex scans use admitted text/representations, not BM25 candidates, and never synchronously extract a whole NAS.
 
+### Effective Resource Accounting
+
+Use one process-wide memory budget, defaulting to 50% of the physical memory available at process start.
+Every job reserves its memory before allocating; charge child-process, runtime, model, and reader-pinned memory to the job that caused those costs.
+Keep charges alive while their resources remain live, including after worker completion when readers still pin memory.
+When current reservations exhaust the budget, queue work with a visible `waiting for memory` state rather than refusing it or spinning.
+Refuse a single job whose required memory exceeds the whole effective budget with a typed error.
+Reserve generated storage before writing against the cache volume's available free space, retaining a floor of the greater of 2 GiB and 5% of that volume's capacity.
+Physical free-space observations do not themselves settle outstanding reservations or establish that a worker has stopped.
+Expose effective memory/storage budgets in status and over MCP, and permit configuration overrides.
+Retain existing per-format hostile-input ceilings; this policy introduces no whole-corpus cap.
+These are required product defaults and lifetimes, not a claim that a cooperative queue counter physically bounds an opaque processor.
+
+### Private Cache Placement And Lifetime
+
 Resolve an app-owned OS cache root outside every home, mount, cloud-sync folder, and external history store.
 If the OS cache root is synced/network-hosted, require an explicit local alternative.
 Revalidate overlap when mounts/locations change, rather than trusting only initial configuration.
