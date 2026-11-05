@@ -145,7 +145,7 @@ impl UnsettledChild {
         }
         if self.identity.start == 0 {
             self.identity =
-                process_identity(self.child.id()).map_err(|_| WorkerFailure::CleanupUnknown)?;
+                owned_identity(&self.child).map_err(|_| WorkerFailure::CleanupUnknown)?;
         }
         collect(&mut self.child, self.identity, Duration::from_secs(2))?;
         Ok(std::mem::take(&mut self.holdings))
@@ -234,7 +234,7 @@ pub(crate) fn run(
         .checked_add(timeout)
         .context("Worker deadline overflow")?;
     let mut child = command.spawn().context("Cannot start owned processor")?;
-    let identity = match process_identity(child.id()) {
+    let identity = match owned_identity(&child) {
         Ok(identity) => identity,
         Err(_) => {
             // Still unreaped, so the PID cannot be reused. Unknown identity is not successful cleanup.
@@ -283,7 +283,15 @@ pub(crate) fn run(
                 // Native exec/exit can briefly remove VmRSS before the zombie state is visible.
                 // Still poll I/O, cancellation and the deadline; never turn a missing sample into zero.
                 Err(_) if unseen_samples < 5 => unseen_samples += 1,
-                Err(_) => bail!(WorkerFailure::Unmeasured),
+                Err(error) => {
+                    if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                        eprintln!(
+                            "omni-native processor observation: pid={} start={} error={error}",
+                            identity.pid, identity.start
+                        );
+                    }
+                    bail!(WorkerFailure::Unmeasured)
+                }
             }
             stdout_done |= drain(&mut stdout, &mut output, cap)?;
             stderr_done |= drain(&mut stderr, &mut diagnostic, DIAGNOSTIC_CAP as usize)?;
@@ -445,15 +453,38 @@ fn exited(pid: u32) -> io::Result<bool> {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(info.si_pid() != 0)
+        let observed = info.si_pid();
+        if observed == 0 {
+            return Ok(false);
+        }
+        if observed != pid as libc::pid_t
+            || info.si_signo != libc::SIGCHLD
+            || !matches!(
+                info.si_code,
+                libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+            )
+        {
+            return Err(io::Error::other(
+                "Owned wait identity or exit status changed",
+            ));
+        }
+        Ok(true)
     }
+}
+
+/// Exact WNOWAIT exit pins this owned PID even when Darwin hides a zombie's BSD data.
+/// Missing information alone never authorizes signals, a zero-RSS sample or settlement.
+fn checked_leader_exit(identity: ProcessIdentity) -> io::Result<bool> {
+    let done = exited(identity.pid)?;
+    if !done && (identity.start == 0 || process_identity(identity.pid)?.start != identity.start) {
+        return Err(io::Error::other("Owned process identity changed"));
+    }
+    Ok(done)
 }
 
 /// Signal only the exact owned group while its original unreaped leader still pins the PID.
 fn signal_owned(identity: ProcessIdentity) -> io::Result<()> {
-    if process_identity(identity.pid)?.start != identity.start {
-        return Err(io::Error::other("Owned process identity changed"));
-    }
+    checked_leader_exit(identity)?;
     // SAFETY: process_group(0) created this group; its leader remains unreaped and identity was checked.
     if unsafe { libc::kill(-(identity.pid as i32), libc::SIGKILL) } != 0 {
         let error = io::Error::last_os_error();
@@ -470,6 +501,9 @@ fn collect(
     identity: ProcessIdentity,
     timeout: Duration,
 ) -> Result<(), WorkerFailure> {
+    if identity.pid != child.id() {
+        return Err(WorkerFailure::CleanupUnknown);
+    }
     drop(child.stdin.take());
     if child
         .stdout
@@ -521,6 +555,15 @@ fn collect(
             || signalled.is_err()
                 && matches!(observed, Err(ref e) if e.kind() == io::ErrorKind::PermissionDenied)
         {
+            if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                eprintln!(
+                    "omni-native processor collection: pid={} start={} observed={:?} signal_errno={:?}",
+                    identity.pid,
+                    identity.start,
+                    observed.as_ref().err(),
+                    signalled.as_ref().err().and_then(io::Error::raw_os_error)
+                );
+            }
             return Err(WorkerFailure::CleanupUnknown);
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -545,7 +588,7 @@ fn discard_to_eof(reader: &mut impl Read) -> io::Result<bool> {
 /// Explicit bounded collection for a child already created in its own process group.
 /// Unknown cleanup is an error; this function never asserts that an uncollected child stopped.
 pub fn settle(child: &mut Child) -> Result<(), WorkerFailure> {
-    let identity = process_identity(child.id()).map_err(|_| WorkerFailure::CleanupUnknown)?;
+    let identity = owned_identity(child).map_err(|_| WorkerFailure::CleanupUnknown)?;
     collect(child, identity, Duration::from_secs(2))
 }
 
@@ -667,6 +710,20 @@ fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     }
 }
 
+/// Capture only a real owned Child. An exact unreaped exit is the sole fallback
+/// when Darwin no longer supplies a short-lived child's BSD start identity.
+fn owned_identity(child: &Child) -> io::Result<ProcessIdentity> {
+    match process_identity(child.id()) {
+        Ok(identity) => Ok(identity),
+        #[cfg(target_os = "macos")]
+        Err(_) if exited(child.id())? => Ok(ProcessIdentity {
+            pid: child.id(),
+            start: 0,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 /// Current native resident set for public observers.
 pub fn resident_bytes(pid: u32) -> io::Result<u64> {
     #[cfg(target_os = "linux")]
@@ -732,9 +789,7 @@ fn macos_bsd(pid: u32) -> io::Result<libc::proc_bsdinfo> {
 /// macOS group observation stays bounded; native runner qualification is still required.
 #[cfg(target_os = "macos")]
 fn group_resident(identity: ProcessIdentity) -> io::Result<GroupSample> {
-    if process_identity(identity.pid)?.start != identity.start {
-        return Err(io::Error::other("Owned process identity changed"));
-    }
+    let done = checked_leader_exit(identity)?;
     let mut pids = [0i32; 4096];
     // SAFETY: fixed array passed to libproc for the one owned process group (PROC_PGRP_ONLY=2).
     let bytes = unsafe {
@@ -754,10 +809,25 @@ fn group_resident(identity: ProcessIdentity) -> io::Result<GroupSample> {
         if pid <= 0 {
             continue;
         }
-        let info = macos_bsd(pid as u32)?;
+        if done && pid as u32 == identity.pid {
+            continue;
+        }
+        let info = match macos_bsd(pid as u32) {
+            Ok(info) => info,
+            Err(_) if pid as u32 == identity.pid && exited(identity.pid)? => continue,
+            Err(error) => return Err(error),
+        };
+        if info.pbi_pgid != identity.pid {
+            return Err(io::Error::other("Owned group observation changed"));
+        }
         if info.pbi_status != 5 {
+            let resident = match resident_bytes(pid as u32) {
+                Ok(bytes) => bytes,
+                Err(_) if pid as u32 == identity.pid && exited(identity.pid)? => continue,
+                Err(error) => return Err(error),
+            };
             rss = rss
-                .checked_add(resident_bytes(pid as u32)?)
+                .checked_add(resident)
                 .ok_or_else(|| io::Error::other("RSS overflow"))?;
             live += 1;
         }

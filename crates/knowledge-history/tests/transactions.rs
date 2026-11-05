@@ -1255,7 +1255,7 @@ fn qualified_proposal_pages_diff_and_history_are_actual_git_reads() {
 /// Required-signing refusal keeps actual candidate bytes readable without creating an unsigned operation commit.
 #[test]
 fn signing_blocked_candidate_has_an_actual_bounded_read_side() {
-    let root = tempfile::tempdir().unwrap();
+    let root = canonical_tempdir();
     fs::create_dir(root.path().join("home")).unwrap();
     let admission = Admission::new();
     let mut context = owner(false);
@@ -1452,7 +1452,7 @@ fn actual_native_ssh_signing_verification_locked_missing_and_reopen() {
     use knowledge_history::{GitIdentity, KeyProtection, KnownSigner, SignatureState};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = canonical_tempdir();
     fs::create_dir(root.path().join("home")).unwrap();
     let admission = Admission::new();
     let mut context = owner(false);
@@ -1946,7 +1946,7 @@ fn user_worktree_git(repo: &Path, args: &[&str]) -> String {
 
 /// Real owned ordinary user repository, not imported host Git configuration.
 fn legacy_user_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-    let root = tempfile::tempdir().unwrap();
+    let root = canonical_tempdir();
     let home = root.path().join("home");
     let output = Command::new("/usr/bin/git")
         .env_clear()

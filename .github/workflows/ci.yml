@@ -42,6 +42,9 @@ jobs:
         shell: bash
         run: |
           test "$(uname -m)" = x86_64
+          mkdir -p temp/worker-tmp
+          chmod 700 temp/worker-tmp
+          echo "TMPDIR=$(cd temp/worker-tmp && pwd -P)" >> "$GITHUB_ENV"
           rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
           rustup toolchain install "$rust" --profile minimal --component rustfmt --component clippy
           rustup override set "$rust"
@@ -61,6 +64,8 @@ jobs:
           target="${CARGO_TARGET_DIR:-target}"
           install -m 755 "$target/debug/parser-worker" "$target/debug/deps/parser-worker"
       - name: Full headless workspace gate
+        env:
+          OMNI_NATIVE_TRACE: '1'
         run: python3 scripts/gate.py headless
       - name: Stage Linux headless artifact
         run: |
@@ -102,6 +107,9 @@ jobs:
         shell: bash
         run: |
           test "$(uname -m)" = arm64
+          mkdir -p temp/worker-tmp
+          chmod 700 temp/worker-tmp
+          echo "TMPDIR=$(cd temp/worker-tmp && pwd -P)" >> "$GITHUB_ENV"
           rust=$(python3 -c 'import re; print(re.search(r"^rust = \"([^\"]+)\"", open("mise.toml").read(), re.M)[1])')
           rustup toolchain install "$rust" --profile minimal --component rustfmt --component clippy
           rustup override set "$rust"
@@ -121,6 +129,8 @@ jobs:
           target="${CARGO_TARGET_DIR:-target}"
           install -m 755 "$target/debug/omni-fsevents" "$target/debug/deps/omni-fsevents"
       - name: Full headless workspace gate (includes available FSEvents tests)
+        env:
+          OMNI_NATIVE_TRACE: '1'
         run: python3 scripts/gate.py headless
       - name: Stage macOS headless artifact
         run: |

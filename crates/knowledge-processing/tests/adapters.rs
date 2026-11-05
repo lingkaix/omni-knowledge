@@ -224,3 +224,69 @@ fn ffmpeg_segments_use_storage_and_leave_the_source() {
             || format!("{error:#}").contains("already exists")
     );
 }
+
+/// Actual non-reaping native exit, group/pipe collection and credit lifetime; no BSD-data stub.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_owned_darwin_exit_keeps_child_and_credit_through_collection() {
+    use knowledge_core::admission::{Decision, Origin};
+    use knowledge_core::jobs::Reservation;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let _gate = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    started();
+    let account = admission::current().unwrap();
+    let mut holding = match account
+        .reserve(
+            Reservation {
+                memory_bytes: 64 * 1024 * 1024,
+                temporary_bytes: 0,
+            },
+            Origin::BeforeVerification,
+        )
+        .unwrap()
+    {
+        Decision::Ready(holding) => holding,
+        Decision::Waiting(reason) => panic!("native fixture waiting: {reason:?}"),
+    };
+    let mut child = Command::new("/usr/bin/true")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+    let end = Instant::now() + Duration::from_secs(2);
+    let mut observed_exit = false;
+    while Instant::now() < end {
+        if rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOWAIT
+                | rustix::process::WaitIdOptions::NOHANG,
+        )
+        .is_ok_and(|status| status.is_some())
+        {
+            observed_exit = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Keep the real child and paid credit foreground/reachable on an unknown collection.
+    while let Err(error) = knowledge_processing::worker::settle(&mut child) {
+        eprintln!(
+            "native fixture retains actual child {} and credit: {error}",
+            child.id()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(child.try_wait().unwrap().is_some());
+    drop(child);
+    holding.finish().unwrap();
+    assert!(
+        observed_exit,
+        "matching native WNOWAIT exit was not observed"
+    );
+}

@@ -551,6 +551,9 @@ fn actual_fsevents_native_delivery_and_resource_settlement() {
 #[test]
 fn native_cursor_follows_inventory_and_restart_never_assumes_continuity() {
     let f = Fixture::new();
+    // replay_tracking requires a durable inventory. A cold store correctly returns Missing;
+    // the initial enumeration still must not invent an FSEvents cursor.
+    assert!(f.scan().complete);
     let mount = f.mount();
     let store = f.store();
     let watch_budget = Budget {

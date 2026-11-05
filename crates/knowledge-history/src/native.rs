@@ -277,6 +277,12 @@ impl Runtime {
                     Ok(sample) => {
                         unseen = 0;
                         if sample.rss > call.rss_limit {
+                            if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                                eprintln!(
+                                    "omni-native git capacity: pid={} observed_group_rss={} limit={}",
+                                    identity.pid, sample.rss, call.rss_limit
+                                );
+                            }
                             return Err(Error::Capacity);
                         }
                     }

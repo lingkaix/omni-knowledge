@@ -112,7 +112,10 @@ struct Home {
 impl Home {
     fn new(name: &str) -> Self {
         ensure_account();
-        let parent = std::env::temp_dir().join(format!("pkg-native-{name}-{}", std::process::id()));
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("pkg-native-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&parent);
         fs::create_dir_all(parent.join("home")).unwrap();
         fs::create_dir_all(parent.join("private")).unwrap();

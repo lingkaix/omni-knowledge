@@ -1247,7 +1247,7 @@ mod admitted {
                 let text = &record.text[start..end];
                 let projection_digest = hex::encode(Sha256::digest(text.as_bytes()));
                 let file = format!("{record_number}-{start}-{projection_digest}.txt");
-                if create && !text.is_empty() && !directory.join(&file).exists() {
+                if create && !text.is_empty() {
                     let mut output_work = ready(Work::reserve(
                         Reservation {
                             memory_bytes: 64 * 1024,
@@ -1255,12 +1255,19 @@ mod admitted {
                         },
                         Origin::BeforeVerification,
                     )?)?;
-                    let mut output = OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(directory.join(&file))?;
+                    // Never expose a partial final projection or turn a competing identical
+                    // publisher into EEXIST. The actual kernel still verifies canonical bytes
+                    // from its opened descriptor; a digest-shaped name is not an authority grant.
+                    let mut output = tempfile::NamedTempFile::new_in(directory)?;
                     output.write_all(text.as_bytes())?;
-                    output.sync_all()?;
+                    output.as_file().sync_all()?;
+                    match output.persist_noclobber(directory.join(&file)) {
+                        Ok(file) => drop(file),
+                        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            drop(error);
+                        }
+                        Err(error) => return Err(error.error.into()),
+                    }
                     output_work.written(text.len() as u64)?;
                     drop(output_work);
                 }

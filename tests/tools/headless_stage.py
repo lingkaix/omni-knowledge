@@ -67,9 +67,12 @@ class GateAccountingTests(unittest.TestCase):
             "crates/example/src/tracking.rs - tracking::Store<P>::reconcile_watched (line 382)",
         ):
             with self.subTest(name=name):
-                self.assertEqual(self.gate.canonical_test_name(name + " - compile"), name)
+                for suffix in (" - compile", " - compile fail"):
+                    self.assertEqual(self.gate.canonical_test_name(name + suffix), name)
                 self.assertEqual(self.gate.canonical_test_name(name), name)
+                self.assertEqual(self.gate.canonical_test_name(name + " - compile fail extra"), name + " - compile fail extra")
         self.assertEqual(self.gate.canonical_test_name("caller - compile"), "caller - compile")
+        self.assertEqual(self.gate.canonical_test_name("caller - compile fail"), "caller - compile fail")
 
     def test_compile_labels_do_not_hide_missing_or_renamed_cases(self) -> None:
         from collections import Counter
@@ -80,10 +83,11 @@ class GateAccountingTests(unittest.TestCase):
             ignored["actual_local_asr_recognizes_known_speech"] = 1
             extra_output = "test actual_local_asr_recognizes_known_speech ... ignored\n"
         inventory = Counter({name: 1}) + ignored
-        self.gate.check_tests(inventory, ignored, f"test {name} - compile ... ok\n" + extra_output)
-        for output in (extra_output, f"test {name.replace('Scope', 'Other')} - compile ... ok\n" + extra_output):
-            with self.assertRaises(self.gate.GateError):
-                self.gate.check_tests(inventory, ignored, output)
+        for suffix in (" - compile", " - compile fail"):
+            self.gate.check_tests(inventory, ignored, f"test {name}{suffix} ... ok\n" + extra_output)
+            for output in (extra_output, f"test {name.replace('Scope', 'Other')}{suffix} ... ok\n" + extra_output):
+                with self.assertRaises(self.gate.GateError):
+                    self.gate.check_tests(inventory, ignored, output)
 
 
 if __name__ == "__main__":
