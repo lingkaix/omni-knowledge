@@ -51,5 +51,40 @@ class StageDirectoryTests(unittest.TestCase):
             self.assertFalse((root / "absent").exists())
 
 
+class GateAccountingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = SCRIPT.with_name("gate.py")
+        spec = importlib.util.spec_from_file_location("gate_accounting_subject", path)
+        assert spec is not None and spec.loader is not None
+        cls.gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.gate)
+
+    def test_named_and_unnamed_rustdoc_compile_results_keep_exact_identity(self) -> None:
+        for name in (
+            "crates/example/src/lib.rs - (line 8)",
+            "crates/example/src/lib.rs - Scope (line 131)",
+            "crates/example/src/tracking.rs - tracking::Store<P>::reconcile_watched (line 382)",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(self.gate.canonical_test_name(name + " - compile"), name)
+                self.assertEqual(self.gate.canonical_test_name(name), name)
+        self.assertEqual(self.gate.canonical_test_name("caller - compile"), "caller - compile")
+
+    def test_compile_labels_do_not_hide_missing_or_renamed_cases(self) -> None:
+        from collections import Counter
+        name = "crates/example/src/lib.rs - Scope (line 131)"
+        ignored = Counter()
+        extra_output = ""
+        if self.gate.platform.system() == "Darwin":
+            ignored["actual_local_asr_recognizes_known_speech"] = 1
+            extra_output = "test actual_local_asr_recognizes_known_speech ... ignored\n"
+        inventory = Counter({name: 1}) + ignored
+        self.gate.check_tests(inventory, ignored, f"test {name} - compile ... ok\n" + extra_output)
+        for output in (extra_output, f"test {name.replace('Scope', 'Other')} - compile ... ok\n" + extra_output):
+            with self.assertRaises(self.gate.GateError):
+                self.gate.check_tests(inventory, ignored, output)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -331,7 +331,7 @@ fn latest_name(dir: &File, b: &Bounds) -> Result<Option<String>, Error> {
         {
             return Err(Error::Recovery);
         }
-        if latest.as_ref().is_none_or(|n| name > n) {
+        if latest.as_ref().is_none_or(|n| name > n.as_str()) {
             latest = Some(name.to_owned())
         }
     }

@@ -69,7 +69,7 @@ def run(command, evidence, label, timeout, own_group=True, separate_stderr=False
 
 def canonical_test_name(name):
     """Map rustdoc's compile-only outcome label to its exact inventory identity."""
-    compiled = re.fullmatch(r"(.+\.rs - \(line \d+\)) - compile", name)
+    compiled = re.fullmatch(r"(.+\.rs - (?:.+ )?\(line \d+\)) - compile", name)
     return compiled.group(1) if compiled else name
 
 
