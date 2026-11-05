@@ -14,9 +14,10 @@ use std::io::{self, Read, Write};
 use std::process::exit;
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+use support::process_state;
 use support::{
-    attach, generous_limits, pin_object, process_state, publish_bytes, read_exact, start_token,
-    variant_name,
+    attach, generous_limits, pin_object, publish_bytes, read_exact, start_token, variant_name,
 };
 
 fn main() {
@@ -172,6 +173,11 @@ fn inherited_owner(path: Option<String>) -> i32 {
     abandon(&mut child, code)
 }
 
+/// Fork a child that drops its inherited cache only after the parent records the start token.
+/// The child blocks on the release pipe until the parent writes one byte.
+/// `hold_ready` then parks with the signal write end open, so the parent reaches its existing deadline.
+/// The other path drops the cache, writes one readiness byte, and exits.
+/// That byte is not an exit witness. macOS uses `waitid` `WNOWAIT` for the owned pid.
 fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
     let world = attach(std::path::Path::new(&fixture_path(path)));
     let cache = match world.open(generous_limits()) {
@@ -199,27 +205,37 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
             return 1;
         }
     };
-    let mut fds = [0i32; 2];
-    if unsafe { pipe(fds.as_mut_ptr()) } != 0 {
+    let mut signal = [0i32; 2];
+    if unsafe { pipe(signal.as_mut_ptr()) } != 0 {
+        say("ERROR Pipe");
+        return 1;
+    }
+    let mut release = [0i32; 2];
+    if unsafe { pipe(release.as_mut_ptr()) } != 0 {
+        close_pair(signal);
         say("ERROR Pipe");
         return 1;
     }
     let expected_parent = std::process::id() as i32;
     let pid = unsafe { fork() };
     if pid < 0 {
-        unsafe {
-            close(fds[0]);
-            close(fds[1]);
-        }
+        close_pair(signal);
+        close_pair(release);
         say("ERROR Fork");
         return 1;
     }
     if pid == 0 {
         arm_parent_death_signal(expected_parent);
-        if hold_ready {
-            unsafe {
-                // Keep the write end open so the parent blocks until its deadline.
-                close(fds[0]);
+        unsafe {
+            close(release[1]);
+            close(signal[0]);
+            let released = wait_parent_release(release[0]);
+            close(release[0]);
+            if !released {
+                _exit(1);
+            }
+            if hold_ready {
+                // Keep the signal write end open so the parent blocks until its deadline.
                 loop {
                     if pause() < 0 && errno() != EINTR {
                         break;
@@ -231,23 +247,33 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         drop(pin);
         drop(cache);
         unsafe {
-            close(fds[0]);
-            let marker = b"D";
-            let wrote = write(fds[1], marker.as_ptr().cast::<c_void>(), 1);
-            if wrote != 1 {
+            if !write_byte(signal[1], b'D') {
                 _exit(1);
             }
             _exit(0);
         }
     }
     let mut child = ChildGuard::arm(pid);
+    unsafe {
+        close(release[0]);
+        close(signal[1]);
+    }
     let Some(token) = start_token(pid as u32) else {
+        unsafe {
+            close(release[1]);
+            close(signal[0]);
+        }
         return report_failure(&mut child, "ERROR Observer");
     };
     say(&format!("CHILD {pid} {token}"));
-    unsafe { close(fds[1]) };
-    let ready = read_byte_bounded(fds[0], CHILD_SIGNAL_MS);
-    unsafe { close(fds[0]) };
+    let released = write_byte(release[1], PARENT_RELEASE);
+    unsafe { close(release[1]) };
+    if !released {
+        unsafe { close(signal[0]) };
+        return report_failure(&mut child, "ERROR ChildPipe");
+    }
+    let ready = read_byte_bounded(signal[0], CHILD_SIGNAL_MS);
+    unsafe { close(signal[0]) };
     match ready {
         Ok(_byte) => {}
         Err(error) if error.kind() == io::ErrorKind::TimedOut => {
@@ -355,6 +381,7 @@ type CacheHolder = knowledge_core::cache::Cache<support::Premise>;
 type PinHolder = knowledge_core::cache::PinnedObject<support::Premise>;
 
 const CHILD_SIGNAL_MS: i32 = 2_000;
+const PARENT_RELEASE: u8 = 1;
 const POLLIN: i16 = 1;
 const WNOHANG: i32 = 1;
 const SIGKILL: i32 = 9;
@@ -611,7 +638,10 @@ unsafe fn die_uncollected() -> ! {
     }
 }
 
-/// `Ok(true)` is an unreaped zombie. `Ok(false)` is userspace, absence, or the deadline.
+/// `Ok(true)` is an unreaped exit of this pid.
+/// Linux reads `/proc` state `Z`.
+/// macOS reads `waitid` with `WNOWAIT` for this owned pid.
+/// `Ok(false)` is userspace, a non-child, or the deadline.
 /// `Err` means the native observer could not answer. That is a setup failure, not a pass.
 fn observed_zombie(pid: i32) -> Result<bool, ()> {
     #[cfg(target_os = "linux")]
@@ -637,37 +667,47 @@ fn observed_zombie(pid: i32) -> Result<bool, ()> {
     }
 }
 
-/// Confirm `SZOMB` for this pid and an unreaped exit from `waitid` `WNOWAIT`.
-/// `WNOWAIT` leaves the child waitable. `ChildGuard` still collects it.
+/// Owned-child exit seen by `waitid`, or a reason that exit is not proved.
+/// `Exited` is `CLD_EXITED`, `CLD_KILLED`, or `CLD_DUMPED` for this pid.
+/// `Pending` is `WNOHANG` with no status, or `EINTR`.
+/// `Rejected` is `ECHILD` or a status that is not an unreaped exit.
+#[cfg(target_os = "macos")]
+enum OwnedExit {
+    Exited,
+    Pending,
+    Rejected,
+}
+
+/// `Ok(true)` is this owned pid's unreaped exit, still waitable.
+/// `proc_pidinfo` can omit a Darwin zombie, so `pbi_status` is not the proof.
+/// `Ok(false)` is a live child, a non-child, or the deadline.
+/// `Err` is a `waitid` failure other than `EINTR` or `ECHILD`, or a pid or `SIGCHLD` mismatch.
+/// `WNOWAIT` does not collect the child. `ChildGuard` still reaps it.
 #[cfg(target_os = "macos")]
 fn observe_darwin_zombie(pid: i32) -> Result<bool, ()> {
     let deadline = Instant::now() + Duration::from_millis(CHILD_SIGNAL_MS as u64);
     loop {
-        let state = process_state(pid as u32);
-        let exited = unreaped_owned_exit(pid)?;
-        if state == Some('Z') && exited {
-            return Ok(true);
+        match unreaped_owned_exit(pid)? {
+            OwnedExit::Exited => return Ok(true),
+            OwnedExit::Rejected => return Ok(false),
+            OwnedExit::Pending if Instant::now() >= deadline => return Ok(false),
+            OwnedExit::Pending => thread::yield_now(),
         }
-        if state.is_none() {
-            return Ok(false);
-        }
-        if Instant::now() >= deadline {
-            return Ok(false);
-        }
-        thread::yield_now();
     }
 }
 
-/// `Ok(true)` means this pid has exited and remains waitable.
-/// `Ok(false)` means it is still running or is not this parent's unreaped child.
-/// `Err` is a `waitid` failure other than `EINTR` or `ECHILD`.
+/// Read one non-reaping `waitid` result for `pid`.
+/// The buffer is zeroed first.
+/// Darwin leaves that buffer untouched when `WNOHANG` finds no status, so `si_pid == 0` means the child is still live.
+/// A live child, `ECHILD`, or any other `si_code` does not pass.
 #[cfg(target_os = "macos")]
-fn unreaped_owned_exit(pid: i32) -> Result<bool, ()> {
+fn unreaped_owned_exit(pid: i32) -> Result<OwnedExit, ()> {
     if pid <= 0 {
         return Err(());
     }
     // SAFETY: `info` is zeroed `siginfo_t` storage for one `waitid` call.
-    // `P_PID` selects this pid only. `WNOWAIT` does not collect it.
+    // `P_PID` selects this pid only. `WEXITED` asks for an exit. `WNOWAIT` does not collect it.
+    // Darwin `siginfo_t` places `si_signo`, `si_code`, and `si_pid` at the kernel `user64_siginfo` offsets.
     unsafe {
         let mut info = std::mem::zeroed::<libc::siginfo_t>();
         *libc::__error() = 0;
@@ -675,17 +715,107 @@ fn unreaped_owned_exit(pid: i32) -> Result<bool, ()> {
         let waited = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, options);
         if waited != 0 {
             let err = *libc::__error();
-            if err == EINTR || err == libc::ECHILD {
-                return Ok(false);
+            if err == EINTR {
+                return Ok(OwnedExit::Pending);
+            }
+            if err == libc::ECHILD {
+                return Ok(OwnedExit::Rejected);
             }
             return Err(());
         }
-        if info.si_pid == 0 || info.si_pid != pid {
-            return if info.si_pid == 0 { Ok(false) } else { Err(()) };
+        if info.si_pid == 0 {
+            return Ok(OwnedExit::Pending);
+        }
+        if info.si_pid != pid || info.si_signo != libc::SIGCHLD {
+            return Err(());
         }
         match info.si_code {
-            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED => Ok(true),
-            _ => Ok(false),
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED => Ok(OwnedExit::Exited),
+            _ => Ok(OwnedExit::Rejected),
+        }
+    }
+}
+
+/// Close both ends of one pipe. A failed `close` is ignored.
+fn close_pair(fds: [i32; 2]) {
+    unsafe {
+        close(fds[0]);
+        close(fds[1]);
+    }
+}
+
+/// Write one byte. `EINTR` retries. A short write or another error is `false`.
+fn write_byte(fd: i32, byte: u8) -> bool {
+    let buf = [byte];
+    loop {
+        let wrote = unsafe { write(fd, buf.as_ptr().cast::<c_void>(), 1) };
+        if wrote == 1 {
+            return true;
+        }
+        if wrote < 0 && errno() == EINTR {
+            continue;
+        }
+        return false;
+    }
+}
+
+/// Monotonic milliseconds, or `None` when the clock call fails.
+fn mono_millis() -> Option<i64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return None;
+    }
+    Some(
+        ts.tv_sec
+            .saturating_mul(1_000)
+            .saturating_add(ts.tv_nsec / 1_000_000),
+    )
+}
+
+/// Wait until the parent writes the release byte, within `CHILD_SIGNAL_MS`.
+/// Call this after `fork` and before the child drops cache state or exits.
+/// `false` is the deadline or a failed read. The caller exits.
+fn wait_parent_release(fd: i32) -> bool {
+    let Some(start) = mono_millis() else {
+        return false;
+    };
+    let deadline = start.saturating_add(i64::from(CHILD_SIGNAL_MS));
+    loop {
+        let Some(now) = mono_millis() else {
+            return false;
+        };
+        if now >= deadline {
+            return false;
+        }
+        let remain = i32::try_from(deadline - now).unwrap_or(i32::MAX);
+        let mut pollfd = PollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { poll(&mut pollfd, 1, remain) };
+        if ready == 0 {
+            return false;
+        }
+        if ready < 0 {
+            if errno() == EINTR {
+                continue;
+            }
+            return false;
+        }
+        let mut byte = [0u8; 1];
+        loop {
+            let read_bytes = unsafe { read(fd, byte.as_mut_ptr().cast::<c_void>(), 1) };
+            if read_bytes == 1 {
+                return byte[0] == PARENT_RELEASE;
+            }
+            if read_bytes < 0 && errno() == EINTR {
+                continue;
+            }
+            return false;
         }
     }
 }
