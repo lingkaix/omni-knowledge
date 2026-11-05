@@ -398,6 +398,185 @@ fn isolated_proposal_and_exact_owner_confirmation() {
     );
 }
 
+/// Build a real published proposal and its complete displayed confirmation tuple.
+fn proposal(f: &Fixture, id: &str, base: &Oid, text: &str) -> Confirmation {
+    let agent = f.reopen(true);
+    let mut request = f.request(
+        &format!("{id}-operation"),
+        Some(base.clone()),
+        &[("pages/a.md", Some(text))],
+    );
+    request.destination = Destination::Proposal {
+        proposal_id: id.to_owned(),
+    };
+    let candidate = agent
+        .prepare(&request, &f.admission.claim)
+        .unwrap()
+        .candidate
+        .unwrap();
+    assert!(matches!(
+        agent
+            .publish(&request.operation_id, &f.admission.claim)
+            .unwrap(),
+        State::Published(_)
+    ));
+    let diff = f
+        .history
+        .compare(Some(base), &candidate, &f.admission.claim)
+        .unwrap();
+    Confirmation {
+        proposal_id: id.to_owned(),
+        base: base.clone(),
+        candidate,
+        diff_digest: diff.diff_digest,
+    }
+}
+
+/// M2-S2-01: reopen/retry cannot publish an obsolete tuple; valid and completed confirmations remain usable.
+#[test]
+fn obsolete_confirmation_retry_preserves_candidate_and_completed_idempotency() {
+    let f = Fixture::new();
+    let base = f.commit("initial", None, "accepted");
+    let original = proposal(&f, "reviewed", &base, "original proposal");
+    let prepared = f
+        .history
+        .prepare_confirmation("stale-integration", &original, &f.admission.claim)
+        .unwrap();
+    let replacement = proposal(&f, "replacement", &base, "replacement proposal");
+    git(
+        &f.repo(),
+        &[
+            "update-ref",
+            "refs/heads/omni-proposals/reviewed",
+            replacement.candidate.as_str(),
+            original.candidate.as_str(),
+        ],
+    );
+    let reopened = f.reopen(false);
+    assert_eq!(
+        reopened.prepare_confirmation("fresh-old-tuple", &original, &f.admission.claim),
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        reopened.prepare_confirmation("stale-integration", &original, &f.admission.claim),
+        Err(Error::Conflict)
+    );
+    assert!(
+        matches!(reopened.inspect("stale-integration", &f.admission.claim).unwrap(), State::Conflict(p) if p == prepared)
+    );
+    assert!(
+        matches!(reopened.publish("stale-integration", &f.admission.claim).unwrap(), State::Conflict(p) if p == prepared)
+    );
+    assert_eq!(
+        reopened.head(&f.admission.claim).unwrap(),
+        Some(base.clone())
+    );
+    assert_eq!(
+        git(
+            &f.repo(),
+            &["for-each-ref", "refs/omni/operations/stale-integration"]
+        ),
+        ""
+    );
+    assert_eq!(
+        git(
+            &f.repo(),
+            &[
+                "cat-file",
+                "-t",
+                prepared.candidate.as_ref().unwrap().as_str()
+            ]
+        ),
+        "commit"
+    );
+    assert_eq!(
+        git(
+            &f.repo(),
+            &["rev-parse", "refs/omni/prepared/stale-integration"]
+        ),
+        prepared.candidate.unwrap().as_str()
+    );
+    let valid = Confirmation {
+        proposal_id: "reviewed".into(),
+        ..replacement
+    };
+    let accepted = reopened
+        .prepare_confirmation("valid-integration", &valid, &f.admission.claim)
+        .unwrap();
+    assert!(
+        matches!(reopened.publish("valid-integration", &f.admission.claim).unwrap(), State::Published(p) if p == accepted)
+    );
+    let advanced = proposal(
+        &f,
+        "later",
+        accepted.candidate.as_ref().unwrap(),
+        "later proposal",
+    );
+    git(
+        &f.repo(),
+        &[
+            "update-ref",
+            "refs/heads/omni-proposals/reviewed",
+            advanced.candidate.as_str(),
+            valid.candidate.as_str(),
+        ],
+    );
+    let completed = f.reopen(false);
+    assert_eq!(
+        completed
+            .prepare_confirmation("valid-integration", &valid, &f.admission.claim)
+            .unwrap(),
+        accepted
+    );
+    assert!(
+        matches!(completed.publish("valid-integration", &f.admission.claim).unwrap(), State::Published(p) if p == accepted)
+    );
+    assert_eq!(
+        completed.head(&f.admission.claim).unwrap(),
+        accepted.candidate
+    );
+    assert_eq!(
+        git(
+            &f.repo(),
+            &["rev-parse", "refs/heads/omni-proposals/reviewed"]
+        ),
+        advanced.candidate.as_str()
+    );
+}
+
+/// Native publication must lock/verify the proposal too, not just recheck it before accepted/op CAS.
+#[test]
+fn confirmation_publication_transaction_verifies_proposal_ref() {
+    let f = Fixture::new();
+    let base = f.commit("initial", None, "accepted");
+    let confirmation = proposal(&f, "reviewed", &base, "proposal");
+    let prepared = f
+        .history
+        .prepare_confirmation("integration", &confirmation, &f.admission.claim)
+        .unwrap();
+    let lock = f.repo().join("refs/heads/omni-proposals/reviewed.lock");
+    fs::write(&lock, "owned competing proposal ref lock").unwrap();
+    assert!(matches!(
+        f.history
+            .publish("integration", &f.admission.claim)
+            .unwrap(),
+        State::Indeterminate(_)
+    ));
+    assert_eq!(f.history.head(&f.admission.claim).unwrap(), Some(base));
+    assert_eq!(
+        git(
+            &f.repo(),
+            &["for-each-ref", "refs/omni/operations/integration"]
+        ),
+        ""
+    );
+    fs::remove_file(lock).unwrap();
+    let reopened = f.reopen(false);
+    assert!(
+        matches!(reopened.publish("integration", &f.admission.claim).unwrap(), State::Published(p) if p == prepared)
+    );
+}
+
 /// history.md: conflicting expected refs retain both candidate and previous operation objects.
 #[test]
 fn competing_real_writers_and_stale_unchanged() {
@@ -712,9 +891,40 @@ fn signing_required_is_not_unsigned_fallback() {
 /// A real process can die after prepare; reopening and duplicate delivery publish the same object once.
 #[test]
 fn killed_process_recovery_preserves_exact_operation() {
+    if let Some(root) = std::env::var_os("OMNI_HISTORY_OWNED_RECOVERY_FIXTURE") {
+        let root = Path::new(&root);
+        fs::create_dir(root.join("home")).unwrap();
+        let admission = Admission::new();
+        let h = History::init(
+            &root.join("repo"),
+            &root.join("home"),
+            "pages",
+            owner(false),
+            &admission.claim,
+        )
+        .unwrap();
+        let r = Request {
+            operation_id: "interrupted".into(),
+            base: None,
+            destination: Destination::Accepted,
+            changes: vec![Change {
+                path: "pages/a.md".into(),
+                text: Some("retained".into()),
+            }],
+        };
+        h.prepare(&r, &admission.claim).unwrap();
+        fs::write(root.join("prepared-marker"), "ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
     let root = tempfile::tempdir().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "recovery_worker", "--nocapture"])
+        .args([
+            "--exact",
+            "killed_process_recovery_preserves_exact_operation",
+            "--nocapture",
+        ])
         .env("OMNI_HISTORY_OWNED_RECOVERY_FIXTURE", root.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -760,39 +970,6 @@ fn killed_process_recovery_preserves_exact_operation() {
         git(&root.path().join("repo"), &["rev-list", "--all", "--count"]),
         "1"
     );
-}
-
-/// Owned subprocess entrypoint selected only by the interruption proof; no oracle bypass or Git stub.
-#[test]
-#[ignore = "subprocess entrypoint used by killed_process_recovery_preserves_exact_operation"]
-fn recovery_worker() {
-    let root =
-        std::env::var_os("OMNI_HISTORY_OWNED_RECOVERY_FIXTURE").expect("owned worker fixture");
-    let root = Path::new(&root);
-    fs::create_dir(root.join("home")).unwrap();
-    let admission = Admission::new();
-    let h = History::init(
-        &root.join("repo"),
-        &root.join("home"),
-        "pages",
-        owner(false),
-        &admission.claim,
-    )
-    .unwrap();
-    let r = Request {
-        operation_id: "interrupted".into(),
-        base: None,
-        destination: Destination::Accepted,
-        changes: vec![Change {
-            path: "pages/a.md".into(),
-            text: Some("retained".into()),
-        }],
-    };
-    h.prepare(&r, &admission.claim).unwrap();
-    fs::write(root.join("prepared-marker"), "ready").unwrap();
-    loop {
-        std::thread::park();
-    }
 }
 
 /// Unchanged receipts survive later accepted versions without creating empty commits; deletes are text changes.

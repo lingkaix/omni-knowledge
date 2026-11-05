@@ -239,12 +239,23 @@ struct Intent {
     expected: Option<Oid>,
     /// Exact validated target ref.
     target: String,
+    /// Exact confirmed proposal binding; absent on ordinary and legacy operations.
+    #[serde(default)]
+    proposal: Option<ConfirmedProposal>,
     /// Commit parents; confirmation retains both histories.
     parents: Vec<Oid>,
     /// Prepared result; candidate is deterministically reconstructed if necessary.
     prepared: Prepared,
     /// Persisted commit timestamp prevents duplicate objects across interruption.
     seconds: u64,
+}
+/// Proposal version displayed for one integration; publication must verify this exact native ref.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConfirmedProposal {
+    /// Fixed proposal namespace plus validated proposal identifier.
+    reference: String,
+    /// Exact proposal commit accepted by the human, also the second integration parent.
+    oid: Oid,
 }
 /// Selected app-owned external bare repository; no admission pool or home-file writer.
 pub struct History {
@@ -533,6 +544,12 @@ impl History {
         let fingerprint =
             digest(&serde_json::to_vec(&(operation_id, confirmation)).map_err(|_| Error::Invalid)?);
         if let Some(intent) = self.existing(operation_id, &fingerprint)? {
+            if matches!(
+                self.inspect_intent(&intent, &call)?,
+                State::Conflict(_) | State::Indeterminate(_)
+            ) {
+                return Err(Error::Conflict);
+            }
             return self.finish_prepare(intent, &call);
         }
         let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
@@ -549,7 +566,7 @@ impl History {
         if comparison.diff_digest != confirmation.diff_digest {
             return Err(Error::Conflict);
         }
-        let intent = self.intent(
+        let mut intent = self.intent(
             operation_id,
             fingerprint,
             Some(confirmation.base.clone()),
@@ -558,6 +575,10 @@ impl History {
             tree,
             comparison.affected_paths,
         )?;
+        intent.proposal = Some(ConfirmedProposal {
+            reference: proposal_ref,
+            oid: confirmation.candidate.clone(),
+        });
         self.retain_tree(&intent, scratch.path(), &call)?;
         persist(&self.intent_path(operation_id), &intent)?;
         self.finish_prepare(intent, &call)
@@ -580,9 +601,17 @@ impl History {
             .expected
             .as_ref()
             .map_or_else(|| "0".repeat(40), |o| o.0.clone());
-        let input = if prepared.unchanged {
+        let mut input = String::from("start\n");
+        if let Some(proposal) = &intent.proposal {
+            input.push_str(&format!(
+                "verify {} {}\n",
+                proposal.reference,
+                proposal.oid.as_str()
+            ));
+        }
+        input.push_str(&if prepared.unchanged {
             format!(
-                "start\nverify {} {}\ncreate {} {}\nprepare\ncommit\n",
+                "verify {} {}\ncreate {} {}\nprepare\ncommit\n",
                 intent.target,
                 expected,
                 receipt,
@@ -591,14 +620,14 @@ impl History {
         } else {
             let candidate = prepared.candidate.as_ref().ok_or(Error::Recovery)?;
             format!(
-                "start\nupdate {} {} {}\ncreate {} {}\nprepare\ncommit\n",
+                "update {} {} {}\ncreate {} {}\nprepare\ncommit\n",
                 intent.target,
                 candidate.as_str(),
                 expected,
                 receipt,
                 candidate.as_str()
             )
-        };
+        });
         let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
         match self.git(
             &["update-ref", "--stdin", "--no-deref"],
@@ -905,6 +934,7 @@ impl History {
             context: self.context_digest()?,
             expected,
             target,
+            proposal: None,
             parents,
             prepared: Prepared {
                 operation_id: operation_id.to_owned(),
@@ -957,6 +987,19 @@ impl History {
             }
         } else if self.owner.agent.is_some() {
             return Err(Error::ContextMismatch);
+        }
+        if let Some(proposal) = &intent.proposal {
+            let id = proposal
+                .reference
+                .strip_prefix("refs/heads/omni-proposals/")
+                .ok_or(Error::Recovery)?;
+            validate_id(id)?;
+            if intent.target != ACCEPTED
+                || intent.parents.len() != 2
+                || intent.parents[1] != proposal.oid
+            {
+                return Err(Error::Recovery);
+            }
         }
         for path in &intent.prepared.affected_paths {
             self.validate_path(path)?;
@@ -1095,6 +1138,22 @@ impl History {
         Ok(())
     }
 
+    /// Check an unpublished integration's exact proposal; legacy missing expectations refuse replay.
+    fn proposal_matches(
+        &self,
+        intent: &Intent,
+        scratch: &Path,
+        call: &Call,
+    ) -> Result<bool, Error> {
+        match &intent.proposal {
+            Some(proposal) => {
+                Ok(self.reference(&proposal.reference, scratch, call)?
+                    == Some(proposal.oid.clone()))
+            }
+            None => Ok(intent.parents.len() < 2),
+        }
+    }
+
     /// Derive publication from actual immutable refs, never an optimistic receipt status bit.
     fn inspect_intent(&self, intent: &Intent, call: &Call) -> Result<State, Error> {
         let mut prepared = intent.prepared.clone();
@@ -1129,11 +1188,15 @@ impl History {
                     State::Indeterminate(prepared)
                 });
             }
-            return Ok(if target == intent.expected {
-                State::Prepared(prepared)
-            } else {
-                State::Conflict(prepared)
-            });
+            return Ok(
+                if target == intent.expected
+                    && self.proposal_matches(intent, scratch.path(), call)?
+                {
+                    State::Prepared(prepared)
+                } else {
+                    State::Conflict(prepared)
+                },
+            );
         }
         prepared.candidate = candidate.clone();
         if let Some(operation) = operation {
@@ -1181,7 +1244,7 @@ impl History {
         {
             return Ok(State::Indeterminate(prepared));
         }
-        if target != intent.expected {
+        if target != intent.expected || !self.proposal_matches(intent, scratch.path(), call)? {
             return Ok(State::Conflict(prepared));
         }
         Ok(State::Prepared(prepared))
