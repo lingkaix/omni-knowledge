@@ -1,8 +1,27 @@
 //! Local Git object/ref transactions; home file installation and authorization belong to callers.
 #![deny(unsafe_code)]
+#![doc = include_str!("../README.md")]
 
+// Only the reviewed fixed-buffer OS observation/pre-exec primitives may use native FFI.
+#[allow(unsafe_code)]
+mod native;
+pub use native::{ProcessIdentity, UnsettledChild};
+
+mod adopt;
+pub use adopt::{ExistingRepository, GitPlacement};
+mod bundle;
+pub use bundle::{BundleError, BundleRef, BundleReport};
+#[cfg(all(test, target_os = "linux"))]
+mod native_tests;
+mod read;
+mod sign;
 mod writer_lock;
-use writer_lock::OwnedWriterLock as WriterLock;
+pub use read::{
+    CommitInfo, CommitPage, GitPerson, Proposal, ProposalDiff, ProposalPage, RecordedAttribution,
+    SignatureFormat,
+};
+pub use sign::{GitIdentity, KeyProtection, KnownSigner, SignatureState, SshSigner, Verification};
+use writer_lock::OwnedWriterLock;
 
 use fs2::FileExt;
 use knowledge_core::jobs::Claim;
@@ -10,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -164,7 +183,7 @@ pub struct Comparison {
     pub patch: Vec<u8>,
 }
 /// Input-free error classifications; submitted paths, identities and Git stderr never escape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// Invalid path, ID, identity or unsupported repository shape.
     Invalid,
@@ -180,6 +199,8 @@ pub enum Error {
     Deadline,
     /// Another cooperating writer owns this repository.
     Busy,
+    /// Actual native child/group/I/O remains unknown; retain the causing claim and inspect/collect, never complete it.
+    Unsettled(UnsettledChild),
     /// A native Git command failed; inspect recovery before an explicit retry.
     Git,
     /// Local I/O failed; do not infer rollback.
@@ -195,7 +216,15 @@ impl std::fmt::Display for Error {
         write!(f, "history {self:?}")
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    /// Preserve the actual native owner in ordinary error chains; a string classification is not collection.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unsettled(owner) => Some(owner),
+            _ => None,
+        }
+    }
+}
 impl From<std::io::Error> for Error {
     /// Classify I/O without leaking filesystem paths.
     fn from(_: std::io::Error) -> Self {
@@ -228,6 +257,9 @@ struct Binding {
     email: String,
     /// Explicit signing choice.
     mode: Mode,
+    /// Native explicitly selected existing database; metadata does not grant current placement/permission.
+    #[serde(default)]
+    existing: Option<adopt::ExistingBinding>,
 }
 /// One durable operation recipe; commit construction is deterministic after this file is synced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,6 +281,12 @@ struct Intent {
     parents: Vec<Oid>,
     /// Prepared result; candidate is deterministically reconstructed if necessary.
     prepared: Prepared,
+    /// Original distinct committer, if explicitly selected by the native host.
+    #[serde(default)]
+    committer: Option<GitIdentity>,
+    /// Actual native observation IDs supplied after M1's stable-file/quiet-period boundary.
+    #[serde(default)]
+    observation_ids: Vec<String>,
     /// Persisted commit timestamp prevents duplicate objects across interruption.
     seconds: u64,
 }
@@ -270,7 +308,28 @@ pub struct History {
     binding: Binding,
     /// Trusted current attribution context.
     owner: OwnerContext,
+    /// Actual bounded tool owner and unresolved native capabilities.
+    runtime: native::Runtime,
+    /// Native selected provider; no private key or socket is persisted into Git/operation recipes.
+    signer: Option<SshSigner>,
+    /// Explicit native committer choice for new operations.
+    committer: Option<GitIdentity>,
 }
+/// Explicitly unlock the owned open-file description before close; unrelated concurrent fork/exec windows must not prolong it.
+struct WriterLock(Option<OwnedWriterLock>, native::Retention);
+impl Drop for WriterLock {
+    /// Closing alone can leave a transient fork-inherited descriptor holding the flock until its exec.
+    fn drop(&mut self) {
+        if let Some(guard) = self.0.take()
+            && guard.is_original_owner()
+            && let Some(owner) = self.1.get()
+        {
+            owner.retain_lock(guard.into_file());
+        }
+        // Otherwise OwnedWriterLock explicitly unlocks only in the acquiring process.
+    }
+}
+
 /// Per-call exact deadline and finite retained output bound, from the existing admitted claim.
 struct Call {
     /// End of the entire public call, not a timeout restarted per subprocess.
@@ -279,10 +338,16 @@ struct Call {
     limit: usize,
     /// Maximum changed/base entries admitted by the caller.
     files: u64,
+    /// Whole concurrent child RSS remainder after parent buffers/native observation scratch.
+    rss_limit: u64,
+    /// Pre-exec regular-file extent ceiling from this admitted work bound.
+    file_limit: u64,
     /// Remaining total input/output bytes, not a new resource reservation.
     bytes_left: Cell<u64>,
     /// Remaining examined entries, conservatively counting repeated tree reads.
     files_left: Cell<u64>,
+    /// This exact public call's native owner, shared only with its own scratch/writer guards.
+    retention: native::Retention,
 }
 impl Call {
     /// Bind work to a live caller claim without creating or settling a reservation.
@@ -303,10 +368,18 @@ impl Call {
             deadline,
             limit,
             files: b.max_files,
+            rss_limit: b
+                .max_memory_bytes
+                .saturating_sub(4 * limit as u64 + (1 << 20)),
+            file_limit: b.max_bytes,
             bytes_left: Cell::new(b.max_bytes),
             files_left: Cell::new(b.max_files),
+            retention: Default::default(),
         };
         call.check()?;
+        if call.limit == 0 || call.rss_limit < (1 << 20) {
+            return Err(Error::Capacity);
+        }
         Ok(call)
     }
     /// Debit actual bounded I/O against the caller's whole-call work maximum.
@@ -339,6 +412,34 @@ impl Call {
     }
 }
 impl History {
+    /// Concurrent Git-work envelope for the native host to compose into its existing Core P1 reservation/credit.
+    /// This pure plan is not admission or authority; no account/pool/reservation is created here.
+    /// Hold its memory/storage through actual collection and any retained returned values/artifacts.
+    pub fn required_resources(
+        budget: &knowledge_core::backend::Budget,
+    ) -> Result<knowledge_core::jobs::Reservation, Error> {
+        let control = budget
+            .max_bytes
+            .min(budget.max_memory_bytes / 4)
+            .min(CONTROL_LIMIT as u64);
+        if control == 0
+            || budget
+                .max_memory_bytes
+                .saturating_sub(4 * control + (1 << 20))
+                < (1 << 20)
+        {
+            return Err(Error::Capacity);
+        }
+        Ok(knowledge_core::jobs::Reservation {
+            memory_bytes: budget.max_memory_bytes,
+            temporary_bytes: budget
+                .max_bytes
+                .checked_mul(8)
+                .and_then(|n| n.checked_add(4 * CONTROL_LIMIT as u64))
+                .ok_or(Error::Capacity)?,
+        })
+    }
+
     /// Exclusively create a new external owned bare Git directory and persist native binding.
     /// The host must select a local non-synced path and reserve index/object/child costs in claim.
     pub fn init(
@@ -368,16 +469,20 @@ impl History {
             name: owner.name.clone(),
             email: owner.email.clone(),
             mode: owner.mode.clone(),
+            existing: None,
         };
         let history = Self {
             repo,
             home,
             binding,
             owner,
+            runtime: native::Runtime::default(),
+            signer: None,
+            committer: None,
         };
         fs::create_dir(history.repo.join("omni-state"))?;
         fs::create_dir(history.repo.join("omni-state/operations"))?;
-        let scratch = tempfile::tempdir_in(history.repo.join("omni-state"))?;
+        let scratch = history.scratch(&call)?;
         // --template overrides all template configuration; this repo is newly owned and empty.
         run(
             &history.repo,
@@ -386,7 +491,7 @@ impl History {
             b"",
             None,
             &call,
-            None,
+            (None, &history.runtime),
         )?;
         fs::write(history.repo.join("config"), CONFIG)?;
         File::open(history.repo.join("config"))?.sync_all()?;
@@ -396,6 +501,7 @@ impl History {
         )?;
         File::open(&history.repo)?.sync_all()?;
         history.validate()?;
+        drop(scratch);
         Ok(history)
     }
 
@@ -412,6 +518,7 @@ impl History {
         Call::new(claim)?;
         let repo = selected_directory(repo)?;
         let home = selected_directory(home)?;
+        selected_directory(&repo.join("omni-state"))?;
         let binding: Binding = load(&repo.join("omni-state/binding.json"))?;
         if binding.version != 1
             || binding.text_root != text_root
@@ -426,6 +533,9 @@ impl History {
             home,
             binding,
             owner,
+            runtime: native::Runtime::default(),
+            signer: None,
+            committer: None,
         };
         history.validate()?;
         Ok(history)
@@ -435,15 +545,48 @@ impl History {
     pub fn head(&self, claim: &Claim) -> Result<Option<Oid>, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         self.reference(ACCEPTED, scratch.path(), &call)
     }
 
     /// Prepare and retain a deterministic operation commit without changing home files or target refs.
     pub fn prepare(&self, request: &Request, claim: &Claim) -> Result<Prepared, Error> {
+        self.prepare_kind(request, &[], claim)
+    }
+
+    /// Record stable externally observed text without inventing an editor or attributing it to an agent.
+    /// Native M1 supplies actual observation IDs/quiet-period proof; these IDs are evidence, never write authority.
+    pub fn prepare_observation(
+        &self,
+        request: &Request,
+        observation_ids: &[String],
+        claim: &Claim,
+    ) -> Result<Prepared, Error> {
+        if self.owner.agent.is_some()
+            || observation_ids.is_empty()
+            || request.destination != Destination::Accepted
+        {
+            return Err(Error::ContextMismatch);
+        }
+        self.prepare_kind(request, observation_ids, claim)
+    }
+
+    /// Shared real preparation path; ordinary operation fingerprints remain byte-compatible with the existing durable recipes.
+    fn prepare_kind(
+        &self,
+        request: &Request,
+        observation_ids: &[String],
+        claim: &Claim,
+    ) -> Result<Prepared, Error> {
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         validate_id(&request.operation_id)?;
+        if observation_ids.len() as u64 > call.files {
+            return Err(Error::Capacity);
+        }
+        for id in observation_ids {
+            validate_id(id)?;
+        }
         let mut total = 0usize;
         for change in &request.changes {
             self.validate_path(&change.path)?;
@@ -466,11 +609,15 @@ impl History {
             return Err(Error::Invalid);
         }
         let target = self.target(&request.destination)?;
-        let fingerprint = digest(&serde_json::to_vec(&request).map_err(|_| Error::Invalid)?);
+        let fingerprint = if observation_ids.is_empty() {
+            digest(&serde_json::to_vec(&request).map_err(|_| Error::Invalid)?)
+        } else {
+            digest(&serde_json::to_vec(&(&request, observation_ids)).map_err(|_| Error::Invalid)?)
+        };
         if let Some(intent) = self.existing(&request.operation_id, &fingerprint)? {
             return self.finish_prepare(intent, &call);
         }
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         let index = scratch.path().join("index");
         self.base_tree(request.base.as_ref(), scratch.path(), &call)?;
         if let Some(base) = &request.base {
@@ -492,6 +639,14 @@ impl History {
         }
         let mut update = Vec::new();
         for change in &request.changes {
+            let mode = if self.binding.existing.is_some() {
+                match &request.base {
+                    Some(base) => self.editable_base(base, &change.path, scratch.path(), &call)?,
+                    None => "100644",
+                }
+            } else {
+                "100644"
+            };
             let entry = if let Some(text) = &change.text {
                 let oid = oid_output(self.git(
                     &["hash-object", "-w", "--stdin", "--no-filters"],
@@ -500,7 +655,7 @@ impl History {
                     None,
                     &call,
                 )?)?;
-                format!("100644 {}\t{}\0", oid.as_str(), change.path)
+                format!("{mode} {}\t{}\0", oid.as_str(), change.path)
             } else {
                 format!("0 {}\t{}\0", "0".repeat(40), change.path)
             };
@@ -516,7 +671,7 @@ impl History {
         let tree =
             oid_output(self.git(&["write-tree"], b"", scratch.path(), Some(&index), &call)?)?;
         let comparison = self.compare_tree(request.base.as_ref(), &tree, scratch.path(), &call)?;
-        let intent = self.intent(
+        let mut intent = self.intent(
             &request.operation_id,
             fingerprint,
             request.base.clone(),
@@ -525,6 +680,7 @@ impl History {
             tree,
             comparison.affected_paths,
         )?;
+        intent.observation_ids = observation_ids.to_vec();
         self.retain_tree(&intent, scratch.path(), &call)?;
         persist(&self.intent_path(&request.operation_id), &intent)?;
         self.finish_prepare(intent, &call)
@@ -543,7 +699,7 @@ impl History {
             return Err(Error::ContextMismatch);
         }
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let fingerprint =
             digest(&serde_json::to_vec(&(operation_id, confirmation)).map_err(|_| Error::Invalid)?);
         if let Some(intent) = self.existing(operation_id, &fingerprint)? {
@@ -555,7 +711,7 @@ impl History {
             }
             return self.finish_prepare(intent, &call);
         }
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         let proposal_ref = format!("refs/heads/omni-proposals/{}", confirmation.proposal_id);
         if self.reference(ACCEPTED, scratch.path(), &call)? != Some(confirmation.base.clone())
             || self.reference(&proposal_ref, scratch.path(), &call)?
@@ -592,7 +748,7 @@ impl History {
     pub fn publish(&self, operation_id: &str, claim: &Claim) -> Result<State, Error> {
         validate_id(operation_id)?;
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let intent = self.read_intent(operation_id)?;
         let state = self.inspect_intent(&intent, &call)?;
         if !matches!(state, State::Prepared(_)) {
@@ -631,7 +787,7 @@ impl History {
                 candidate.as_str()
             )
         });
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         match self.git(
             &["update-ref", "--stdin", "--no-deref"],
             input.as_bytes(),
@@ -641,12 +797,14 @@ impl History {
         ) {
             Ok(_) => match self.inspect_intent(&intent, &call) {
                 Ok(state) => Ok(state),
+                Err(error @ Error::Unsettled(_)) => Err(error),
                 Err(_) => Ok(State::Indeterminate(prepared)),
             },
             Err(Error::Git) => match self.inspect_intent(&intent, &call) {
                 Ok(State::Prepared(p)) => Ok(State::Indeterminate(p)),
                 result => result,
             },
+            Err(error @ Error::Unsettled(_)) => Err(error),
             // A deadline may follow actual ref effects; never blindly retry or assert rollback.
             Err(Error::Deadline) => Ok(State::Indeterminate(prepared)),
             Err(_) => Ok(State::Indeterminate(prepared)),
@@ -657,7 +815,7 @@ impl History {
     pub fn inspect(&self, operation_id: &str, claim: &Claim) -> Result<State, Error> {
         validate_id(operation_id)?;
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         self.inspect_intent(&self.read_intent(operation_id)?, &call)
     }
 
@@ -670,7 +828,7 @@ impl History {
     ) -> Result<Comparison, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         let tree = self.base_tree(Some(candidate), scratch.path(), &call)?;
         self.compare_tree(base, &tree, scratch.path(), &call)
     }
@@ -680,8 +838,11 @@ impl History {
         self.validate_path(path)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(&call)?;
         self.base_tree(Some(commit), scratch.path(), &call)?;
+        if self.binding.existing.is_some() {
+            self.editable_base(commit, path, scratch.path(), &call)?;
+        }
         let spec = format!("{}:{path}", commit.as_str());
         String::from_utf8(self.git(
             &["cat-file", "blob", &spec],
@@ -699,12 +860,24 @@ impl History {
         selected_directory(&self.home)?;
         if identity(&self.repo)? != self.binding.repo
             || identity(&self.home)? != self.binding.home
-            || self.repo.starts_with(&self.home)
+            || (self.repo.starts_with(&self.home) && self.binding.existing.is_none())
             || self.home.starts_with(&self.repo)
         {
             return Err(Error::ContextMismatch);
         }
-        if bounded_read(&self.repo.join("config"), CONTROL_LIMIT)? != CONFIG.as_bytes() {
+        for name in ["HEAD", "packed-refs"] {
+            if let Ok(meta) = fs::symlink_metadata(self.repo.join(name))
+                && (!meta.is_file() || meta.file_type().is_symlink())
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        let config = bounded_read(&self.repo.join("config"), CONTROL_LIMIT)?;
+        if let Some(existing) = &self.binding.existing {
+            if digest(&config) != existing.config_digest {
+                return Err(Error::ContextMismatch);
+            }
+        } else if config != CONFIG.as_bytes() {
             return Err(Error::Invalid);
         }
         for path in [
@@ -745,7 +918,7 @@ impl History {
     }
 
     /// Take only the owned cooperative lock; native Git CAS still handles outside ref writers.
-    fn lock(&self) -> Result<WriterLock, Error> {
+    fn lock(&self, call: &Call) -> Result<WriterLock, Error> {
         self.validate()?;
         let path = self.repo.join("omni-state/writer.lock");
         if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
@@ -764,7 +937,10 @@ impl History {
                 Error::Io
             }
         })?;
-        Ok(WriterLock::new(file))
+        Ok(WriterLock(
+            Some(OwnedWriterLock::new(file)),
+            call.retention.clone(),
+        ))
     }
 
     /// Resolve only the fixed accepted ref or validated immutable proposal namespace.
@@ -823,6 +999,10 @@ impl History {
         let spec = format!("{}^{{tree}}", base.as_str());
         let tree =
             oid_output(self.git(&["rev-parse", "--verify", &spec], b"", scratch, None, call)?)?;
+        // Existing user history (including media/gitlinks/symlinks) is retained unchanged; each changed/read text path is checked separately.
+        if self.binding.existing.is_some() {
+            return Ok(tree);
+        }
         let listing = self.git(
             &["ls-tree", "-r", "-z", tree.as_str()],
             b"",
@@ -879,6 +1059,12 @@ impl History {
                 .map_err(|_| Error::Recovery)?
                 .to_owned();
             self.validate_path(&path)?;
+            if self.binding.existing.is_some() {
+                if let Some(base) = base {
+                    self.editable_base(base, &path, scratch, call)?;
+                }
+                self.editable_base(tree, &path, scratch, call)?;
+            }
             affected_paths.push(path);
         }
         if affected_paths.len() as u64 > call.files {
@@ -946,6 +1132,8 @@ impl History {
                 affected_paths,
                 unchanged,
             },
+            committer: self.committer.clone(),
+            observation_ids: Vec::new(),
             seconds: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| Error::Io)?
@@ -1040,27 +1228,19 @@ impl History {
         if intent.prepared.unchanged {
             return Ok(intent.prepared);
         }
-        if self.owner.mode == Mode::SigningRequired {
-            return Err(Error::SigningRequired);
-        }
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
-        let mut args = vec!["commit-tree".to_owned(), intent.prepared.tree.0.clone()];
-        for parent in &intent.parents {
-            args.push("-p".to_owned());
-            args.push(parent.0.clone());
-        }
-        let message = self.commit_message(&intent);
-        let refs: Vec<_> = args.iter().map(String::as_str).collect();
+        let scratch = self.scratch(call)?;
         self.validate()?;
-        let oid = oid_output(run(
-            &self.repo,
-            scratch.path(),
-            &refs,
-            message.as_bytes(),
-            None,
-            call,
-            Some((&self.owner, intent.seconds)),
-        )?)?;
+        let oid = if self.owner.mode == Mode::SigningRequired {
+            self.signed_candidate(&intent, scratch.path(), call)?
+        } else {
+            oid_output(self.git(
+                &["hash-object", "-t", "commit", "-w", "--stdin"],
+                &self.commit_payload(&intent),
+                scratch.path(),
+                None,
+                call,
+            )?)?
+        };
         let prepared_ref = format!("refs/omni/prepared/{}", intent.prepared.operation_id);
         match self.reference(&prepared_ref, scratch.path(), call)? {
             Some(previous) if previous != oid => return Err(Error::Recovery),
@@ -1091,6 +1271,12 @@ impl History {
             "Omni text operation\n\nOmni-Operation-Id: {}\nOmni-Intent-Digest: {}\n",
             intent.prepared.operation_id, intent.fingerprint
         );
+        if !intent.observation_ids.is_empty() {
+            message.push_str("Omni-Origin: external_unknown\n");
+            for id in &intent.observation_ids {
+                message.push_str(&format!("Omni-Observation-Id: {id}\n"));
+            }
+        }
         for (label, value) in [
             ("Omni-Agent", &self.owner.agent),
             ("Omni-Tool", &self.owner.tool),
@@ -1111,9 +1297,6 @@ impl History {
         scratch: &Path,
         call: &Call,
     ) -> Result<(), Error> {
-        if self.owner.mode != Mode::UnsignedExplicit {
-            return Err(Error::Recovery);
-        }
         let actual = self.git(
             &["cat-file", "commit", candidate.as_str()],
             b"",
@@ -1121,21 +1304,10 @@ impl History {
             None,
             call,
         )?;
-        let mut expected = format!("tree {}\n", intent.prepared.tree.as_str());
-        for parent in &intent.parents {
-            expected.push_str(&format!("parent {}\n", parent.as_str()));
+        if self.owner.mode == Mode::SigningRequired {
+            return self.verify_signed_candidate(intent, &actual, scratch, call);
         }
-        expected.push_str(&format!(
-            "author {} <{}> {} +0000\ncommitter {} <{}> {} +0000\n\n",
-            self.owner.name,
-            self.owner.email,
-            intent.seconds,
-            self.owner.name,
-            self.owner.email,
-            intent.seconds
-        ));
-        expected.push_str(&self.commit_message(intent));
-        if actual != expected.as_bytes() {
+        if actual != self.commit_payload(intent) {
             return Err(Error::Recovery);
         }
         Ok(())
@@ -1160,7 +1332,7 @@ impl History {
     /// Derive publication from actual immutable refs, never an optimistic receipt status bit.
     fn inspect_intent(&self, intent: &Intent, call: &Call) -> Result<State, Error> {
         let mut prepared = intent.prepared.clone();
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch(call)?;
         let candidate = self.reference(
             &format!("refs/omni/prepared/{}", prepared.operation_id),
             scratch.path(),
@@ -1282,6 +1454,28 @@ impl History {
         Ok(result)
     }
 
+    /// Private scratch must outlive unresolved child/FD/file effects.
+    fn scratch(&self, call: &Call) -> Result<native::Scratch, Error> {
+        native::Scratch::new(&self.repo.join("omni-state"), call)
+    }
+
+    /// Inspect the actual retained process/evidence, never turn serialized PID facts into signalling authority.
+    pub fn pending_process(
+        &self,
+        claim: &Claim,
+    ) -> Result<Option<(ProcessIdentity, Vec<PathBuf>)>, Error> {
+        Call::new(claim)?;
+        self.validate()?;
+        self.runtime.pending()
+    }
+
+    /// Collect only this handle's actual owned native process; does not retry a Git effect or settle the caller's claim.
+    pub fn collect_pending(&self, claim: &Claim) -> Result<(), Error> {
+        Call::new(claim)?;
+        self.validate()?;
+        self.runtime.collect()
+    }
+
     /// Execute only fixed local plumbing with inert selected repository configuration.
     fn git(
         &self,
@@ -1292,7 +1486,15 @@ impl History {
         call: &Call,
     ) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        run(&self.repo, scratch, args, input, index, call, None)
+        run(
+            &self.repo,
+            scratch,
+            args,
+            input,
+            index,
+            call,
+            (None, &self.runtime),
+        )
     }
 
     /// Return a validated operation-specific durable intent filename.
@@ -1312,6 +1514,15 @@ impl History {
 
 /// Validate only service-selected human/context fields before putting them in Git environment/messages.
 fn validate_owner(owner: &OwnerContext) -> Result<(), Error> {
+    if owner.agent.is_some() && (owner.tool.is_none() || owner.session.is_none()) {
+        return Err(Error::Invalid);
+    }
+    for value in [&owner.tool, &owner.session]
+        .into_iter()
+        .filter_map(Option::as_ref)
+    {
+        validate_id(value)?;
+    }
     for field in [&owner.name, &owner.email].into_iter().chain(
         [&owner.agent, &owner.tool, &owner.session]
             .into_iter()
@@ -1437,8 +1648,8 @@ fn persist<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
     Ok(())
 }
 
-/// Execute a finite local plumbing child without pipes, shell, imported config, helpers or network.
-/// File-backed I/O avoids pipe deadlock; polling enforces deadline/output bounds and collects this child.
+/// Execute finite local plumbing without shell, imported config, helpers or network.
+/// Nonblocking I/O and pinned-group native collection share one admitted whole-call deadline.
 fn run(
     repo: &Path,
     scratch: &Path,
@@ -1446,19 +1657,9 @@ fn run(
     input: &[u8],
     index: Option<&Path>,
     call: &Call,
-    author: Option<(&OwnerContext, u64)>,
+    execution: (Option<(&OwnerContext, u64)>, &native::Runtime),
 ) -> Result<Vec<u8>, Error> {
     call.check()?;
-    if input.len() > call.limit {
-        return Err(Error::Capacity);
-    }
-    call.account_bytes(input.len())?;
-    let output_limit = call.limit.min(call.bytes_left.get() as usize);
-    let mut stdin = tempfile::tempfile_in(scratch)?;
-    stdin.write_all(input)?;
-    stdin.seek(SeekFrom::Start(0))?;
-    let mut stdout = tempfile::tempfile_in(scratch)?;
-    let stderr = tempfile::tempfile_in(scratch)?;
     let mut command = Command::new("/usr/bin/git");
     command
         .env_clear()
@@ -1503,14 +1704,11 @@ fn run(
             "core.fsyncMethod=fsync",
         ])
         .args(args)
-        .current_dir(repo)
-        .stdin(Stdio::from(stdin))
-        .stdout(Stdio::from(stdout.try_clone()?))
-        .stderr(Stdio::from(stderr.try_clone()?));
+        .current_dir(repo);
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
     }
-    if let Some((owner, seconds)) = author {
+    if let Some((owner, seconds)) = execution.0 {
         let date = format!("@{seconds} +0000");
         command
             .env("GIT_AUTHOR_NAME", &owner.name)
@@ -1520,48 +1718,10 @@ fn run(
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date);
     }
-    let mut child = command.spawn()?;
-    let status = loop {
-        let failure = if call.check().is_err() {
-            Some(Error::Deadline)
-        } else {
-            match (stdout.metadata(), stderr.metadata()) {
-                (Ok(out), Ok(err))
-                    if out.len() <= output_limit as u64 && err.len() <= output_limit as u64 =>
-                {
-                    None
-                }
-                (Ok(_), Ok(_)) => Some(Error::Capacity),
-                _ => Some(Error::Io),
-            }
-        };
-        if let Some(error) = failure {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Io);
-            }
-        }
-    };
-    call.account_bytes(stderr.metadata()?.len() as usize)?;
-    if !status.success() {
+    let output = execution.1.execute(command, input, call)?;
+    if !output.status.success() {
         return Err(Error::Git);
     }
-    stdout.seek(SeekFrom::Start(0))?;
-    let mut output = Vec::new();
-    stdout
-        .take(output_limit as u64 + 1)
-        .read_to_end(&mut output)?;
-    call.account_bytes(output.len())?;
-    if output.len() > output_limit {
-        return Err(Error::Capacity);
-    }
-    Ok(output)
+    drop(output.stderr);
+    Ok(output.stdout)
 }

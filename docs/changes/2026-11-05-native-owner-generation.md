@@ -1,0 +1,6 @@
+# Native Owner Generation Repair
+
+Independent review of `956fe4c` found settled A's repeated `collect()` could clear a runtime-wide flag after B became unsettled, allowing B's pending slot and unwind resources to be lost.
+Completion now belongs only to the actual `UnsettledChild`; runtime slot retirement checks that exact owner. Each public call's one-shot owner binding follows its scratch/writer guards, so stale A cannot affect B and known A's delayed guards cannot transfer resources to B. Attachment and whole collection serialize on the same owner; no global poison reset, new pool, execution retry or public API change.
+Deciding real native controls cover A then B, repeated stale A, concurrent B unwind, actual held writer exclusion/scratch registration and native execution refusal; both scenarios fail on `956fe4c`. Original `2c86` and public real-Git test prefix/budgets remain unchanged. The actual causing Claim/credit remains the host's responsibility through caller unwind, whole native collection and reconciliation, never settled by this backend.
+This is an affected S2 repair, not full M2/production consumer/native-platform acceptance or a re-audit of closed controls. Required remotes/scheduling remain open; independent affected closure follows the actual committed return.

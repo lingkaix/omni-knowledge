@@ -34,6 +34,80 @@ A completed operation remains idempotent after the proposal advances; a legacy u
 `Error` distinguishes invalid input, operation mismatch, owner-context mismatch, signer required, capacity/deadline, busy, Git failure, I/O failure, and corrupt recovery facts.
 Errors never reflect submitted strings or Git stderr.
 
+## Additive Compiled Read Side
+
+The existing M1 prepare/install/publish signatures remain unchanged.
+`proposals(after: Option<&str>, limit: usize, &Claim) -> Result<ProposalPage, Error>` enumerates only the qualified direct app-proposal namespace, with bounded actual Git output and an exclusive continuation ID.
+A bounded native namespace-glob union implements the exclusive ASCII cursor without all-ref output, a local branch index or a dependency on newer Git's `--start-after` flag.
+`proposal_diff(proposal_id, &Claim) -> Result<ProposalDiff, Error>` returns the actual proposal, current expected accepted base, complete patch/digest/affected paths, and refuses observed tuple drift.
+`commits(start: Option<&Oid>, limit, &Claim) -> Result<CommitPage, Error>` pages actual accepted first-parent history and requalifies a supplied continuation against accepted ancestry.
+`version(&Oid, &Claim) -> Result<CommitInfo, Error>` and `version_text(&Oid, path, &Claim) -> Result<String, Error>` require actual accepted/proposal ancestry; an unrelated branch or orphan hash is not public read authority.
+M1 keeps the older trusted `read_text` method for its unpublished installable candidate.
+`read_candidate(operation_id, path, &Claim)` reads actual retained tree bytes while signing is blocked, without creating an unsigned commit.
+`CommitInfo` preserves actual author, committer, ordered parents, clocks, message, and recorded operation/agent/tool/session/origin facts; imported trailers remain attribution claims, not authentication.
+`SignatureFormat` reports presence only (`Unsigned`, `Ssh`, `Other`); it must not be mapped to a cryptographic valid-known/valid-unknown result.
+Use `verify_signature` below for actual cryptographic state; remote/adoption/schedule completion remains an active owner obligation, not a scope waiver or a claim from read tests.
+
+## Native Signing And Immutable Verification
+
+`SshSigner::select_agent(&File, native_socket: &Path, &Claim)` accepts an already selected **public** descriptor and explicit system-agent socket, never ambient `SSH_AUTH_SOCK` or a private key file.
+`History::with_signer(SshSigner)` attaches that native provider without changing the library's explicit signing mode.
+`with_committer(GitIdentity)` selects a distinct native committer for new operations; retries retain their original recorded committer.
+`setup_system_signer(destination, socket, KeyProtection, &Claim)` offers real first-use Ed25519 generation and loading through system `ssh-keygen`/`ssh-add`, only outside the home/history/cache and without overwriting an existing directory.
+`NativePrompt` requires a real native terminal; GUI/Keychain prompts remain native qualification, not a fabricated successful dialog. `UnencryptedExplicit` is an explicit human/native choice, never a model/default fallback.
+Private keys stay in the selected system directory, not operation receipts, cache, Git, packages or logs. Deterministic tests use only disposable 0700 directories/0600 keys and their own finite agent/socket.
+The exact public selected key and actual signed object are durably retained before object/ref publication, so retries do not generate a second randomized signature. Locked/missing providers preserve candidate text and return `SigningRequired`; immutable verification and completed retries do not need that provider.
+`verify_signature(&Oid, &[KnownSigner], &Claim) -> Result<Verification, Error>` requalifies the actual version, then uses native SSH cryptographic verification for distinct `ValidKnown`, `ValidUnknown`, `Invalid`, `Unsigned` states. Other signature formats remain preserved as `SignatureFormat::Other` and explicitly refuse this SSH verifier, never become falsely invalid/known.
+`KnownSigner::selected(principal, public_key)` is a **native user trust choice**, not a package claim or wire authorization. Author/committer/trailer names remain attribution data, even on a valid signature.
+`prepare_observation(&Request, &[String], &Claim)` records `external_unknown` and actual observation IDs supplied by M1 after its stable-file/quiet-period check, without inventing an editor or claiming agent authorship.
+
+## Held-File Inert Bundle API (M5)
+
+`verify_bundle(&File, &ContentDigest, &Claim) -> Result<BundleReport, BundleError>` copies one bounded held regular-file exact stream into private owned output without moving its cursor, checks native before/after identity/version and actual SHA-256, then performs actual Git header/prerequisite verification **and native pack unpack/checksum validation** in private quarantine.
+M5 must first use its actual `VerifiedSource.copy_to` into private owned output and verify that exact copied stream before handing this backend the resulting held file and expected stream digest. Neither a pathname nor a digest is source/current-context authority.
+`admit_bundle` redoes the same checks and admits actual objects only. Neither method activates refs, changes accepted/home bytes, installs imported config, trusts public package signer claims, checks out files, runs hooks/filters/submodules/helpers, or contacts a remote.
+Only bounded qualified app refs are reported; foreign refs, unsupported capabilities, bad pack checksums and missing prerequisites refuse. A hash of admitted objects still does not grant public immutable-version access.
+`BundleError::Changed` distinguishes exact-stream change; `Integrity` means malformed/native pack refusal; `History(Error)` preserves actual execution/capacity/deadline/unsettled ownership failures.
+Later ref activation requires separate native M6 context/permissions and actual expected-ref/human-confirmation rules, not `BundleReport.objects_admitted` or advertised refs as a grant.
+
+```no_run
+use std::{fs::File, path::Path};
+use knowledge_core::{data::ContentDigest, jobs::Claim};
+use knowledge_history::{History, SshSigner, Error, BundleError, BundleReport, ExistingRepository, OwnerContext};
+// These inputs are supplied only by the already-admitted native host, not decoded as MCP grants.
+fn selected_provider(public_file: &File, native_socket: &Path, claim: &Claim) -> Result<SshSigner, Error> {
+    SshSigner::select_agent(public_file, native_socket, claim)
+}
+fn native_existing_choice(selection: ExistingRepository<'_>, home: &Path,
+                          owner: OwnerContext, claim: &Claim) -> Result<History, Error> {
+    History::use_existing(selection, home, "pages", owner, claim)
+}
+fn inert_package_history(history: &History, private_verified_output: &File,
+                         exact_stream: &ContentDigest, claim: &Claim) -> Result<BundleReport, BundleError> {
+    let inspection = history.verify_bundle(private_verified_output, exact_stream, claim)?;
+    assert!(!inspection.objects_admitted);
+    history.admit_bundle(private_verified_output, exact_stream, claim)
+}
+```
+
+## Native Use-Existing Or Separate Selection
+
+`History::use_existing(ExistingRepository { git_dir, baseline, placement }, home, text_root, owner, &Claim)` uses the actual selected user's object database and reserved app refs, with a private index. `baseline` is an explicit qualified user branch; its unchanged expectation is verified transactionally when creating the initial app accepted ref.
+M6 supplies **current native** `GitPlacement::LocalUnsynced`, ownership and permission, never a decoded model/package placement/confirmed flag. `Synchronized`/`Unknown` refuse before app effects; native placement must be revalidated on later opens too. A stored binding/locator is not a placement or authority grant.
+The explicit separate choice remains `History::init` in external local app data; neither choice relocates Git, writes an absolute home .git redirect, resets the user branch, rewrites history or deletes tracked media.
+Use-existing leaves user HEAD/branches/index/staged bytes untouched and writes new app operations under the app accepted/proposal namespace. It retains original history authors/signatures and all unchanged tracked media/attributes/gitlinks; only selected regular UTF-8 text deltas are accepted. Executable regular text keeps its original mode; symlinks/submodules/binary originals cannot be silently reinterpreted as changed text.
+Existing configuration is parsed by native Git with **no-includes/stdin/name-only**, not executed/copied into app metadata or queried from personal global/system config. Unsafe includes, transport/rewrite widening, alternates and linked-worktree config refuse. Native hooks/fsmonitor/filter/diff execution remains disabled on real plumbing commands; user configuration is not overwritten.
+Configuration version drift refuses. Explicit native re-selection can validate new inert configuration, but never resets an already active app accepted history to today's user HEAD. Existing synced Git requires separate history or a separately authorized relocation; this seam does not perform relocation.
+
+## Native Cost And Unknown Ownership
+
+`History::required_resources(&Budget) -> Result<Reservation, Error>` is a conservative concurrent memory/storage envelope for the native host to compose into the **same Core P1 account/claim/prefunded credit**, not another admission or a new pool. Existing M1 prepare/install/publish signatures are unchanged; the backend borrows the original claim and never reserves the same job again.
+Native stdout/stderr/stdin are nonblocking and bounded in one loop with the original deadline and aggregate owned-group RSS observations; regular-file extent ceilings are installed before exec. No RSS-as-address-space rlimit or physical sandbox claim is substituted.
+The host must retain its actual causing claim/credit for all live child, input, result-vector/String capacity and actual file/artifact lifetimes. Returned data retained after execution requires the host's real Core retained holding, not a completed metadata-only job.
+`Error` is now `Clone`, **not `Copy`**, because `Error::Unsettled(UnsettledChild)` owns the actual unreaped process/group/I/O/lock/artifact capability, including when the History handle is dropped. Do not stringify/drop that capability and settle the causing claim.
+`UnsettledChild::inspect/collect` inspect or finitely collect only that exact machine owner; PID data cannot reconstruct it, and only the creating process may collect/unlock it. Repeated collection of settled A cannot settle/discard newer B: completion belongs to each actual owner, and scratch/writer guards bind to their own public call's owner rather than reusable runtime state. A new native execution refuses while that exact pending owner remains uncollected. Collection does not replay Git effects, discard recovery evidence or settle Core credit; retain the causing credit through caller unwind, whole native collection and artifact/result reconciliation.
+Original-process writer Drop explicitly unlocks only after known completion; an unresolved native worker retains the actual lock descriptor and private scratch. `pending_process/collect_pending` expose the same actual retained owner on a live History handle.
+
 ## Ordering And Recovery
 
 Prepare retains immutable intent before commit construction and pins the candidate under `refs/omni/prepared/<operation_id>` before returning.
@@ -55,12 +129,12 @@ A proposal never writes home bytes; confirmation still needs M1's safe installer
 ## Current Bounds And Exclusions
 
 System Git is executed directly with cleared environment, disabled global/system config, inert exact owned repository config, no hooks/helpers/filters/editors/network, explicit bare directory, and per-operation private index.
-Commands use finite file-backed I/O and exact spawned-child kill/wait on deadline; the owned child handle remains uncollected until wait, so no PID rediscovery/reuse matching or broad cleanup is used.
+Commands use finite nonblocking I/O and actual PID/start-pinned owned-group collection; unknown process/I/O/file/lock ownership is retained rather than hidden by an unbounded wait or best-effort cleanup. No broad cleanup or serialized-PID rediscovery authority is used.
 Core whole-call byte/entry ceilings and the earliest claim/call deadline remain enforced; repeated tree reads conservatively consume the same finite work ceiling.
-Output polling is not an OS disk/RSS sandbox; the admitted host owns the product's physical child/resource bound.
-Home/repository native identities are rechecked; existing arbitrary repositories, imported config, symlinks, alternates, and unsafe selected text paths refuse.
+Native resident observations and file extent ceilings are not an OS/cgroup physical sandbox; the admitted host owns the complete resource plan and actual retained Core-credit lifetime.
+Home/repository native identities are rechecked; use-existing requires explicit native selection and bounded inert config validation. Unsupported/widening config, control-file symlinks, alternates and unsafe changed text paths refuse.
 The host selects an external local non-synced history root and validates all mount overlaps; this crate checks home overlap, not provider residency.
-Signed commit production and remote synchronization remain separate integration capabilities; required signing currently returns `SigningRequired`, never silent downgrade.
+Native SSH signed commit production/verification and inert bundle admission are real implemented mechanisms; real OS Keychain/GUI prompts and macOS native lifetime behavior remain platform qualification. Actual remote synchronization/scheduling remain active completion work, not accepted scope reductions; use-existing/separate selection is implemented as above and still needs integrated/native review.
 This narrow backend does not claim complete history.md product acceptance.
 
 ## Necessity And Checks
