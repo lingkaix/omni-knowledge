@@ -61,6 +61,9 @@ const COLLECT_WAIT: Duration = Duration::from_secs(1);
 
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = libc::O_NONBLOCK;
+#[cfg(not(target_os = "macos"))]
 const O_NONBLOCK: i32 = 0o4000;
 const SIGKILL: i32 = 9;
 
