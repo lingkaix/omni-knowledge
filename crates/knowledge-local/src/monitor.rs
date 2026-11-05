@@ -5,14 +5,6 @@ use knowledge_core::{
     jobs::Reservation,
 };
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use {
-    notify::Watcher,
-    std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-};
 /// Actual selected tracking mechanism, never a silent unsupported/native-success alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackingMode {
@@ -54,11 +46,8 @@ pub struct Monitor<'a, P: LocalReadPolicy> {
 }
 /// Concrete mechanism state, not a plugin/provider registry.
 enum Driver<'a, P: LocalReadPolicy> {
-    /// Existing exact synchronous Linux FD owner.
+    /// Exact native watch owner shared by the direct-watch and monitor entry points.
     Native(HintWatch<'a, P>),
-    /// Real native joined FSEvents owner.
-    #[cfg(target_os = "macos")]
-    Mac(MacWatch),
     /// Complete prepaid metadata polling state.
     Poll(PollWatch),
 }
@@ -85,37 +74,6 @@ impl Drop for PollWatch {
         let _ = self.holding.finish();
     }
 }
-/// Actual FSEvents lifetime; notify's stop implementation stops CFRunLoop and joins its exact thread.
-#[cfg(target_os = "macos")]
-struct MacWatch {
-    /// Drop joins the native runloop BEFORE its resource promise can be released.
-    watcher: Option<notify::FsEventWatcher>,
-    /// Bounded event counter only, never queued paths/bodies/raw callbacks.
-    counter: Option<Arc<AtomicU64>>,
-    /// Native must-scan/error/overflow indication.
-    gap: Option<Arc<AtomicBool>>,
-    /// Actual native owner revision/exclusions captured at setup.
-    admission: Admission,
-    /// Prepaid runtime/thread/metadata plan, not a physical RSS enforcement claim.
-    holding: Holding,
-    /// Last observed native generation.
-    epoch: u64,
-    /// Actual latest observed activity time.
-    last: Instant,
-    /// Startup/native loss always requires reconciliation.
-    dirty: bool,
-}
-#[cfg(target_os = "macos")]
-impl Drop for MacWatch {
-    /// Real native stop/join, then callback/owner metadata destruction, then settlement; panic strands charge.
-    fn drop(&mut self) {
-        drop(self.watcher.take());
-        drop(self.counter.take());
-        drop(self.gap.take());
-        self.admission.outside = Vec::new();
-        let _ = self.holding.finish();
-    }
-}
 impl<P: LocalReadPolicy> LocalMount<P> {
     /// Select actual native hints, or ONLY explicitly permitted budgeted polling with reduced status.
     pub fn monitor(
@@ -127,28 +85,11 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             return Err(WatchError::Budget);
         }
         if !policy.polling_only {
-            #[cfg(target_os = "linux")]
             match self.watch(budget) {
                 Ok(w) => {
                     return Ok(Monitor {
                         mount: self,
                         driver: Driver::Native(w),
-                        failure: None,
-                    });
-                }
-                Err(e) => {
-                    if !policy.allow_poll_fallback {
-                        return Err(e);
-                    }
-                    return self.poll_monitor(budget, policy.poll_interval, Some(e));
-                }
-            }
-            #[cfg(target_os = "macos")]
-            match self.mac_watch(budget) {
-                Ok(w) => {
-                    return Ok(Monitor {
-                        mount: self,
-                        driver: Driver::Mac(w),
                         failure: None,
                     });
                 }
@@ -200,123 +141,23 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             failure,
         })
     }
-    /// Establish the actual locked native FSEvents binding after prepaid runtime costs.
+}
+/// Report the actual selected native mechanism, without claiming durable replay.
+fn native_mode() -> TrackingMode {
     #[cfg(target_os = "macos")]
-    fn mac_watch(&self, budget: Budget) -> Result<MacWatch, WatchError> {
-        if self.kind == BackendKind::Nas {
-            return Err(WatchError::Unsupported);
-        }
-        if budget.max_memory_bytes < 8 * 1024 * 1024 || !budget_allows_start(budget) {
-            return Err(WatchError::Budget);
-        }
-        let mut holding = match Account::current()
-            .map_err(WatchError::Admission)?
-            .reserve(
-                Reservation {
-                    memory_bytes: budget.max_memory_bytes,
-                    temporary_bytes: 0,
-                },
-                Origin::Startup,
-            )
-            .map_err(WatchError::Admission)?
-        {
-            Decision::Ready(h) => h,
-            Decision::Waiting(_) => return Err(WatchError::WaitingMemory),
-        };
-        let result = (|| {
-            let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)
-                .map_err(WatchError::Backend)?
-            {
-                Gate::Proceed(a) => a,
-                Gate::Cancel => {
-                    return Err(WatchError::Backend(BackendError::Unavailable(
-                        Unavailable::Unknown,
-                    )));
-                }
-                Gate::Refuse(e) => return Err(WatchError::Backend(e)),
-            };
-            self.root().map_err(WatchError::Backend)?;
-            let counter = Arc::new(AtomicU64::new(0));
-            let gap = Arc::new(AtomicBool::new(false));
-            let c = counter.clone();
-            let g = gap.clone();
-            let metadata = admission
-                .outside
-                .iter()
-                .try_fold(self.path.as_os_str().len() as u64, |n, p| {
-                    n.checked_add(p.as_str().len() as u64)
-                })
-                .ok_or(WatchError::Budget)?;
-            if metadata
-                .checked_mul(4)
-                .is_none_or(|n| n > budget.max_memory_bytes / 4)
-            {
-                return Err(WatchError::Budget);
-            }
-            let root = self.path.clone();
-            let exclusions = admission.outside.clone();
-            let mut watcher = notify::FsEventWatcher::new(
-                move |event: notify::Result<notify::Event>| {
-                    if event.as_ref().is_ok_and(|e| {
-                        !e.need_rescan()
-                            && !e.paths.is_empty()
-                            && e.paths.iter().all(|p| {
-                                p.strip_prefix(&root)
-                                    .ok()
-                                    .and_then(|p| p.to_str())
-                                    .is_some_and(|p| outside(p, &exclusions))
-                            })
-                    }) {
-                        return;
-                    }
-                    if match &event {
-                        Ok(e) => e.need_rescan(),
-                        Err(_) => true,
-                    } {
-                        g.store(true, Ordering::Release)
-                    }
-                    if c.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
-                        .is_err()
-                    {
-                        g.store(true, Ordering::Release)
-                    }
-                },
-                notify::Config::default(),
-            )
-            .map_err(|_| WatchError::Native)?;
-            watcher
-                .watch(&self.path, notify::RecursiveMode::Recursive)
-                .map_err(|_| WatchError::Native)?;
-            if live(self, &admission).map_err(WatchError::Backend)? != Live::Current {
-                return Err(WatchError::Backend(BackendError::Unavailable(
-                    Unavailable::Changed,
-                )));
-            }
-            Ok((watcher, counter, gap, admission))
-        })();
-        match result {
-            Ok((watcher, counter, gap, admission)) => Ok(MacWatch {
-                watcher: Some(watcher),
-                counter: Some(counter),
-                gap: Some(gap),
-                admission,
-                holding,
-                epoch: 0,
-                last: Instant::now(),
-                dirty: true,
-            }),
-            Err(e) => {
-                holding.finish().map_err(WatchError::Admission)?;
-                Err(e)
-            }
-        }
+    {
+        TrackingMode::Fsevents
+    }
+    #[cfg(target_os = "linux")]
+    {
+        TrackingMode::Inotify
     }
 }
 impl<P: LocalReadPolicy> Monitor<'_, P> {
     /// Run only due bounded metadata work; all modes require current native root/policy checks.
     pub fn poll(&mut self) -> Result<TrackingStatus, WatchError> {
         let (mode, hints) = match &mut self.driver {
-            Driver::Native(w) => (TrackingMode::Inotify, w.poll()?),
+            Driver::Native(w) => (native_mode(), w.poll()?),
             Driver::Poll(w) => {
                 let now = Instant::now();
                 let due = w.next.is_none_or(|n| now >= n);
@@ -343,39 +184,6 @@ impl<P: LocalReadPolicy> Monitor<'_, P> {
                     },
                 )
             }
-            #[cfg(target_os = "macos")]
-            Driver::Mac(w) => {
-                if live(self.mount, &w.admission).map_err(WatchError::Backend)? != Live::Current {
-                    return Err(WatchError::Backend(BackendError::Unavailable(
-                        Unavailable::Changed,
-                    )));
-                }
-                let epoch = w
-                    .counter
-                    .as_ref()
-                    .ok_or(WatchError::Native)?
-                    .load(Ordering::Acquire);
-                if epoch != w.epoch {
-                    w.epoch = epoch;
-                    w.dirty = true;
-                    w.last = Instant::now();
-                }
-                let gap = w
-                    .gap
-                    .as_ref()
-                    .ok_or(WatchError::Native)?
-                    .load(Ordering::Acquire);
-                (
-                    TrackingMode::Fsevents,
-                    HintState {
-                        epoch,
-                        reconciliation_required: w.dirty || gap,
-                        coverage_complete: !gap,
-                        quiet_millis: u64::try_from(w.last.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
-                    },
-                )
-            }
         };
         Ok(TrackingStatus {
             mode,
@@ -389,7 +197,7 @@ impl<P: LocalReadPolicy> Monitor<'_, P> {
         if let Driver::Native(w) = &mut self.driver {
             let h = w.acknowledge_reconciliation(epoch)?;
             return Ok(TrackingStatus {
-                mode: TrackingMode::Inotify,
+                mode: native_mode(),
                 native_failure: self.failure,
                 hints: h,
                 durable_event_replay: false,
@@ -403,16 +211,6 @@ impl<P: LocalReadPolicy> Monitor<'_, P> {
             w.dirty = false;
             status.hints.reconciliation_required = false;
         }
-        #[cfg(target_os = "macos")]
-        if let Driver::Mac(w) = &mut self.driver
-            && status.hints.epoch == epoch
-            && status.hints.coverage_complete
-        {
-            w.dirty = false;
-            status.hints.reconciliation_required = false;
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = epoch;
         Ok(status)
     }
 }

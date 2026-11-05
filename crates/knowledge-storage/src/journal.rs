@@ -68,6 +68,9 @@ struct Record {
     /// Optional actual qualified scan boundary; old records remain readable.
     #[serde(default)]
     checkpoint: Option<crate::tracking::Checkpoint>,
+    /// Native cursor published after the corresponding complete inventory checkpoint; never a grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_cursor: Option<crate::tracking::EventCursor>,
 }
 /// Validated metadata-only replay variants; source frames carry their exact visible anchor.
 pub(crate) enum ReplayItem {
@@ -75,6 +78,8 @@ pub(crate) enum ReplayItem {
     Source(Box<crate::tracking::Observation>, Proof),
     /// One actual complete/partial scope boundary.
     Checkpoint(crate::tracking::Checkpoint),
+    /// Actual native cursor following its durable relevant inventory transaction.
+    EventCursor(crate::tracking::EventCursor),
 }
 /// Borrow actual typed source/scope metadata without introducing another controller.
 #[derive(Clone, Copy)]
@@ -83,6 +88,8 @@ enum TrackingEvidence<'a> {
     Source(&'a crate::tracking::Observation),
     /// Scope completion evidence.
     Checkpoint(&'a crate::tracking::Checkpoint),
+    /// Post-inventory native event cursor.
+    EventCursor(&'a crate::tracking::EventCursor),
 }
 /// Next byte cursor plus an optional source record; operation records also advance the cursor.
 type ReplayRecord = (u64, Option<ReplayItem>);
@@ -130,6 +137,22 @@ impl Journal {
         };
         j.last_sequence()?;
         Ok(j)
+    }
+    /// Identify this actual visible stream incarnation by its bounded, validated first record.
+    /// An empty stream has no reusable projection generation; cache state cannot create its history.
+    pub(crate) fn projection_generation(&mut self) -> Result<Option<String>, Error> {
+        let Some((end, _)) = self.next_tracking(0, self.max)? else {
+            return Ok(None);
+        };
+        self.replay = None;
+        self.replay_next = 0;
+        self.replay_sequence = None;
+        self.file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+        let mut bytes = vec![0; usize::try_from(end).map_err(|_| Error::Budget)?];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|_| Error::Recovery)?;
+        Ok(Some(format!("{:x}", Sha256::digest(&bytes))))
     }
     /// Open retained evidence read-only, never creating a stream or modifying a damaged tail.
     pub(crate) fn read(dir: &File, writer: &str, max: u64) -> Result<Self, Error> {
@@ -250,6 +273,10 @@ impl Journal {
             Some(TrackingEvidence::Checkpoint(c)) => Some(c),
             _ => None,
         };
+        let event_cursor = match tracking {
+            Some(TrackingEvidence::EventCursor(c)) => Some(c),
+            _ => None,
+        };
         let needed = [
             self.writer.len(),
             operation.len(),
@@ -301,6 +328,7 @@ impl Journal {
             outcome: phase.to_owned(),
             observation: observation.cloned(),
             checkpoint: checkpoint.cloned(),
+            event_cursor: event_cursor.cloned(),
         };
         let mut bytes = serde_json::to_vec(&record).map_err(|_| Error::Io)?;
         if bytes.len() as u64 >= self.max {
@@ -339,6 +367,29 @@ impl Journal {
             None,
             "observed",
             (None, Some(TrackingEvidence::Source(observation))),
+            || Ok(()),
+        )
+    }
+    /// Append a bounded native cursor only after its complete inventory transaction is synchronized.
+    pub(crate) fn append_event_cursor(
+        &mut self,
+        c: &crate::tracking::EventCursor,
+    ) -> Result<Proof, Error> {
+        let mut size = crate::JsonSize {
+            bytes: 0,
+            limit: self.max / 4,
+        };
+        serde_json::to_writer(&mut size, c).map_err(|_| Error::Budget)?;
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(c).map_err(|_| Error::Budget)?)
+        );
+        self.append_with(
+            &c.scan,
+            &digest,
+            None,
+            "native_cursor",
+            (None, Some(TrackingEvidence::EventCursor(c))),
             || Ok(()),
         )
     }
@@ -494,6 +545,13 @@ impl Journal {
         let next = offset
             .checked_add(bytes.len() as u64)
             .ok_or(Error::Recovery)?;
+        if usize::from(record.observation.is_some())
+            + usize::from(record.checkpoint.is_some())
+            + usize::from(record.event_cursor.is_some())
+            > 1
+        {
+            return Err(Error::Recovery);
+        }
         let item = if let Some(o) = record.observation {
             if o.format_version != 1
                 || record.source_id.as_deref() != Some(&o.source_id)
@@ -537,6 +595,20 @@ impl Journal {
                 return Err(Error::Recovery);
             }
             Some(ReplayItem::Checkpoint(c))
+        } else if let Some(c) = record.event_cursor {
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&c).map_err(|_| Error::Budget)?)
+            );
+            if record.intent_digest != digest
+                || record.operation_id.as_deref() != Some(&c.scan)
+                || record.outcome != "native_cursor"
+                || c.event_id == 0
+                || c.volume == [0; 16]
+            {
+                return Err(Error::Recovery);
+            }
+            Some(ReplayItem::EventCursor(c))
         } else {
             None
         };

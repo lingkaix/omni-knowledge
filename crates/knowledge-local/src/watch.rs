@@ -1,7 +1,6 @@
 //! Caller-driven native hints: no worker/thread, replay claim, body probe or event-derived absence.
 use super::*;
 use knowledge_core::admission::Holding;
-#[cfg(target_os = "linux")]
 use knowledge_core::{
     admission::{Account, Decision, Origin},
     jobs::Reservation,
@@ -13,6 +12,23 @@ use rustix::{
 };
 #[cfg(target_os = "linux")]
 use std::mem::MaybeUninit;
+#[cfg(target_os = "macos")]
+#[path = "fsevents.rs"]
+mod mac;
+#[path = "fsevents_protocol.rs"]
+#[allow(dead_code)] // The portable protocol is also compiled/tested without an Apple runtime.
+mod protocol;
+
+/// Observed native device cursor; startup still requires full bounded reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeCursor {
+    /// Held selected native device and directory identity.
+    pub root: (u64, u64),
+    /// Native event-store UUID, not a pathname or read grant.
+    pub volume: [u8; 16],
+    /// Device-relative FSEvent ID observed before the inventory transaction.
+    pub event_id: u64,
+}
 
 /// Native watch setup/poll refusal; capacity never becomes an empty successful watch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,12 +41,16 @@ pub enum WatchError {
     Budget,
     /// Current selected local admission/root observation refused the call.
     Backend(BackendError),
-    /// No implemented native event binding on this target; reconciliation remains available.
+    /// The selected backend has no supported native watch (including OS-mounted NAS); reconcile explicitly.
     Unsupported,
     /// Native watch/instance/descriptor capacity is exhausted; show the limit and reconcile instead.
     Exhausted,
     /// Native descriptor/watch creation/read failed; reconcile rather than trusting continuity.
     Native,
+    /// The finite native runtime lease ended; rebuild and perform bounded catch-up.
+    LeaseExpired,
+    /// Exit could not be confirmed within the stop bound; exact handles and costs remain retained.
+    QuiescenceUnknown,
 }
 impl std::fmt::Display for WatchError {
     /// Format fixed errors only, never rejected path/content.
@@ -51,17 +71,22 @@ pub struct HintState {
     /// Actual current interval since the latest observed hint.
     pub quiet_millis: u64,
 }
-/// Exact synchronous native FD/kernel-watch lifetime; no detached native worker is presumed stopped.
+/// Exact native FD/helper lifetime; no detached callback runtime is presumed stopped.
 pub struct HintWatch<'a, P: LocalReadPolicy> {
     /// Root owner remains live and is checked at every poll/acknowledgement.
     mount: &'a LocalMount<P>,
-    /// Actual captured current owner revision/exclusions.
+    /// Actual captured current owner revision/exclusions; macOS keeps these in its funded lease.
+    #[cfg(target_os = "linux")]
     admission: Admission,
     /// Closed BEFORE releasing the same-account watch allocation.
     #[cfg(target_os = "linux")]
     fd: Option<OwnedFd>,
     /// Complete native watch/metadata/buffer plan, independent of execution mount slots.
+    #[cfg(target_os = "linux")]
     holding: Holding,
+    /// Exact funded helper lifetime, including its held root descriptor and callback context.
+    #[cfg(target_os = "macos")]
+    mac: mac::Lease,
     /// Original finite polling/work maxima.
     #[cfg(target_os = "linux")]
     budget: Budget,
@@ -74,10 +99,8 @@ pub struct HintWatch<'a, P: LocalReadPolicy> {
     /// Actual last observed activity.
     last: Instant,
 }
-/// Synchronous constructor cleanup: no async/native worker can outlive these temporary buffers.
-#[cfg(target_os = "linux")]
+/// Synchronous constructor prepayment; transfer the holding to the exact owner before native runtime setup.
 struct Pending(Option<Holding>);
-#[cfg(target_os = "linux")]
 impl Drop for Pending {
     /// Release only after later-declared native descriptors/list buffers have already been destroyed.
     fn drop(&mut self) {
@@ -99,16 +122,15 @@ fn native_error(e: rustix::io::Errno) -> WatchError {
     }
 }
 impl<P: LocalReadPolicy> LocalMount<P> {
-    /// Establish bounded actual Linux inotify hints; no per-root pool or background polling thread.
+    /// Establish actual native hints; no per-root pool or detached background polling thread.
     /// Partial enumeration/watch-limit exhaustion remains incomplete coverage and forces reconciliation.
     pub fn watch(&self, budget: Budget) -> Result<HintWatch<'_, P>, WatchError> {
         if self.kind == BackendKind::Nas {
             return Err(WatchError::Unsupported);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
-            let _ = budget;
-            return Err(WatchError::Unsupported);
+            self.mac_watch(budget, None)
         }
         #[cfg(target_os = "linux")]
         {
@@ -212,10 +234,53 @@ impl<P: LocalReadPolicy> LocalMount<P> {
         }
     }
 }
-impl<P: LocalReadPolicy> HintWatch<'_, P> {
+impl<'a, P: LocalReadPolicy> HintWatch<'a, P> {
+    /// Borrow the exact prepaid admission metadata of the actual native owner.
+    fn admission(&self) -> &Admission {
+        #[cfg(target_os = "linux")]
+        {
+            &self.admission
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.mac.admission()
+        }
+    }
+    /// Borrow the exact selected source owner; a cursor cannot substitute a different mount or policy.
+    pub fn mount(&self) -> &'a LocalMount<P> {
+        self.mount
+    }
+    /// Return an actually observed native ID only while the current selected root/policy remains live.
+    /// This is a candidate for post-inventory persistence, not acknowledgement or continuity authority.
+    pub fn native_cursor(&mut self) -> Result<Option<NativeCursor>, WatchError> {
+        self.poll()?;
+        #[cfg(target_os = "macos")]
+        {
+            Ok(self.mac.cursor())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Ok(None)
+        }
+    }
+    /// Stop the exact runtime and report unconfirmed quiescence instead of releasing its charge.
+    pub fn close(mut self) -> Result<(), WatchError> {
+        #[cfg(target_os = "macos")]
+        if !self.mac.stop() {
+            return Err(WatchError::QuiescenceUnknown);
+        }
+        #[cfg(target_os = "linux")]
+        drop(self.fd.take());
+        Ok(())
+    }
     /// Read only finite native hint work; overflow/root loss/startup can never establish absence.
     pub fn poll(&mut self) -> Result<HintState, WatchError> {
-        if live(self.mount, &self.admission).map_err(WatchError::Backend)? != Live::Current {
+        let current = live(self.mount, self.admission()).map_err(WatchError::Backend);
+        #[cfg(target_os = "macos")]
+        if !matches!(current, Ok(Live::Current)) {
+            self.mac.stop();
+        }
+        if current? != Live::Current {
             return Err(WatchError::Backend(BackendError::Unavailable(
                 Unavailable::Unknown,
             )));
@@ -265,6 +330,19 @@ impl<P: LocalReadPolicy> HintWatch<'_, P> {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let changed = self.mac.poll()?;
+            if changed {
+                self.dirty = true;
+                self.last = Instant::now();
+                self.epoch = self.epoch.checked_add(1).ok_or_else(|| {
+                    self.complete = false;
+                    WatchError::Budget
+                })?;
+            }
+            self.complete &= !self.mac.gap();
+        }
         Ok(HintState {
             epoch: self.epoch,
             reconciliation_required: self.dirty || !self.complete,
@@ -286,11 +364,17 @@ impl<P: LocalReadPolicy> HintWatch<'_, P> {
     }
 }
 impl<P: LocalReadPolicy> Drop for HintWatch<'_, P> {
-    /// Exact FD close destroys synchronous kernel watches before their reservation can be released.
+    /// Close synchronous Linux watches or stop the exact macOS lease; its Drop settles only proven exit.
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         drop(self.fd.take());
-        self.admission.outside = Vec::new();
+        #[cfg(target_os = "macos")]
+        self.mac.stop();
+        #[cfg(target_os = "linux")]
+        {
+            self.admission.outside = Vec::new();
+        }
+        #[cfg(target_os = "linux")]
         let _ = self.holding.finish();
     }
 }

@@ -59,8 +59,11 @@ impl Inventory {
             if metadata > b.memory / 8 {
                 return Err(Error::Budget);
             }
-            let projection = Projection::open(root, backend, peer)?;
             let mut stream = journal::Journal::read(dir, peer, b.control())?;
+            let generation = stream
+                .projection_generation()?
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let projection = Projection::open(root, backend, peer, &generation)?;
             let mut cursor = 0;
             loop {
                 b.check()?;

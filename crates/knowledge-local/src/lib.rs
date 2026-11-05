@@ -15,7 +15,7 @@ mod native;
 mod stream;
 mod watch;
 pub use monitor::{Monitor, MonitorPolicy, TrackingMode, TrackingStatus};
-pub use watch::{HintState, HintWatch, WatchError};
+pub use watch::{HintState, HintWatch, NativeCursor, WatchError};
 
 use knowledge_core::backend::{
     Availability, BackendError, BackendIdentity, Budget, ByteRange, Capabilities, Cursor,

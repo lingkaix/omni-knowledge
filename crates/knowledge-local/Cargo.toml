@@ -13,4 +13,6 @@ sha2 = "=0.10.9"
 rustix = { version = "=1.1.5", features = ["fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-notify = { version = "=7.0.0", default-features = false, features = ["macos_fsevent"] }
+# Reuse the existing sampled owned-runtime observer; this is not another account or executor.
+knowledge-processing = { path = "../knowledge-processing" }
+libc = "0.2"
