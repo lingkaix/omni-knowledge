@@ -114,10 +114,10 @@ fn build_consumer() -> PathBuf {
     let target = scratch.join("target");
     fs::create_dir_all(&target).expect("consumer target");
     let lock = scratch.join("build.lock");
-    fs::File::create(&lock).expect("consumer build lock");
-    let output = Command::new("flock")
-        .arg(&lock)
-        .arg("cargo")
+    let build_lock = fs::File::create(&lock).expect("consumer build lock");
+    rustix::fs::flock(&build_lock, rustix::fs::FlockOperation::LockExclusive)
+        .expect("lock consumer build");
+    let output = Command::new("cargo")
         .arg("build")
         .arg("--manifest-path")
         .arg(&manifest)
@@ -138,6 +138,7 @@ fn build_consumer() -> PathBuf {
         .env("CARGO_TERM_COLOR", "never")
         .output()
         .expect("cargo build consumer");
+    drop(build_lock);
     assert!(
         output.status.success(),
         "consumer build failed\n{}\n{}",
