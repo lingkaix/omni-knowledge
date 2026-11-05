@@ -17,7 +17,7 @@ No queue or independent admission pool is created here.
 `prepare(&Request, &Claim) -> Result<Prepared, Error>` takes `Request { operation_id, base: Option<Oid>, destination: Destination, changes: Vec<Change> }`.
 `Change { path, text: Option<String> }` replaces UTF-8 text or deletes a selected path; the request is a delta over the exact base tree, not a working-tree scan.
 `Destination::Accepted` requires owner context without an agent; `Destination::Proposal { proposal_id }` isolates agent candidates from accepted refs and home bytes.
-`publish(operation_id, &Claim) -> Result<State, Error>` atomically compares the expected target ref and creates an immutable operation ref in one native `git update-ref --stdin` transaction.
+`publish(operation_id, &Claim) -> Result<State, Error>` locks and validates the expected target ref and creates an immutable operation ref in one native `git update-ref --stdin` transaction.
 `inspect(operation_id, &Claim) -> Result<State, Error>` inspects receipts and actual refs without replay or filesystem writes.
 `head(&Claim) -> Result<Option<Oid>, Error>` returns the accepted version.
 `compare(base: Option<&Oid>, candidate: &Oid, &Claim) -> Result<Comparison, Error>` returns a complete bounded Git patch, its SHA-256 digest, and affected paths; overflow is an error, not a truncated confirmation.
@@ -36,7 +36,9 @@ Errors never reflect submitted strings or Git stderr.
 Prepare retains immutable intent before commit construction and pins the candidate under `refs/omni/prepared/<operation_id>` before returning.
 The same normalized operation and authoritative context return the same candidate after reopen; changed arguments refuse.
 A successful text operation has one commit object, even if a process stops before recording publication.
-Native Git transactions update accepted/proposal and operation refs together; prepared refs and previous operation refs are never deleted.
+Native Git transactions lock and validate accepted/proposal and operation refs as one set; prepared refs, retained tree refs, and previous operation refs are never deleted.
+The native files backend does not provide crash-atomic multi-ref persistence or a simultaneous snapshot for lock-free readers; one-sided interrupted facts remain indeterminate.
+Candidate inspection verifies actual commit tree, parents, authoritative author/context, timestamp, and operation trailers against retained intent before offering installable bytes.
 No failed transaction is retried automatically.
 Inspect after a timeout or interruption; a mismatched target is a conflict and ambiguous facts are indeterminate.
 Only a subsequent explicit publish of a proven prepared operation can finish its Git effect.
@@ -50,7 +52,9 @@ A proposal never writes home bytes; confirmation still needs M1's safe installer
 ## Current Bounds And Exclusions
 
 System Git is executed directly with cleared environment, disabled global/system config, inert exact owned repository config, no hooks/helpers/filters/editors/network, explicit bare directory, and per-operation private index.
-Commands use finite file-backed I/O and exact child kill/wait on deadline; no shell or broad process cleanup is used.
+Commands use finite file-backed I/O and exact spawned-child kill/wait on deadline; the owned child handle remains uncollected until wait, so no PID rediscovery/reuse matching or broad cleanup is used.
+Core whole-call byte/entry ceilings and the earliest claim/call deadline remain enforced; repeated tree reads conservatively consume the same finite work ceiling.
+Output polling is not an OS disk/RSS sandbox; the admitted host owns the product's physical child/resource bound.
 Home/repository native identities are rechecked; existing arbitrary repositories, imported config, symlinks, alternates, and unsafe selected text paths refuse.
 The host selects an external local non-synced history root and validates all mount overlaps; this crate checks home overlap, not provider residency.
 Signed commit production and remote synchronization remain separate integration capabilities; required signing currently returns `SigningRequired`, never silent downgrade.
