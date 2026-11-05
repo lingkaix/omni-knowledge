@@ -15,7 +15,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use support::{World, start_token};
+use support::{World, process_state, start_token};
 
 const ADMIT_READY: Duration = Duration::from_secs(2);
 const ADMIT_HANG: Duration = Duration::from_millis(500);
@@ -408,13 +408,8 @@ impl Drop for Owned {
     }
 }
 
-fn process_state(pid: u32) -> Option<char> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let end = stat.rfind(')')?;
-    stat[end + 1..].split_whitespace().next()?.chars().next()
-}
-
-/// An unreaped child remains in `/proc` as `Z` after `_exit`. That is not userspace.
+/// An unreaped child stays observable as `Z` after `_exit`. That is not userspace.
+/// `None` means the pid is absent. A live owned pid has a real state and is not absent.
 fn exited_or_absent(pid: u32) -> bool {
     match process_state(pid) {
         None | Some('Z') => true,

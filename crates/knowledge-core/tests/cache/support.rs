@@ -336,12 +336,20 @@ pub struct Lab {
 }
 
 impl Lab {
+    /// Create one private owned directory below the canonical temporary parent.
+    /// The stored path has the temporary-directory alias resolved.
+    /// Production cache checks still walk that path and still reject symlink components.
     pub fn create() -> Self {
-        let root = std::env::temp_dir().join(unique_name());
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temporary parent");
+        let root = parent.join(unique_name());
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
         builder.create(&root).expect("private lab");
         force_mode(&root, 0o700);
+        let canonical = root.canonicalize().expect("canonical lab");
+        assert_eq!(canonical, root, "lab root is not canonical");
         Self { root, armed: true }
     }
 
@@ -801,10 +809,164 @@ pub fn open_read(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 
-/// `/proc` start token for one pid. Field 22 is starttime; the command field may contain spaces.
+/// Start token for one pid. The syntax stays `{pid}:{start}` with one start field.
+/// Linux `start` is `/proc/<pid>/stat` field 22. The command field may contain spaces.
+/// macOS `start` is that pid's `proc_pidinfo` start time in microseconds.
+/// An absent pid returns `None`. A native observer that cannot read the pid is a setup failure.
 pub fn start_token(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let end = stat.rfind(')')?;
-    let starttime = stat[end + 1..].split_whitespace().nth(19)?;
-    Some(format!("{pid}:{starttime}"))
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let end = stat.rfind(')')?;
+        let starttime = stat[end + 1..].split_whitespace().nth(19)?;
+        Some(format!("{pid}:{starttime}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match darwin_proc(pid) {
+            Ok(Some(info)) => Some(format!("{pid}:{}", info.start_us)),
+            Ok(None) => None,
+            Err(reason) => panic!("native start observer unavailable: {reason}"),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        compile_error!("cache fixture pid observation is unimplemented for this target");
+    }
+}
+
+/// Process state for one pid.
+/// Linux reads the `/proc/<pid>/stat` state character.
+/// macOS maps `proc_pidinfo` `pbi_status` for that pid: `SZOMB` is `Z`.
+/// `None` means the pid is absent. A native observer failure is a setup failure.
+pub fn process_state(pid: u32) -> Option<char> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let end = stat.rfind(')')?;
+        stat[end + 1..].split_whitespace().next()?.chars().next()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match darwin_proc(pid) {
+            Ok(Some(info)) => Some(darwin_state_letter(info.status)),
+            Ok(None) => None,
+            Err(reason) => panic!("native process observer unavailable: {reason}"),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        compile_error!("cache fixture pid observation is unimplemented for this target");
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct DarwinProc {
+    status: u32,
+    start_us: u64,
+}
+
+/// Read `PROC_PIDTBSDINFO` for `pid` only.
+/// `Ok(None)` is `ESRCH`. A short write, a pid mismatch, or any other failure is `Err`.
+#[cfg(target_os = "macos")]
+fn darwin_proc(pid: u32) -> Result<Option<DarwinProc>, &'static str> {
+    const PROC_PIDTBSDINFO: i32 = 3;
+    const ESRCH: i32 = 3;
+    let Ok(pid_i) = i32::try_from(pid) else {
+        return Err("pid");
+    };
+    let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+    let size = std::mem::size_of::<ProcBsdInfo>() as i32;
+    // SAFETY: `info` is a zeroed `ProcBsdInfo` and `size` is its byte length.
+    // `__error` is cleared first so a failed `proc_pidinfo` cannot reuse a stale errno.
+    // The record is read only when the call writes exactly that length.
+    let (wrote, errno) = unsafe {
+        *__error() = 0;
+        let wrote = proc_pidinfo(pid_i, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size);
+        (wrote, *__error())
+    };
+    if wrote == 0 {
+        return if errno == ESRCH {
+            Ok(None)
+        } else {
+            Err("proc_pidinfo")
+        };
+    }
+    if wrote != size {
+        return Err("proc_pidinfo size");
+    }
+    // SAFETY: `proc_pidinfo` wrote `size` bytes into `info`.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pid {
+        return Err("proc_pidinfo pid");
+    }
+    if info.pbi_start_tvusec >= 1_000_000 {
+        return Err("start usec");
+    }
+    let start_us = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
+        .ok_or("start overflow")?;
+    Ok(Some(DarwinProc {
+        status: info.pbi_status,
+        start_us,
+    }))
+}
+
+/// Map the locked `sys/proc.h` status values. Unknown values stay visible and are not `Z`.
+#[cfg(target_os = "macos")]
+fn darwin_state_letter(status: u32) -> char {
+    match status {
+        1 => 'I',
+        2 => 'R',
+        3 => 'S',
+        4 => 'T',
+        5 => 'Z',
+        _ => '?',
+    }
+}
+
+/// Layout of libc 0.2.190 `proc_bsdinfo` / `sys/proc_info.h`.
+/// Every field keeps the kernel record aligned. Callers use only pid, status, and start time.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[allow(dead_code)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [i8; 16],
+    pbi_name: [i8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn __error() -> *mut i32;
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut std::ffi::c_void,
+        buffersize: i32,
+    ) -> i32;
 }
