@@ -1,5 +1,38 @@
 # Knowledge Core
 
+## Effective Process Admission
+
+The accepted [effective resource owner](../../docs/specs/storage.md#effective-resource-accounting) now decides the policy that the earlier preparatory records described as pending.
+`admission::Account::start(selected_directory_file, Configuration, Scheduling)` establishes one process-lifetime owner before actual work; `Account::current()` reuses it for every library and direct library host.
+A second start returns AlreadyStarted, not an empty replacement pool; inherited process capabilities fail before their copied mutex is touched.
+The already admitted directory must be current-user-owned 0700; this seam observes its held descriptor without discovering paths or replacing cache locality/ACL/overlap/source admission.
+
+Default memory is half native startup physical RAM in bytes; the explicit optional override is visible in Policy.
+The startup storage ceiling is available bytes minus max(2 GiB, ceil(volume capacity/20)); a configured override is a further ceiling and cannot spend the retained floor.
+Every admission refreshes actual selected-volume availability and subtracts the SAME queue account's outstanding unwritten promises.
+Policy/Status expose actual observations, override values, queue counts, total charges and current availability for later status/MCP mapping; no existing DTO or transport is changed.
+These counters are cooperative admitted costs, not measured process RAM, actual filesystem quotas, global allocator interception or opaque-child enforcement.
+Caller estimates must include complete concurrent child/runtime/model/reader costs and metadata/runtime overhead before allocation; standalone Queue fixtures are not process budgets.
+
+Use `Account::submit` for typed TooLargeMemory/TooLargeStorage before verified-key work enters the original queue.
+Use `job_status` for a coherent native waiting reason and the current execution-owned portion; the frozen Snapshot retains admitted intent.
+`Account::queue()` is exactly the existing owner for claim/cancel/settle, not a parallel resource controller.
+`reserve(need, Origin::BeforeVerification)` reserves real read/hash/inspection work without constructing any verified digest or cache key; Startup and current Job origins cover the other actual costs.
+Decision::Waiting(Memory) means current contention, not an impossible job or an instruction to spin; a whole-limit excess is a distinct typed refusal.
+
+`split_claim` atomically moves part of the already charged claim into a non-cloneable Holding; total charge never drops or doubles.
+Actual worker settlement releases only its remaining execution portion and its mount slot; live child/runtime/model/reader holdings stay charged independently.
+Holdings can be moved into the real resource owner and outlive execution; `grow` reserves before additional allocation, and `finish` requires actual resource settlement.
+Dropping or losing a holding releases nothing, because child/model/pin liveness is not inferred from a Rust capability disappearing.
+Reader adapters must keep the capability with their last actual memory pin, not keep a completed worker's mount slot.
+Child adapters must wait/reap and settle owned I/O before finish; opaque prototypes must apply the separately owned platform watchdog contract rather than claim this counter stops them.
+
+Generated writers reserve before writing on this selected volume, then call `Holding::written(actual_bytes)` only after the actual write; fresh native free space accounts consumed bytes, leaving only unwritten promises charged.
+Unknown/unfinished writes retain their promises; returning a counter deletes nothing and proves no child stopped, publication succeeded or generation retired.
+Existing per-format hostile-input ceilings remain unchanged; this is not a corpus cap, executor, pin registry, processing framework or durable restart recovery.
+Linux uses fixed-size kernel sysinfo and descriptor fstatvfs; macOS uses the locked safe native memory binding and descriptor volume observations, with platform evidence reported separately.
+See the [admission record](../../docs/changes/2026-11-05-resource-admission.md) for necessity, remaining caller contracts and evidence boundaries.
+
 This crate owns pure mutable-manifest inspection/name editing and the neutral ordinary mount-backend seam.
 It does not initialize, migrate, discover, activate, authorize, or persist anything.
 The [storage owner](../../docs/specs/storage.md) governs behavior; [product](../../docs/specs/product.md) assigns module responsibility, and [service](../../docs/specs/service.md) owns the separate wire boundary.

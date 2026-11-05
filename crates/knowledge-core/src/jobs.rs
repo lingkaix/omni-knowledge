@@ -115,7 +115,8 @@ pub enum Outcome {
     Cancelled,
     /// Cancellation settled an explicitly superseded job.
     Superseded,
-    /// Executor stopped offline; only explicit reconnect may queue another bounded attempt.
+    /// Executor stopped offline; only a noncancelled settlement with attempts remaining waits.
+    /// The final allowed attempt settles as Finished(Offline), not WaitingOffline.
     Offline,
     /// Invalid model/configuration; terminal until explicit host intervention/new submission.
     InvalidModel,
@@ -133,7 +134,8 @@ pub enum State {
         /// First request is retained; no request frees reservations.
         cancellation: Option<Cancellation>,
     },
-    /// Actual offline settlement released reservations; reconnect is explicit and attempt-bounded.
+    /// Actual noncancelled Offline settlement released execution reservations with attempts remaining.
+    /// Reconnect is explicit; final-attempt Offline settles as Finished(Offline), not this state.
     WaitingOffline,
     /// Terminal record retained for idempotency until explicit retirement.
     Finished(Outcome),
@@ -194,7 +196,8 @@ pub enum JobError {
     State,
     /// A lifetime sequence or attempt counter cannot advance without overflow.
     Exhausted,
-    /// A cooperative deadline cannot be represented by the host monotonic clock.
+    /// Instant::checked_add actually failed on this host; no arbitrary max_millis threshold applies.
+    /// Even u64::MAX milliseconds may be representable, so a large integer alone does not imply Clock.
     Clock,
     /// Owned state was poisoned; fail closed without resetting reservations.
     Poisoned,
@@ -221,7 +224,7 @@ impl std::error::Error for JobError {}
 
 /// One shared cooperating owner; cloning shares exactly the same bounded mutex-protected state.
 #[derive(Clone)]
-pub struct Queue(Arc<Mutex<Inner>>);
+pub struct Queue(pub(crate) Arc<Mutex<Inner>>, pub(crate) Option<u32>);
 
 /// Non-forgeable instance/job/generation binding, not an authorization or worker-stop token.
 /// Drop performs NO settlement: the record remains Unsettled and all promises remain held.
@@ -321,6 +324,8 @@ struct Job {
     budget: Budget,
     /// Explicit promises to take atomically at claim.
     reservation: Reservation,
+    /// Execution-owned portion after explicit same-account lifetime splits.
+    held: Reservation,
     /// Explicit scheduling preference.
     priority: Priority,
     /// Finite caller attempt ceiling.
@@ -373,9 +378,9 @@ struct Receipt {
 }
 
 /// All owned scheduling/accounting state; no separate controller, heap tombstones or callbacks.
-struct Inner {
+pub(crate) struct Inner {
     /// Explicit immutable caller capacities.
-    limits: Limits,
+    pub(crate) limits: Limits,
     /// Canonical retained jobs, bounded by receipt capacity.
     jobs: Vec<Job>,
     /// Every retained submission identity, including duplicate-key aliases.
@@ -383,9 +388,11 @@ struct Inner {
     /// Combined charged variable-size descriptor bytes.
     bytes: usize,
     /// Exact logical promises held until settlement.
-    reserved: Reservation,
+    pub(crate) reserved: Reservation,
     /// Shared lifetime sequence for record and claim identities; retirement never resets it.
-    sequence: u64,
+    pub(crate) sequence: u64,
+    /// Optional process-native facts and holdings in this SAME account; standalone fixtures omit it.
+    pub(crate) extra: Option<crate::admission::Extra>,
 }
 
 impl Queue {
@@ -395,21 +402,33 @@ impl Queue {
         if limits.max_pending > limits.max_records {
             return Err(JobError::Invalid);
         }
-        Ok(Self(Arc::new(Mutex::new(Inner {
-            limits,
-            jobs: Vec::new(),
-            receipts: Vec::new(),
-            bytes: 0,
-            reserved: Reservation {
-                memory_bytes: 0,
-                temporary_bytes: 0,
-            },
-            sequence: 0,
-        }))))
+        Ok(Self(
+            Arc::new(Mutex::new(Inner {
+                limits,
+                jobs: Vec::new(),
+                receipts: Vec::new(),
+                bytes: 0,
+                reserved: Reservation {
+                    memory_bytes: 0,
+                    temporary_bytes: 0,
+                },
+                sequence: 0,
+                extra: None,
+            })),
+            None,
+        ))
     }
     /// Acquire the sole accounting lock; poison never resets or releases reservations.
-    fn lock(&self) -> Result<MutexGuard<'_, Inner>, JobError> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Inner>, JobError> {
+        if self.1.is_some_and(|pid| pid != std::process::id()) {
+            return Err(JobError::WrongInstance);
+        }
         self.0.lock().map_err(|_| JobError::Poisoned)
+    }
+
+    /// Check a capability's same-account origin before private lifetime transfers.
+    pub(crate) fn owns(&self, claim: &Claim) -> bool {
+        Arc::ptr_eq(&self.0, &claim.owner.0)
     }
 
     /// Admit or deduplicate work and retain each newly accepted operation/job alias.
@@ -436,8 +455,12 @@ impl Queue {
     /// Blocked jobs stay queued; polling returns None without spinning or acquiring partial resources.
     /// All global promises and one mount slot are taken atomically, never from three controllers.
     /// The caller supplies monotonic now; Clock/Exhausted leave all claims/counters unchanged.
+    /// Clock requires actual checked_add failure, not a guessed host duration range.
     pub fn claim(&self, now: Instant) -> Result<Option<Claim>, JobError> {
         let mut i = self.lock()?;
+        if let Some(extra) = &mut i.extra {
+            extra.refresh().map_err(|_| JobError::Capacity)?;
+        }
         let candidate = i
             .jobs
             .iter()
@@ -481,6 +504,7 @@ impl Queue {
         let job = &mut i.jobs[n];
         job.attempts = attempts;
         job.state = State::Unsettled { cancellation: None };
+        job.held = reservation;
         job.generation = Some(generation);
         job.deadline = Some(deadline);
         Ok(Some(Claim {
@@ -578,7 +602,7 @@ impl Queue {
             } else {
                 State::Finished(outcome)
             };
-        let reservation = j.reservation;
+        let reservation = j.held;
         let memory_bytes = i
             .reserved
             .memory_bytes
@@ -595,6 +619,10 @@ impl Queue {
         };
         let j = &mut i.jobs[n];
         j.state = state;
+        j.held = Reservation {
+            memory_bytes: 0,
+            temporary_bytes: 0,
+        };
         j.generation = None;
         j.deadline = None;
         Ok(state)
@@ -653,7 +681,7 @@ impl Queue {
 
 impl Inner {
     /// Compute live state counts without a growing history or stale priority entries.
-    fn usage(&self) -> Usage {
+    pub(crate) fn usage(&self) -> Usage {
         Usage {
             jobs: self.jobs.len(),
             records: self.receipts.len(),
@@ -673,8 +701,21 @@ impl Inner {
                 .filter(|j| j.state == State::WaitingOffline)
                 .count(),
             descriptor_bytes: self.bytes,
-            reserved: self.reserved,
+            reserved: self.jobs.iter().fold(
+                Reservation {
+                    memory_bytes: 0,
+                    temporary_bytes: 0,
+                },
+                |sum, j| Reservation {
+                    memory_bytes: sum.memory_bytes + j.held.memory_bytes,
+                    temporary_bytes: sum.temporary_bytes + j.held.temporary_bytes,
+                },
+            ),
         }
+    }
+    /// Inspect under the same admission mutex so state and resource waits cannot race each other.
+    pub(crate) fn inspect(&self, job: u64, expected: Key<'_>) -> Result<Snapshot, JobError> {
+        Ok(self.get(job, expected)?.snapshot())
     }
     /// Resolve a retained record and validate every expected key fact before mutations.
     fn get(&self, job: u64, expected: Key<'_>) -> Result<&Job, JobError> {
@@ -705,7 +746,37 @@ impl Inner {
                 .reserved
                 .temporary_bytes
                 .checked_add(r.temporary_bytes)
-                .is_some_and(|v| v <= self.limits.temporary_bytes)
+                .is_some_and(|v| {
+                    v <= self.limits.temporary_bytes
+                        && self.extra.as_ref().is_none_or(|x| v <= x.ceiling())
+                })
+    }
+    /// Validate private claim/key/generation facts without exposing another public token constructor.
+    pub(crate) fn claim_resources(
+        &mut self,
+        claim: &Claim,
+        expected: Key<'_>,
+    ) -> Result<&mut Reservation, JobError> {
+        self.get(claim.job, expected)?;
+        let j = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.number == claim.job)
+            .ok_or(JobError::StaleClaim)?;
+        if j.generation != Some(claim.generation) || !matches!(j.state, State::Unsettled { .. }) {
+            return Err(JobError::StaleClaim);
+        }
+        Ok(&mut j.held)
+    }
+    /// Derive currently execution-owned resources without maintaining a parallel counter.
+    pub(crate) fn job_resources(&self, job: u64) -> Reservation {
+        self.jobs.iter().find(|j| j.number == job).map_or(
+            Reservation {
+                memory_bytes: 0,
+                temporary_bytes: 0,
+            },
+            |j| j.held,
+        )
     }
     /// Apply cancellation without pretending a possibly live worker settled.
     fn cancel(
@@ -775,7 +846,12 @@ impl Inner {
         {
             return Err(JobError::Conflict);
         }
-        if self.receipts.len() >= self.limits.max_records {
+        if self
+            .receipts
+            .len()
+            .checked_add(self.extra.as_ref().map_or(0, |x| x.held.len()))
+            .is_none_or(|n| n >= self.limits.max_records)
+        {
             return Err(JobError::Capacity);
         }
         let receipt_bytes = s
@@ -830,6 +906,10 @@ impl Inner {
                 key: OwnedKey::copy(s.key),
                 budget: s.budget,
                 reservation: s.reservation,
+                held: Reservation {
+                    memory_bytes: 0,
+                    temporary_bytes: 0,
+                },
                 priority: s.priority,
                 max_attempts: s.max_attempts,
                 attempts: 0,
