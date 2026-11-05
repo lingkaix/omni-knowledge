@@ -1,0 +1,7 @@
+# Forward the acquiring-process history lock correction
+
+Hosted runs retained real `Busy` failures during sequential history operations. A plain close can leave an unrelated fork/exec child temporarily holding the inherited flock's open-file description. Explicitly unlock when the acquiring process releases its guard; an inherited guard in another process must only close its own descriptor, never unlock the parent's lock.
+
+Carry the exact owner module and native descriptor/exec controls from committed `3a7d18bcca99c024cb0636b07dff54de5522b6d3`, whose acquiring-PID, inherited-child and competing-writer controls were independently reviewed with the later native milestone. This narrow integration changes only the existing lock wrapper and retains the original thirteen transaction cases and fixed proposal CAS. Unsafe operations remain denied in production; the narrowly scoped test module uses native descriptor transfer around exec rather than raw fork callbacks.
+
+Do not import the later native SSH/bundle/adoption executor here: its separate unsettled-owner-generation defect remains under repair. This correction is not a claim about that executor's settlement, all M2 features, remotes, macOS prompts or final acceptance. Preserve genuine competing-writer `Busy`; no retry, sleep, deadline or assertion weakening substitutes for lock ownership. The additional test-only libc edge uses the existing locked identity.
