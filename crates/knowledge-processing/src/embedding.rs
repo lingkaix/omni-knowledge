@@ -235,6 +235,12 @@ impl EmbeddingClient {
     }
 }
 
+/// Validate existing configuration DATA without starting any client/runtime or contacting a peer.
+/// This grants no native source/package/receiver authority; callers prepay bounded config parsing.
+pub fn validate_config(config: &EmbeddingConfig) -> Result<()> {
+    validated_endpoint(config).map(|_| ())
+}
+
 /// Reuse exact legacy endpoint/identity/deadline checks; this validation grants no native authority.
 fn validated_endpoint(config: &EmbeddingConfig) -> Result<Url> {
     let mut endpoint = Url::parse(&config.endpoint).context("Invalid embedding endpoint")?;

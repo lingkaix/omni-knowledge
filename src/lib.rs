@@ -2728,21 +2728,26 @@ impl KnowledgeBase {
 /// Native selected-library composition for the existing service runtime.
 /// Transport adapters must retain `Delivery` until their bounded write has actually settled.
 pub mod native_service {
+    #[cfg(test)]
+    mod embedding_tests;
     mod extraction;
     mod held;
     #[cfg(test)]
     mod held_tests;
+    mod models;
     mod source;
     use super::*;
     use base64::Engine;
     pub use extraction::{
-        NativeAdmitted, NativeAdmittedError, NativeExtraction, NativeExtractionError,
+        NativeAdmitted, NativeAdmittedError, NativeEmbeddedText, NativeEmbeddingError,
+        NativeEmbeddingProducer, NativeEmbeddingState, NativeExtraction, NativeExtractionError,
         NativeIndexInput,
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;
     use knowledge_retrieval::Work;
+    pub use models::NativeEmbeddingSelection;
     use omni_service as wire;
     pub use source::{NativeJobPlan, NativeProcessing, NativeSource};
     use std::os::unix::fs::MetadataExt;
@@ -2756,18 +2761,9 @@ pub mod native_service {
 
     /// Native marker bytes from the selected descriptor, not a pathname or decoded authority claim.
     fn current_marker(root: &File) -> std::result::Result<[u8; 32], wire::ErrorCode> {
-        let _work = match Work::reserve(
-            Reservation {
-                memory_bytes: 64 * 1024,
-                temporary_bytes: 0,
-            },
-            Origin::BeforeVerification,
-        )
-        .map_err(|_| wire::ErrorCode::Busy)?
-        {
-            Decision::Ready(work) => work,
-            Decision::Waiting(_) => return Err(wire::ErrorCode::Busy),
-        };
+        // The actual selection's CurrentContext retains its prepaid 64KiB scratch/FD
+        // lifetime. Checks are serialized by that SAME selected-root lock, not late
+        // global reservations that could falsely revoke a valid fully funded source.
         let mut file = File::from(
             rustix::fs::openat(
                 root,
@@ -2822,6 +2818,16 @@ pub mod native_service {
             policy: LocalPolicy,
         ) -> Result<(Self, Owner, Selection)> {
             admitted::start()?;
+            let marker_memory = match Work::reserve(
+                Reservation {
+                    memory_bytes: 64 * 1024,
+                    temporary_bytes: 0,
+                },
+                Origin::BeforeVerification,
+            )? {
+                Decision::Ready(work) => work,
+                Decision::Waiting(reason) => return Err(admitted::WaitingFor(reason).into()),
+            };
             let current = KnowledgeBase::open(&kb.root)?;
             if current.root != kb.root || current.config.library_id != kb.config.library_id {
                 bail!("selected library context changed");
@@ -2843,6 +2849,7 @@ pub mod native_service {
                     selected_root,
                     policy,
                     std::sync::Arc::new(move |root| {
+                        let _actual_context_credit = &marker_memory;
                         let Ok(held) = root.metadata() else {
                             return false;
                         };
@@ -4697,6 +4704,24 @@ mod native_kernel_builder_tests {
         )
         .unwrap();
         let input = processing.extract_indexed(claim, 65536, None).unwrap();
+        let mut marker_pressure = match account
+            .reserve(
+                Reservation {
+                    memory_bytes: account.status().unwrap().memory_available,
+                    temporary_bytes: 0,
+                },
+                knowledge_core::admission::Origin::BeforeVerification,
+            )
+            .unwrap()
+        {
+            knowledge_core::admission::Decision::Ready(holding) => holding,
+            _ => panic!("marker pressure admission"),
+        };
+        assert!(
+            input.text().is_ok(),
+            "actual currentness must use its prepaid context, not late global credit or false revocation"
+        );
+        marker_pressure.finish().unwrap();
         assert!(input.text().unwrap().contains(&word));
         assert_eq!(input.source_id().unwrap(), expected_source);
         assert_eq!(

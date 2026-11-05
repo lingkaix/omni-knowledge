@@ -234,53 +234,14 @@ impl NativeProcessing {
         child_rss_bytes: Option<u64>,
     ) -> std::result::Result<NativeIndexInput, NativeExtractionError> {
         let mut owner = self.run(claim, Inputs::default(), |processing, claim, inputs| {
-            processing
-                .source()
-                .indexed_extract_scope(claim, max_bytes)?;
-            let metadata = Account::current()?.split_claim(
-                claim,
-                processing.key(),
-                knowledge_core::jobs::Reservation {
-                    memory_bytes: 64 * 1024,
-                    temporary_bytes: 0,
-                },
-            )?;
-            inputs.resources.push(metadata);
-            knowledge_processing::extract::extract_file_funded(
-                processing.source().file()?,
-                processing.source().hint(),
-                max_bytes,
-                child_rss_bytes,
-                &mut processing.funding(claim)?,
-            )
+            indexed_value(processing, claim, inputs, max_bytes, child_rss_bytes)
         })?;
         let facts = (|| -> Result<_> {
-            use sha2::{Digest, Sha256};
-            let value = owner.value()?;
-            anyhow::ensure!(
-                matches!(value.status.as_str(), "extracted" | "partial"),
-                "no actual text representation"
-            );
-            let mut hash = Sha256::new();
-            for chunk in value.text.as_bytes().chunks(64 * 1024) {
-                owner.source()?;
-                hash.update(chunk);
-            }
-            owner.source()?;
-            let key = owner
-                .processing
-                .as_ref()
-                .expect("native processing owner")
-                .key();
-            Ok((
-                knowledge_search::RepresentationIdentity {
-                    digest: hex::encode(hash.finalize()),
-                    processor: key.processor.as_str().to_owned(),
-                    modality: knowledge_search::VectorModality::Text,
-                },
-                key.source.to_owned(),
-                key.version.as_str().to_owned(),
-            ))
+            indexed_facts(
+                owner.processing.as_ref().expect("native processing owner"),
+                owner.claim.as_ref().expect("native claim owner"),
+                owner.value()?,
+            )
         })();
         match facts {
             Ok((representation, source_id, source_digest)) => Ok(NativeIndexInput {
@@ -298,6 +259,360 @@ impl NativeProcessing {
             }
         }
     }
+}
+
+/// Opaque state of the SAME native M3/source/Claim plus funded text-provider actor/model pins.
+/// Not constructible/serializable wire data and not an independently spendable grant.
+pub struct NativeEmbeddingState {
+    provider: Option<knowledge_processing::embedding::funded::FundedTextProvider>,
+    embedded: Option<knowledge_processing::embedding::funded::EmbeddedText>,
+    model: super::NativeEmbeddingSelection,
+    extraction: Extraction,
+    representation: Option<knowledge_search::RepresentationIdentity>,
+    source_id: String,
+    source_digest: String,
+}
+/// Failed embedding still retains the actual native source/model/Claim/value/credit owner.
+pub type NativeEmbeddingError = NativeAdmittedError<NativeEmbeddingState>;
+/// One source's real M3 output and SAME funded provider/Claim, before or between vector calls.
+pub struct NativeEmbeddingProducer {
+    owner: NativeAdmitted<NativeEmbeddingState>,
+}
+/// One real provider output retains the whole actual source/model/Claim/HTTP/output-credit lifetime.
+pub struct NativeEmbeddedText {
+    owner: NativeAdmitted<NativeEmbeddingState>,
+    range: std::ops::Range<usize>,
+}
+struct NativeEmbeddingControl<'a> {
+    owner: &'a NativeAdmitted<NativeEmbeddingState>,
+}
+impl knowledge_processing::embedding::funded::EmbeddingControl for NativeEmbeddingControl<'_> {
+    fn checkpoint(&self) -> Result<()> {
+        let source = self.owner.source()?;
+        let state = &self
+            .owner
+            .output
+            .as_ref()
+            .expect("paid native embedding state")
+            .value;
+        state.model.check_source(source)?;
+        source.embedding_scope(self.owner.claim.as_ref().expect("native embedding claim"))?;
+        Ok(())
+    }
+    fn deadline(&self) -> std::time::Instant {
+        self.owner
+            .claim
+            .as_ref()
+            .expect("native embedding claim")
+            .deadline()
+    }
+}
+fn embedding_failure(
+    mut owner: NativeAdmitted<NativeEmbeddingState>,
+    cause: anyhow::Error,
+) -> NativeEmbeddingError {
+    owner.pending = Some(cause);
+    NativeAdmittedError {
+        cause: anyhow::anyhow!("native embedding refused; actual owner retained"),
+        owner: Box::new(owner),
+    }
+}
+impl NativeProcessing {
+    /// Keep the SAME actual Claim across complete provider admission BEFORE M3 and real extraction.
+    /// This single consuming factory prevents swapping equal-key/retried/foreign claims between
+    /// independently prepared producers. No new Core generation token or cloned source FD is needed.
+    /// The complete submitted plan already includes provider requirement, M3/meta and all caller
+    /// consumer/publication siblings; `None` RSS receives ONLY the remainder after these splits.
+    pub fn extract_for_embedding(
+        self,
+        claim: Claim,
+        model: super::NativeEmbeddingSelection,
+        max_bytes: usize,
+        child_rss_bytes: Option<u64>,
+    ) -> std::result::Result<NativeEmbeddingProducer, NativeEmbeddingError> {
+        let mut owner = self.run(
+            claim,
+            Inputs::default(),
+            move |processing, claim, inputs| {
+                processing.source().embedding_scope(claim)?;
+                model.check_source(processing.source())?;
+                let provider = knowledge_processing::embedding::funded::FundedTextProvider::open(
+                    model.config()?,
+                    &mut processing.funding(claim)?,
+                )?;
+                let extracted =
+                    indexed_value(processing, claim, inputs, max_bytes, child_rss_bytes)?;
+                Ok(Admitted {
+                    value: NativeEmbeddingState {
+                        provider: Some(provider),
+                        embedded: None,
+                        model,
+                        extraction: extracted.value,
+                        representation: None,
+                        source_id: String::new(),
+                        source_digest: String::new(),
+                    },
+                    retained: extracted.retained,
+                })
+            },
+        )?;
+        let facts = (|| -> Result<_> {
+            let state = owner.value()?;
+            indexed_facts(
+                owner.processing.as_ref().expect("native processing owner"),
+                owner.claim.as_ref().expect("native embedding claim"),
+                &state.extraction,
+            )
+        })();
+        match facts {
+            Ok((representation, source_id, source_digest)) => {
+                let state = &mut owner
+                    .output
+                    .as_mut()
+                    .expect("paid native embedding state")
+                    .value;
+                state.representation = Some(representation);
+                state.source_id = source_id;
+                state.source_digest = source_digest;
+                Ok(NativeEmbeddingProducer { owner })
+            }
+            Err(cause) => Err(embedding_failure(owner, cause)),
+        }
+    }
+}
+impl NativeEmbeddingProducer {
+    /// Actual M3 produced text, after full source/model/Claim/current-command checks.
+    pub fn text(&self) -> Result<&str> {
+        use knowledge_processing::embedding::funded::EmbeddingControl;
+        NativeEmbeddingControl { owner: &self.owner }.checkpoint()?;
+        Ok(&self
+            .owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value
+            .extraction
+            .text)
+    }
+    /// Bind a bounded byte range in the REAL extracted UTF-8 representation (not original bytes).
+    /// Caller-owned copied row buffers must already be prepaid. This consumes the producer until
+    /// the actual vector is destroyed with `into_producer`; it cannot respend while that vector lives.
+    pub fn embed(
+        mut self,
+        range: std::ops::Range<usize>,
+    ) -> std::result::Result<NativeEmbeddedText, NativeEmbeddingError> {
+        let initial = (|| -> Result<()> {
+            let text = self.text()?;
+            anyhow::ensure!(
+                range.start < range.end && text.get(range.clone()).is_some(),
+                "invalid extracted-text embedding range"
+            );
+            Ok(())
+        })();
+        if let Err(cause) = initial {
+            return Err(embedding_failure(self.owner, cause));
+        }
+        let provider = self
+            .owner
+            .output
+            .as_mut()
+            .expect("native embedding state")
+            .value
+            .provider
+            .take()
+            .expect("affine native provider");
+        let result = {
+            let state = &self
+                .owner
+                .output
+                .as_ref()
+                .expect("native embedding state")
+                .value;
+            provider.embed_text(
+                &state.extraction.text[range.clone()],
+                &NativeEmbeddingControl { owner: &self.owner },
+            )
+        };
+        match result {
+            Ok(embedded) => {
+                let valid = (|| -> Result<()> {
+                    let state = &self
+                        .owner
+                        .output
+                        .as_ref()
+                        .expect("native embedding state")
+                        .value;
+                    state.model.model()?.check_vector(
+                        embedded.vector(&NativeEmbeddingControl { owner: &self.owner })?,
+                    )?;
+                    Ok(())
+                })();
+                if let Err(cause) = valid {
+                    drop(embedded);
+                    return Err(embedding_failure(self.owner, cause));
+                }
+                self.owner
+                    .output
+                    .as_mut()
+                    .expect("native embedding state")
+                    .value
+                    .embedded = Some(embedded);
+                Ok(NativeEmbeddedText {
+                    owner: self.owner,
+                    range,
+                })
+            }
+            Err(cause) => Err(embedding_failure(self.owner, cause)),
+        }
+    }
+    /// Only after actual copied consumers/whole-tuple publication/delivery have settled. This
+    /// returns the original source guard, NOT a tuple-publication receipt or semantic-quality claim.
+    pub fn complete(self) -> std::result::Result<NativeSource, NativeEmbeddingError> {
+        use knowledge_processing::embedding::funded::EmbeddingControl;
+        if let Err(cause) = (NativeEmbeddingControl { owner: &self.owner }).checkpoint() {
+            return Err(embedding_failure(self.owner, cause));
+        }
+        self.owner.complete()
+    }
+}
+impl NativeEmbeddedText {
+    /// Read numeric output only under the actual SAME selected model/source/Claim context.
+    pub fn vector(&self) -> Result<&[f32]> {
+        let state = &self
+            .owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value;
+        state
+            .embedded
+            .as_ref()
+            .expect("native vector")
+            .vector(&NativeEmbeddingControl { owner: &self.owner })
+    }
+    /// Exact original-source key fact, not source authority.
+    pub fn source_id(&self) -> Result<&str> {
+        self.vector()?;
+        Ok(&self
+            .owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value
+            .source_id)
+    }
+    /// SHA of the actual original FD retained by this native owner.
+    pub fn source_digest(&self) -> Result<&str> {
+        self.vector()?;
+        Ok(&self
+            .owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value
+            .source_digest)
+    }
+    /// Exact actual M3 text/processor/input-modality relationship.
+    pub fn representation(&self) -> Result<&knowledge_search::RepresentationIdentity> {
+        self.vector()?;
+        Ok(self
+            .owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value
+            .representation
+            .as_ref()
+            .expect("real representation"))
+    }
+    /// Complete selected native package/model identity, not response DTO authority.
+    pub fn model(&self) -> Result<&knowledge_search::ModelIdentity> {
+        self.vector()?;
+        self.owner
+            .output
+            .as_ref()
+            .expect("native embedding state")
+            .value
+            .model
+            .model()
+    }
+    /// Byte range refers to the EXTRACTED representation; never an original binary/page locator.
+    pub fn range(&self) -> Result<std::ops::Range<usize>> {
+        self.vector()?;
+        Ok(self.range.clone())
+    }
+    /// Destroy the vector BEFORE returning the SAME producer/source/Claim/paid actor for another range.
+    pub fn into_producer(mut self) -> NativeEmbeddingProducer {
+        let state = &mut self
+            .owner
+            .output
+            .as_mut()
+            .expect("native embedding state")
+            .value;
+        let provider = state
+            .embedded
+            .take()
+            .expect("native vector")
+            .into_provider();
+        state.provider = Some(provider);
+        NativeEmbeddingProducer { owner: self.owner }
+    }
+}
+
+fn indexed_value(
+    processing: &NativeProcessing,
+    claim: &mut Claim,
+    inputs: &mut Inputs,
+    max_bytes: usize,
+    child_rss_bytes: Option<u64>,
+) -> Result<Admitted<Extraction>> {
+    processing
+        .source()
+        .indexed_extract_scope(claim, max_bytes)?;
+    let metadata = Account::current()?.split_claim(
+        claim,
+        processing.key(),
+        knowledge_core::jobs::Reservation {
+            memory_bytes: 64 * 1024,
+            temporary_bytes: 0,
+        },
+    )?;
+    inputs.resources.push(metadata);
+    knowledge_processing::extract::extract_file_funded(
+        processing.source().file()?,
+        processing.source().hint(),
+        max_bytes,
+        child_rss_bytes,
+        &mut processing.funding(claim)?,
+    )
+}
+
+fn indexed_facts(
+    processing: &NativeProcessing,
+    claim: &Claim,
+    value: &Extraction,
+) -> Result<(knowledge_search::RepresentationIdentity, String, String)> {
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(
+        matches!(value.status.as_str(), "extracted" | "partial"),
+        "no actual text representation"
+    );
+    let mut hash = Sha256::new();
+    for chunk in value.text.as_bytes().chunks(64 * 1024) {
+        processing.check(claim)?;
+        hash.update(chunk);
+    }
+    processing.check(claim)?;
+    let key = processing.key();
+    Ok((
+        knowledge_search::RepresentationIdentity {
+            digest: hex::encode(hash.finalize()),
+            processor: key.processor.as_str().to_owned(),
+            modality: knowledge_search::VectorModality::Text,
+        },
+        key.source.to_owned(),
+        key.version.as_str().to_owned(),
+    ))
 }
 
 impl<T> NativeAdmitted<T> {

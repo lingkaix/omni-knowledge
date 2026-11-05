@@ -101,6 +101,39 @@ impl Fixture {
         }
     }
 }
+/// Configuration/package guards bind actual owner/selection/epoch, never equal labels.
+#[test]
+fn owner_selection_lease_checks_actual_permit_and_compare_advances_without_policy_reset() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    assert!(second.owner.pin_selection(&first.selection).is_err());
+    let lease = first.owner.pin_selection(&first.selection).unwrap();
+    let command = decode_request(&browse("library")).unwrap().command;
+    let one = Runtime::new(first.authority.clone());
+    let two = Runtime::new(second.authority.clone());
+    let p = one.native_scope(&first.session, &command, None).unwrap();
+    let foreign = two.native_scope(&second.session, &command, None).unwrap();
+    lease.check_permit(&p).unwrap();
+    assert_eq!(lease.check_permit(&foreign), Err(ErrorCode::NotExposed));
+    let next = first.owner.revise_selection(&lease).unwrap();
+    assert!(lease.check().is_err());
+    assert!(p.check().is_err());
+    assert!(first.owner.revise_selection(&lease).is_err());
+    let fresh = one.native_scope(&first.session, &command, None).unwrap();
+    next.check_permit(&fresh).unwrap();
+    let mut excluded = policy();
+    excluded
+        .excluded_paths
+        .push(RelativePath::new("secret.txt").unwrap());
+    first.owner.set_policy(&first.selection, excluded).unwrap();
+    assert!(next.check().is_err());
+    first.owner.set_policy(&first.selection, policy()).unwrap();
+    assert!(
+        next.check().is_err(),
+        "restored data cannot resurrect a native lease"
+    );
+}
+
 /// Minimal actual native browse/exposure adapter used to exercise invocation authority, not safe apply.
 struct NativeBrowse {
     root: PathBuf,
