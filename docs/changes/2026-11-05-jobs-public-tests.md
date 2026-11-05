@@ -55,24 +55,24 @@ Dropping one queue handle does not settle the shared account.
 `retire` refuses a queued or unsettled job, then forgets a terminal job and its alias.
 The next submission receives a greater job number.
 The first offline settlement is `WaitingOffline`, releases the reservation, and returns only through explicit `reconnect`.
+The second offline settlement, at the attempt ceiling, keeps `attempts` at 2 and releases the reservation.
+Reconnect is then refused, and the observed state and usage stay as they were.
+That final state is not pinned to `WaitingOffline`.
 A pending-full reconnect is `Capacity`.
 `InvalidModel`, `Failed`, `Partial`, and `Completed` stay terminal under reconnect and repeated cancellation.
 A digest is 64 lowercase hex characters and is not proof that a file was hashed.
 Settlement does not create the synthetic path named by the test.
 A passed-through `Budget` is distinct from the queue `Reservation`.
 The processor fingerprint is stable across `BTreeMap` insertion order.
+`JobError::Clock` follows `Instant::checked_add` of `max_millis` from the same `Instant` passed to `claim`.
+An unrepresentable sum is `Clock` with unchanged usage.
+A representable `u64::MAX` millisecond sum is an ordinary claim and keeps the reservation.
 
-## Retained Failures
+## Parent Result
 
-`offline_reconnect_is_explicit_and_other_failures_stay_terminal` failed at the status check after the second offline settlement and the refused reconnect.
-The observed state was `Finished(Offline)`.
-The retained expectation is `WaitingOffline`.
-The earlier assertions in that test had already passed: the first offline settlement was `WaitingOffline`, reservations were released, explicit reconnect requeued the job, the second claim observed two attempts, the following reconnect returned an error, and usage did not change on that error.
-The pending-full `Capacity` case and the terminal-outcome cases in the same function did not run in the failing execution.
-`success_and_digest_spelling_are_not_authority` failed when `claim` accepted `max_millis` of `u64::MAX`.
-The retained expectation is `JobError::Clock` and unchanged usage.
-Digest spelling, the absent path, budget pass-through, and fingerprint stability in that function had already passed.
-The usage comparison after the clock refusal did not run.
+`f794ec91d2b521e17c70ae7d7adceece7391beee` remains the raw 11 passed and 2 failed record.
+Its final-attempt `WaitingOffline` pin and its unconditional `u64::MAX` clock pin are the two premises corrected here.
+That parent commit is not rewritten.
 
 ## Coverage Matrix
 
@@ -114,8 +114,7 @@ The package build used Rust 1.99.0, Cargo 1.99.0, `--locked --offline`, two Carg
 `cargo test -p knowledge-core --all-targets --locked --offline -- --list` listed 58 tests and 0 benchmarks, with no ignored entry.
 The 13 new tests are separate from the existing 45.
 `cargo clippy -p knowledge-core --all-targets --locked --offline -- -D warnings` passed.
-`cargo test -p knowledge-core --all-targets --locked --offline` passed the library harness (0 tests), `cache_contract` (16), `cache_owner` (3), and `checked_values` (7), then failed in `jobs_public_contract` with 11 passed and 2 failed.
-Cargo stopped that command before `manifest_codec` and the doc harness.
-A follow-up `--test manifest_codec` passed 19 tests, and `--doc` passed 0 doc tests.
+`cargo test -p knowledge-core --all-targets --locked --offline` passed the library harness (0 tests), `cache_contract` (16), `cache_owner` (3), `checked_values` (7), `jobs_public_contract` (13), `manifest_codec` (19), and the example harness (0).
 Nothing was ignored.
-The two jobs failures above are the committed result.
+`cargo test -p knowledge-core --doc --locked --offline` passed 0 doc tests.
+That all-targets result replaces the parent 11 passed and 2 failed jobs run.

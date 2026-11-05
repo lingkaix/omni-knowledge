@@ -593,13 +593,14 @@ fn offline_reconnect_is_explicit_and_other_failures_stay_terminal() {
     let again = owned.claim(now()).unwrap().expect("second attempt");
     assert_eq!(owned.status(job, retry.key()).unwrap().attempts, 2);
     owned.settle(&again, retry.key(), Outcome::Offline).unwrap();
+    assert_eq!(owned.status(job, retry.key()).unwrap().attempts, 2);
+    assert_eq!(usage(&owned).reserved.memory_bytes, 0);
+    let observed = owned.status(job, retry.key()).unwrap().state;
     let stuck = usage(&owned);
     assert!(owned.reconnect(job, retry.key()).is_err());
     assert_eq!(usage(&owned), stuck);
-    assert_eq!(
-        owned.status(job, retry.key()).unwrap().state,
-        State::WaitingOffline
-    );
+    assert_eq!(owned.status(job, retry.key()).unwrap().state, observed);
+    assert_eq!(owned.status(job, retry.key()).unwrap().attempts, 2);
 
     let mut blocked = open_limits();
     blocked.max_pending = 1;
@@ -830,14 +831,25 @@ fn success_and_digest_spelling_are_not_authority() {
     let clock = queue(clock_limits);
     let mut far = Ident::new("clock");
     far.budget.max_millis = u64::MAX;
+    let instant = now();
+    let representable = instant.checked_add(Duration::from_millis(u64::MAX));
     clock.submit(far.submission()).unwrap();
     let before = usage(&clock);
-    match clock.claim(now()) {
-        Err(JobError::Clock) => {}
-        Err(err) => panic!("huge deadline returned {err:?}"),
-        Ok(_) => panic!("huge deadline was claimed"),
+    match (representable.is_some(), clock.claim(instant)) {
+        (false, Err(JobError::Clock)) => assert_eq!(usage(&clock), before),
+        (false, Err(err)) => panic!("unrepresentable deadline returned {err:?}"),
+        (false, Ok(_)) => panic!("unrepresentable deadline was claimed"),
+        (true, Ok(Some(claim))) => {
+            assert_eq!(claim.budget().max_millis, u64::MAX);
+            assert_eq!(
+                usage(&clock).reserved.memory_bytes,
+                far.reservation.memory_bytes
+            );
+            assert_eq!(usage(&clock).unsettled, 1);
+        }
+        (true, Ok(None)) => panic!("representable deadline was not claimed"),
+        (true, Err(err)) => panic!("representable deadline returned {err:?}"),
     }
-    assert_eq!(usage(&clock), before);
 }
 
 fn fingerprint_digest() -> ContentDigest {
