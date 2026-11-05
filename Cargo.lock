@@ -4145,6 +4145,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-processing"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "html2text",
+ "knowledge-core",
+ "libc",
+ "mime_guess",
+ "pdf-extract",
+ "pulldown-cmark",
+ "roxmltree 0.21.1",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5258,6 +5280,7 @@ dependencies = [
  "gpui-component",
  "hex",
  "html2text",
+ "knowledge-processing",
  "libc",
  "mime_guess",
  "objc2",
