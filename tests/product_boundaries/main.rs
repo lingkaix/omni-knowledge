@@ -3,6 +3,7 @@
 //! Expectations come from the public CLI, the extraction API, and the processing
 //! owner. Controller stand-ins admit the observer and the allocation counter.
 //! They are not MCP behavior and they are not a product pass.
+//! Unresolved child ownership keeps that fixture and does not start later product work.
 
 mod fixture;
 
@@ -158,6 +159,9 @@ struct Reap {
     pid: u32,
     start_ticks: Option<u64>,
     done: bool,
+    /// Withholds signalling and `try_wait`. Finish then reports unresolved ownership.
+    /// This is an admission seam for a killable child, not an observed kernel wait failure.
+    collector_status_withheld: bool,
 }
 
 impl Drop for Reap {
@@ -165,10 +169,8 @@ impl Drop for Reap {
         if self.done {
             return;
         }
-        if let Err(error) = self.finish(true)
-            && let Ok(mut unresolved) = UNRESOLVED.lock()
-        {
-            unresolved.push(error);
+        if let Err(error) = self.finish(true) {
+            remember_unresolved(error);
         }
     }
 }
@@ -189,12 +191,20 @@ impl Reap {
             pid,
             start_ticks,
             done: false,
+            collector_status_withheld: false,
         })
     }
 
+    /// Collects the owned child, or returns the pid and start token still owned.
+    ///
+    /// When collector status is withheld, this does not signal and does not wait.
+    /// `done` stays false. That seam is not a kernel `try_wait` failure.
     fn finish(&mut self, kill: bool) -> Result<(), String> {
         if self.done {
             return Ok(());
+        }
+        if self.collector_status_withheld {
+            return Err(self.unresolved("collector-status-withheld", None));
         }
         let mut kill_error = None;
         if kill {
@@ -867,13 +877,13 @@ fn admit_ownership() -> Result<(), String> {
     };
     let alive = same_process(pid, ticks);
     println!(
-        "OBSERVE observer_setup_fault stop=setup natural=none cleanup={action} pid={pid} start_ticks={ticks:?} same_pid_after={alive}"
+        "OBSERVE observer_guard_settled stop=armed natural=none cleanup={action} pid={pid} start_ticks={ticks:?} same_pid_after={alive}"
     );
     if alive {
-        return Err(format!("setup failure left child pid={pid}"));
+        return Err(format!("armed child remained after settlement pid={pid}"));
     }
     if let Err(error) = cleanup {
-        return Err(format!("setup failure cleanup unresolved: {error}"));
+        return Err(format!("armed child cleanup unresolved: {error}"));
     }
     let pid_slot = AtomicU32::new(0);
     let tick_slot = AtomicU64::new(0);
@@ -919,11 +929,139 @@ fn admit_ownership() -> Result<(), String> {
     Ok(())
 }
 
+/// Admits the shared spawn and guard when collector status stays unresolved.
+///
+/// The child mode is the hang stand-in. Status is withheld on purpose, so this
+/// does not observe a kernel wait failure. Later product names are `NOT_RUN`,
+/// the fixture stays, and the same child is collected before its directory is removed.
+fn admit_unresolved_fixture() -> Result<(), String> {
+    let directory = std::env::temp_dir().join(format!(
+        "omni-product-boundaries-unresolved-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("unresolved fixture directory: {error}"))?;
+    let marker = directory.join("owned-marker");
+    if let Err(error) = std::fs::write(&marker, b"owned") {
+        let _ = std::fs::remove_dir_all(&directory);
+        return Err(format!("unresolved fixture marker: {error}"));
+    }
+    let mut reap = match Reap::arm(standin("hang")) {
+        Ok(reap) => reap,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&directory);
+            return Err(error);
+        }
+    };
+    let pid = reap.pid;
+    let ticks = reap.start_ticks;
+    reap.collector_status_withheld = true;
+    let mut pushed = None;
+    let disposition = observe_unresolved_disposition(&mut reap, &directory, &marker, &mut pushed);
+    reap.collector_status_withheld = false;
+    let _ = reap.finish(true);
+    drop(reap);
+    let alive = same_process(pid, ticks);
+    if !alive && let Some(obligation) = &pushed {
+        forget_unresolved(obligation);
+    }
+    if alive || !unresolved_note().is_empty() {
+        println!(
+            "CLEANUP fixture_retained path={} pid={pid} start_ticks={ticks:?} obligation={}",
+            directory.display(),
+            unresolved_note()
+        );
+        return Err(format!(
+            "admission child pid={pid} start_ticks={ticks:?} stayed unresolved alive={alive}; {disposition:?}"
+        ));
+    }
+    if let Err(error) = disposition {
+        let _ = std::fs::remove_dir_all(&directory);
+        return Err(error);
+    }
+    std::fs::remove_dir_all(&directory).map_err(|error| {
+        format!(
+            "remove collected unresolved fixture {}: {error}",
+            directory.display()
+        )
+    })?;
+    println!(
+        "OBSERVE unresolved_fixture_collected seam=collector-status-withheld kernel_wait=not-observed mode=hang pid={pid} start_ticks={ticks:?} same_pid_after=false path={} fixture_removed=true",
+        directory.display()
+    );
+    Ok(())
+}
+
+/// Runs one withheld-status pass and the fixture stop used by product cases.
+fn observe_unresolved_disposition(
+    reap: &mut Reap,
+    directory: &Path,
+    marker: &Path,
+    pushed: &mut Option<String>,
+) -> Result<(), String> {
+    let pid = reap.pid;
+    let ticks = reap
+        .start_ticks
+        .ok_or_else(|| format!("pid {pid} has no start token"))?;
+    let obligation = reap
+        .finish(true)
+        .err()
+        .ok_or_else(|| "withheld collector status was treated as collected".to_string())?;
+    if !obligation.contains("collector-status-withheld") {
+        return Err(format!("collector seam lost its label: {obligation}"));
+    }
+    if !same_process(pid, Some(ticks)) {
+        return Err(format!(
+            "withheld status did not keep owned pid={pid} start_ticks={ticks}"
+        ));
+    }
+    remember_unresolved(obligation.clone());
+    *pushed = Some(obligation);
+    let mut later = Vec::new();
+    if !stop_unresolved_fixture(&mut later, directory) {
+        return Err("unresolved ownership did not stop later fixture work".to_string());
+    }
+    let stopped = later.len() == B2_OBSERVATIONS.len() + B1_OBSERVATIONS.len()
+        && later.iter().all(|case| case.state == "NOT_RUN");
+    if !stopped {
+        return Err(format!(
+            "later fixture work was not all NOT_RUN ({})",
+            later.len()
+        ));
+    }
+    if !marker.is_file() || !directory.is_dir() {
+        return Err(format!(
+            "fixture {} was removed while pid={pid} remained unresolved",
+            directory.display()
+        ));
+    }
+    println!(
+        "OBSERVE unresolved_fixture seam=collector-status-withheld kernel_wait=not-observed mode=hang stop=unresolved natural=none cleanup=unresolved pid={pid} start_ticks={ticks} same_pid_after=true path={} later_not_run={} fixture_retained=true",
+        directory.display(),
+        later.len()
+    );
+    Ok(())
+}
+
 fn unresolved_note() -> String {
     UNRESOLVED
         .lock()
         .map(|note| note.join(";"))
         .unwrap_or_else(|poisoned| poisoned.into_inner().join(";"))
+}
+
+/// Records one owned pid and start token whose collection is still unconfirmed.
+fn remember_unresolved(error: String) {
+    if let Ok(mut unresolved) = UNRESOLVED.lock() {
+        unresolved.push(error);
+    }
+}
+
+/// Drops one obligation after that owned child has actually been collected.
+fn forget_unresolved(obligation: &str) {
+    if let Ok(mut unresolved) = UNRESOLVED.lock() {
+        unresolved.retain(|note| note != obligation);
+    }
 }
 
 fn clean_refusal(watch: &Watch, canary: &[u8], id: i64) -> bool {
@@ -1128,6 +1266,12 @@ fn run_admission() -> Result<(), String> {
         "controller",
         "observer_ownership",
         admit_ownership(),
+    );
+    record(
+        &mut cases,
+        "controller",
+        "observer_unresolved_fixture",
+        admit_unresolved_fixture(),
     );
     record(
         &mut cases,
@@ -1567,6 +1711,77 @@ fn prepare_library(directory: &Path) -> Result<PathBuf, String> {
     }
 }
 
+const B2_OBSERVATIONS: [&str; 2] = ["b2_ordinary_prefix", "b2_working_allocation"];
+
+const B1_OBSERVATIONS: [&str; 8] = [
+    "b1_unterminated_open",
+    "b1_valid_lf",
+    "b1_valid_crlf",
+    "b1_at_bound",
+    "b1_oversized_terminated",
+    "b1_empty_eof",
+    "b1_short_eof",
+    "b1_malformed_utf8",
+];
+
+/// Marks product observations that have not started as `NOT_RUN`.
+///
+/// Returns true when an unresolved pid and start token still own the fixture.
+fn unresolved_blocks(cases: &mut Vec<Outcome>, directory: &Path) -> bool {
+    let obligation = unresolved_note();
+    if obligation.is_empty() {
+        return false;
+    }
+    for name in B2_OBSERVATIONS
+        .iter()
+        .chain(B1_OBSERVATIONS.iter())
+        .copied()
+    {
+        if cases.iter().any(|case| case.name == name) {
+            continue;
+        }
+        record_not_run(
+            cases,
+            name,
+            format!(
+                "unresolved ownership retains fixture {}; {obligation}",
+                directory.display()
+            ),
+        );
+    }
+    true
+}
+
+/// Removes a fixture only after collection. An unresolved child keeps its path.
+fn settle_fixture(directory: &Path) {
+    let obligation = unresolved_note();
+    if !obligation.is_empty() {
+        println!(
+            "CLEANUP fixture_retained path={} obligation={obligation}",
+            directory.display()
+        );
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(directory) {
+        println!("CLEANUP temp_dir_remove_failed {error}");
+    } else {
+        println!("CLEANUP temp_dir_removed");
+    }
+}
+
+/// Stops the remaining product work and retains the fixture when ownership is unresolved.
+fn stop_unresolved_fixture(cases: &mut Vec<Outcome>, directory: &Path) -> bool {
+    if !unresolved_blocks(cases, directory) {
+        return false;
+    }
+    settle_fixture(directory);
+    true
+}
+
+/// Runs the ten product observations in one fixture directory.
+///
+/// A failed product predicate still continues when its child was collected.
+/// Unresolved ownership records later observations as `NOT_RUN` and keeps the directory.
 fn run_product(cases: &mut Vec<Outcome>) {
     let directory =
         std::env::temp_dir().join(format!("omni-product-boundaries-{}", std::process::id()));
@@ -1588,12 +1803,18 @@ fn run_product(cases: &mut Vec<Outcome>) {
         "b2_ordinary_prefix",
         b2_ordinary(&directory),
     );
+    if stop_unresolved_fixture(cases, &directory) {
+        return;
+    }
     record(
         cases,
         "product",
         "b2_working_allocation",
         b2_amplification(&directory),
     );
+    if stop_unresolved_fixture(cases, &directory) {
+        return;
+    }
     match prepare_library(&directory) {
         Ok(root) => {
             record(
@@ -1602,42 +1823,63 @@ fn run_product(cases: &mut Vec<Outcome>) {
                 "b1_unterminated_open",
                 b1_unterminated(&root, &directory),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_valid_lf",
                 b1_valid(&root, &directory, b"\n", 11, "b1_valid_lf"),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_valid_crlf",
                 b1_valid(&root, &directory, b"\r\n", 12, "b1_valid_crlf"),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_at_bound",
                 b1_at_bound(&root, &directory),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_oversized_terminated",
                 b1_oversized(&root, &directory),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_empty_eof",
                 b1_empty_eof(&root, &directory),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
                 "b1_short_eof",
                 b1_short_eof(&root, &directory),
             );
+            if stop_unresolved_fixture(cases, &directory) {
+                return;
+            }
             record(
                 cases,
                 "product",
@@ -1646,25 +1888,12 @@ fn run_product(cases: &mut Vec<Outcome>) {
             );
         }
         Err(error) => {
-            for name in [
-                "b1_unterminated_open",
-                "b1_valid_lf",
-                "b1_valid_crlf",
-                "b1_at_bound",
-                "b1_oversized_terminated",
-                "b1_empty_eof",
-                "b1_short_eof",
-                "b1_malformed_utf8",
-            ] {
+            for name in B1_OBSERVATIONS {
                 record_not_run(cases, name, format!("setup init: {error}"));
             }
         }
     }
-    if let Err(error) = std::fs::remove_dir_all(&directory) {
-        println!("CLEANUP temp_dir_remove_failed {error}");
-    } else {
-        println!("CLEANUP temp_dir_removed");
-    }
+    settle_fixture(&directory);
 }
 
 fn run_standin_mode(mode: &str) -> ! {

@@ -35,7 +35,9 @@ The deciding failure is live requested-byte growth during the call, not the leng
 
 The process observer is admitted on stand-ins before any product case.
 The stand-ins cover natural refusal, a lying success prefix with a canary, early stdin EOF, a hang, stdout closed while the child stays live, a terminated drain with no response, signal death, and a persistent success response.
-A separate ownership check spawns a real child, injects a post-spawn failure, and unwinds with that child armed.
+A separate ownership check spawns a real child and settles that armed child immediately.
+It does not inject a pipe or fcntl failure.
+A second armed child is unwound.
 Both paths must collect the owned pid. Cleanup does not use a blocking wait.
 The allocator counter delegates to the system allocator and is admitted with an 8 MiB hold and a 4 KiB hold.
 Those controller cases are not MCP or extractor results.
@@ -63,8 +65,9 @@ The overshoot, open stdin, canary, and prefix checks are unchanged.
 
 ## Case Count
 
-The controller count is 12: CRC-32 vector, nine observer cases, the exact-ceiling fixture check, and one allocator case that runs both windows.
-The ownership case performs both the setup-failure reap and the unwind reap.
+The controller count is 13: CRC-32 vector, ten observer cases, the exact-ceiling fixture check, and one allocator case that runs both windows.
+The ownership case settles one armed child immediately and unwinds a second armed child.
+The unresolved-fixture case withholds collector status on a hang child, keeps that fixture, skips later product observations, then collects the same child.
 The product count is 10: two XLSX cases and eight MCP cases.
 One of the XLSX cases and the unterminated MCP case are the deciding regressions.
 The other eight product cases preserve ordinary behavior.
@@ -79,3 +82,22 @@ The same bring-up already measured amplifying live growth above the unchanged ce
 The ceiling formula was not edited after that measurement.
 Linux procfs and `fcntl` admit the process observer.
 This record makes no macOS claim.
+
+## Unresolved Fixture Disposition
+
+This section corrects the ownership wording above and records the remaining fixture lifetime.
+The first ownership leg is immediate settlement after spawn.
+It is not an injected setup failure.
+The label is `observer_guard_settled`.
+
+When bounded `finish` and `Drop` both leave collection unresolved, later product observations on that fixture are `NOT_RUN`.
+The fixture path stays with the existing pid and start-token obligation.
+Ordinary removal runs only after collection is confirmed.
+A failed product predicate does not stop later observations when the child was collected.
+Product predicates, the B2 fixture, the allocator windows, and the ceiling are unchanged.
+
+The unresolved-fixture admission uses the same spawn and guard.
+It withholds collector status and does not signal or wait.
+That seam is not an observed kernel wait failure.
+The admission then collects the owned hang child and removes only that admission directory.
+A child that remains unresolved after those attempts keeps its directory.
