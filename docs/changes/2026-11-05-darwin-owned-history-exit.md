@@ -1,0 +1,7 @@
+# Preserve owned exit evidence on Darwin
+
+Run42018462814 at6d4477f passed the Linux job, but macOS reported15 native storage setup failures retaining `UnsettledChild`, a missing FSEvents test sibling, and a product-boundary timeout. Raw observations remain separate; no macOS success is inferred from this patch.
+
+History collection previously demanded BSD start information even after its exact owned child had reported an unreaped exit. Darwin may not expose that information for a zombie. An actual non-reaping `waitid` exit now pins the same owned PID/group until final reap; unavailable BSD data alone still proves nothing. Group membership, pipe EOF and final owned reap remain required, and a live process without its captured identity still refuses observation/signalling. The change also permits collecting a fast owned exit whose initial BSD sample was unavailable. No Git action is retried, no resources are considered settled after kill alone, and no second executor is added.
+
+Two actual Darwin-only controls exercise an owned unreaped exit without a BSD sample and refusal for an unidentified live group. They are not executed or qualified by Linux. Existing Linux History25 runtime+one guide and strict Clippy pass; limits, old controls and retained formats are unchanged. CI builds the required native FSEvents sibling before its tests, as the existing consumer contract requires. Product timeout and any remaining native failures are still open until a changed-head native run supplies evidence.

@@ -3,6 +3,9 @@
 
 use super::*;
 use rustix::process::{Pid, WaitId, WaitIdOptions};
+#[cfg(all(test, target_os = "macos"))]
+#[path = "native_darwin_tests.rs"]
+mod darwin_tests;
 use std::io;
 use std::process::{Child, ExitStatus};
 use std::sync::{
@@ -244,7 +247,12 @@ impl Runtime {
                     pid: child.id(),
                     start: None,
                 };
-                return self.abandon(&mut slot, child, identity, call);
+                // An exact unreaped exit still pins this owned PID/group when
+                // Darwin no longer exposes BSD information for the zombie.
+                if !matches!(exited(identity.pid), Ok(true)) {
+                    return self.abandon(&mut slot, child, identity, call);
+                }
+                identity
             }
         };
         let Some(mut stdout) = child.stdout.take() else {
@@ -411,11 +419,21 @@ fn exited(pid: u32) -> io::Result<bool> {
     .is_some())
 }
 
-/// Signal only a group whose unreaped original leader still has the captured native identity.
-fn signal(identity: ProcessIdentity) -> io::Result<()> {
-    if identity.start.is_none() || process_identity(identity.pid)?.start != identity.start {
+/// An exact owned WNOWAIT exit pins the original PID until the final reap.
+/// Missing BSD information alone is never evidence of exit or settlement.
+fn checked_leader_exit(identity: ProcessIdentity) -> io::Result<bool> {
+    let done = exited(identity.pid)?;
+    if !done
+        && (identity.start.is_none() || process_identity(identity.pid)?.start != identity.start)
+    {
         return Err(io::Error::other("owned identity changed"));
     }
+    Ok(done)
+}
+
+/// Signal only the captured live leader or its exact owned, still-unreaped exit.
+fn signal(identity: ProcessIdentity) -> io::Result<()> {
+    checked_leader_exit(identity)?;
     let pid =
         Pid::from_raw(identity.pid as i32).ok_or_else(|| io::Error::other("invalid native PID"))?;
     match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
@@ -440,7 +458,7 @@ fn collect(
     if identity.pid != child.id() {
         return Err(Error::Recovery);
     }
-    if identity.start.is_none() {
+    if identity.start.is_none() && !exited(identity.pid)? {
         identity = process_identity(child.id())?;
     }
     drop(child.stdin.take());
@@ -671,9 +689,7 @@ fn bsd(pid: u32) -> io::Result<libc::proc_bsdinfo> {
 }
 #[cfg(target_os = "macos")]
 fn group_sample(identity: ProcessIdentity) -> io::Result<Sample> {
-    if identity.start.is_none() || process_identity(identity.pid)?.start != identity.start {
-        return Err(io::Error::other("owned identity changed"));
-    }
+    let leader_done = checked_leader_exit(identity)?;
     let mut pids = [0i32; 4096];
     // SAFETY: fixed PID array for the one owned group, libproc PROC_PGRP_ONLY=2.
     let bytes = unsafe {
@@ -689,7 +705,10 @@ fn group_sample(identity: ProcessIdentity) -> io::Result<Sample> {
     }
     let mut sample = Sample { live: 0, rss: 0 };
     for &pid in &pids[..bytes as usize / std::mem::size_of::<i32>()] {
-        if pid <= 0 || bsd(pid as u32)?.pbi_status == 5 {
+        if pid <= 0 || (pid as u32 == identity.pid && leader_done) {
+            continue;
+        }
+        if bsd(pid as u32)?.pbi_status == 5 {
             continue;
         }
         // SAFETY: fixed-size native task buffer; exact result length is required.
