@@ -27,7 +27,14 @@ impl Admission {
             max_files: 100,
             max_bytes: 524_288,
             max_millis: 60_000,
-            max_memory_bytes: 64 << 20,
+            // The actual Darwin run observed up to66,715,648 child-group bytes
+            // plus3,145,728 prepaid parent bytes. This is a happy-path fixture plan,
+            // not a raised hostile ceiling; explicit with_budget refusal cases stay unchanged.
+            max_memory_bytes: if cfg!(target_os = "macos") {
+                96 << 20
+            } else {
+                64 << 20
+            },
         })
     }
     /// Use explicit existing Core work ceilings for capacity/deadline refusal checks.
@@ -58,7 +65,7 @@ impl Admission {
                 key,
                 budget,
                 reservation: Reservation {
-                    memory_bytes: 64 << 20,
+                    memory_bytes: (64 << 20).max(budget.max_memory_bytes),
                     temporary_bytes: 64 << 20,
                 },
                 priority: Priority::Normal,

@@ -162,12 +162,13 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        let complete = !lease.lost;
         Ok(HintWatch {
             mount: self,
             mac: lease,
             epoch: 0,
             dirty: true,
-            complete: true,
+            complete,
             last: Instant::now(),
         })
     }
@@ -203,22 +204,34 @@ impl Lease {
             return Err(WatchError::QuiescenceUnknown);
         }
         let child = self.child.as_mut().ok_or(WatchError::Native)?;
-        if let Some(status) = child.try_wait().map_err(|_| WatchError::Native)? {
-            return Err(match status.code() {
-                Some(0) => WatchError::LeaseExpired,
-                Some(65 | 69) => WatchError::Budget,
-                _ => WatchError::Native,
-            });
-        }
-        if Instant::now() >= self.deadline {
-            return Err(WatchError::LeaseExpired);
-        }
-        match knowledge_processing::worker::resident_bytes(child.id()) {
-            Ok(n) if n <= self.budget.max_memory_bytes => (),
-            _ => {
+        let startup_exit = if let Some(status) = child.try_wait().map_err(|_| WatchError::Native)? {
+            if status.success() && self.frame.is_none() {
+                // The finite native work budget can expire between READY and the
+                // parent's first poll. Drain the ACTUAL queued READY, but latch loss:
+                // no event cursor or quiet/continuity claim can survive this exit.
                 self.lost = true;
-                self.stop();
-                return Err(WatchError::Budget);
+                true
+            } else {
+                return Err(match status.code() {
+                    Some(0) => WatchError::LeaseExpired,
+                    Some(65 | 69) => WatchError::Budget,
+                    _ => WatchError::Native,
+                });
+            }
+        } else {
+            false
+        };
+        if !startup_exit {
+            if Instant::now() >= self.deadline {
+                return Err(WatchError::LeaseExpired);
+            }
+            match knowledge_processing::worker::resident_bytes(child.id()) {
+                Ok(n) if n <= self.budget.max_memory_bytes => (),
+                _ => {
+                    self.lost = true;
+                    self.stop();
+                    return Err(WatchError::Budget);
+                }
             }
         }
         let start = Instant::now();
@@ -234,6 +247,7 @@ impl Lease {
                 .ok_or(WatchError::Native)?
                 .read(&mut self.bytes[self.used..])
             {
+                Ok(0) if startup_exit && self.frame.is_some() => return Ok(changed),
                 Ok(0) => {
                     self.lost = true;
                     return Err(WatchError::Native);
@@ -286,23 +300,31 @@ impl Lease {
     }
     /// Request stop, then wait a finite bound for actual exit; retain exact resources if unknown.
     pub(super) fn stop(&mut self) -> bool {
-        if self.unknown {
-            return false;
-        }
         if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let start = Instant::now();
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    _ if start.elapsed() >= Duration::from_millis(250) => {
-                        self.unknown = true;
-                        std::mem::forget(self.child.take());
-                        std::mem::forget(self.output.take());
-                        std::mem::forget(self.holding.take());
-                        return false;
+            // Probe the exact owned handle before signalling. ECHILD/native errors
+            // never authorize a stale PID signal or a synthetic settlement.
+            match child.try_wait() {
+                Ok(Some(_)) => (),
+                Ok(None) if self.unknown => return false,
+                Err(_) => {
+                    self.unknown = true;
+                    return false;
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let start = Instant::now();
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,
+                            _ if start.elapsed() >= Duration::from_millis(250) => {
+                                self.unknown = true;
+                                // Keep every ACTUAL owner reachable. Drop foreground-collects;
+                                // there is no forgotten child/pipe/holding quarantine plus exit.
+                                return false;
+                            }
+                            _ => std::thread::sleep(Duration::from_millis(5)),
+                        }
                     }
-                    _ => std::thread::sleep(Duration::from_millis(5)),
                 }
             }
         }
@@ -316,12 +338,20 @@ impl Lease {
 impl Drop for Lease {
     /// No Rust callback context crosses this boundary; only confirmed process exit releases costs.
     fn drop(&mut self) {
-        if self.stop() {
-            self.admission.outside = Vec::new();
-            self.helper = PathBuf::new();
-            if let Some(mut h) = self.holding.take() {
-                let _ = h.finish();
+        let mut reported = false;
+        while !self.stop() {
+            if !reported {
+                eprintln!(
+                    "native FSEvents collection unresolved; retaining actual child, descriptors and credit in foreground"
+                );
+                reported = true;
             }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.admission.outside = Vec::new();
+        self.helper = PathBuf::new();
+        if let Some(mut h) = self.holding.take() {
+            let _ = h.finish();
         }
     }
 }
