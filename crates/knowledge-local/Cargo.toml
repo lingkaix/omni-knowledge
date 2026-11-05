@@ -1,0 +1,13 @@
+[package]
+name = "knowledge-local"
+version = "0.1.0"
+edition = "2024"
+description = "Confined ordinary-local read adapter for one selected mount root"
+license = "Apache-2.0"
+
+[dependencies]
+knowledge-core = { path = "../knowledge-core" }
+sha2 = "=0.10.9"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "=1.1.5", features = ["fs"] }

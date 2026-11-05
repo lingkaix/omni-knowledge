@@ -200,7 +200,7 @@
     {
       "path": "src/main.rs",
       "upstream_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892",
-      "vendored_sha256": "9018d50f4842a0cc3e435492d76d4f842d5e71bf69c454cf83601afe85e1ed72"
+      "vendored_sha256": "9c83727b4471787e3f7650c049e86e0a7b863e00c871104347c68c31853fcae9"
     },
     {
       "path": "src/model.rs",

@@ -89,13 +89,14 @@ pub fn extract(path: &Path, max_bytes: usize) -> Result<Extraction> {
         format.as_str()
     };
     let mut resolved_format = detected_format.to_string();
+    let mut output_truncated = false;
     let parsed: Result<Option<String>> = match detected_format {
         "pdf" => std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&bytes))
             .map_err(|_| anyhow!("PDF parser failed on this document"))
             .and_then(|result| result.map(Some).map_err(anyhow::Error::from)),
         "epub" => crate::epub::read_epub(path, max_bytes).map(Some),
         "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => {
-            office_text(path, detected_format, max_bytes).map(Some)
+            office_text(path, detected_format, max_bytes, &mut output_truncated).map(Some)
         }
         "doc" | "rtf" => legacy_office_text(path, max_bytes).map(Some),
         "html" => String::from_utf8(bytes)
@@ -122,7 +123,7 @@ pub fn extract(path: &Path, max_bytes: usize) -> Result<Extraction> {
     };
     match parsed {
         Ok(Some(mut text)) => {
-            let truncated = truncate_utf8(&mut text, max_bytes);
+            let truncated = truncate_utf8(&mut text, max_bytes) || output_truncated;
             let empty = text.trim().is_empty();
             let mut warnings = Vec::new();
             if truncated {
@@ -444,8 +445,14 @@ pub(crate) fn read_zip_text(
     String::from_utf8(bytes).with_context(|| format!("Archive member is not UTF-8: {name}"))
 }
 
-/// Extract text runs and paragraphs from DOCX, PPTX, XLSX, and OpenDocument containers.
-fn office_text(path: &Path, format: &str, max_bytes: usize) -> Result<String> {
+/// Extract Office text against the shared XML byte budget; return read/parse/admission errors.
+/// Set output_truncated when XLSX applies max_bytes during assembly rather than after return.
+fn office_text(
+    path: &Path,
+    format: &str,
+    max_bytes: usize,
+    output_truncated: &mut bool,
+) -> Result<String> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     if archive.len() > 100_000 {
         bail!("Office archive contains too many members");
@@ -497,7 +504,11 @@ fn office_text(path: &Path, format: &str, max_bytes: usize) -> Result<String> {
             }
             Ok(output)
         }
-        "xlsx" => spreadsheet_text(&mut archive, &mut remaining),
+        "xlsx" => {
+            let (text, truncated) = spreadsheet_text(&mut archive, &mut remaining, max_bytes)?;
+            *output_truncated = truncated;
+            Ok(text)
+        }
         _ => xml_paragraph_text(
             &read_zip_text(&mut archive, "content.xml", &mut remaining)?,
             "",
@@ -551,83 +562,125 @@ fn xml_paragraph_text(source: &str, text_tag: &str) -> Result<String> {
     Ok(output)
 }
 
-/// Resolve XLSX shared and inline strings and retain numeric values in worksheet order.
-fn spreadsheet_text(archive: &mut zip::ZipArchive<File>, remaining: &mut usize) -> Result<String> {
-    let shared = if archive
+/// One XLSX representation prefix; no per-cell owned text or full row/output staging.
+struct SpreadsheetOutput {
+    /// Longest fitting UTF-8 prefix of the original ordered representation.
+    text: String,
+    /// Existing caller-selected representation ceiling, not an independent format limit.
+    max_bytes: usize,
+    /// A nonempty suffix was omitted; later runs must not fill a split character's unused bytes.
+    truncated: bool,
+}
+
+impl SpreadsheetOutput {
+    /// Choose the fitting UTF-8 prefix before copying text; remember any omitted suffix.
+    fn push(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        let end = text.floor_char_boundary((self.max_bytes - self.text.len()).min(text.len()));
+        self.text.push_str(&text[..end]);
+        self.truncated = end < text.len();
+    }
+
+    /// Append borrowed rich/inline text runs in document order without joining or cloning them.
+    fn push_runs(&mut self, node: roxmltree::Node<'_, '_>) {
+        for child in node.descendants() {
+            if self.truncated {
+                break;
+            }
+            if child.is_text()
+                && child
+                    .parent()
+                    .is_some_and(|parent| parent.tag_name().name() == "t")
+            {
+                self.push(child.text().unwrap_or(""));
+            }
+        }
+    }
+}
+
+/// Resolve borrowed XLSX shared/inline runs and numeric values into a bounded ordered prefix.
+/// Charge all selected XML to remaining, even after output truncation, retaining late failures.
+/// Return text plus omission state for public partial coverage; propagate ZIP/XML/budget errors.
+fn spreadsheet_text(
+    archive: &mut zip::ZipArchive<File>,
+    remaining: &mut usize,
+    max_bytes: usize,
+) -> Result<(String, bool)> {
+    let shared_xml = if archive
         .file_names()
         .any(|name| name == "xl/sharedStrings.xml")
     {
-        let xml = read_zip_text(archive, "xl/sharedStrings.xml", remaining)?;
-        let document = roxmltree::Document::parse(&xml)?;
-        document
-            .descendants()
-            .filter(|node| node.is_element() && node.tag_name().name() == "si")
-            .map(|node| {
-                node.descendants()
-                    .filter(|child| {
-                        child.is_text()
-                            && child
-                                .parent()
-                                .is_some_and(|parent| parent.tag_name().name() == "t")
-                    })
-                    .filter_map(|child| child.text())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
+        Some(read_zip_text(archive, "xl/sharedStrings.xml", remaining)?)
     } else {
-        Vec::new()
+        None
     };
+    let shared_document = shared_xml
+        .as_deref()
+        .map(roxmltree::Document::parse)
+        .transpose()?;
+    let shared = shared_document
+        .as_ref()
+        .map(|document| {
+            document
+                .descendants()
+                .filter(|node| node.is_element() && node.tag_name().name() == "si")
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut names: Vec<String> = archive
         .file_names()
         .filter(|name| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
         .map(str::to_owned)
         .collect();
     names.sort_by_key(|name| numeric_member_order(name));
-    let mut output = String::new();
+    let mut output = SpreadsheetOutput {
+        text: String::new(),
+        max_bytes,
+        truncated: false,
+    };
     for name in names {
-        output.push_str(&format!("\n## {name}\n\n"));
+        output.push("\n## ");
+        output.push(&name);
+        output.push("\n\n");
         let xml = read_zip_text(archive, &name, remaining)?;
         let document = roxmltree::Document::parse(&xml)?;
         for row in document
             .descendants()
             .filter(|node| node.is_element() && node.tag_name().name() == "row")
         {
-            let mut cells = Vec::new();
-            for cell in row
+            for (index, cell) in row
                 .children()
                 .filter(|node| node.is_element() && node.tag_name().name() == "c")
+                .enumerate()
             {
+                if index != 0 {
+                    output.push("\t");
+                }
                 let value = cell
                     .descendants()
                     .find(|node| node.is_element() && node.tag_name().name() == "v")
                     .and_then(|node| node.text())
                     .unwrap_or("");
-                let text = match cell.attribute("t") {
-                    Some("s") => value
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|index| shared.get(index))
-                        .cloned()
-                        .unwrap_or_default(),
-                    Some("inlineStr") => cell
-                        .descendants()
-                        .filter(|node| {
-                            node.is_text()
-                                && node
-                                    .parent()
-                                    .is_some_and(|parent| parent.tag_name().name() == "t")
-                        })
-                        .filter_map(|node| node.text())
-                        .collect(),
-                    _ => value.to_string(),
-                };
-                cells.push(text);
+                match cell.attribute("t") {
+                    Some("s") => {
+                        if let Some(node) = value
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|index| shared.get(index))
+                        {
+                            output.push_runs(*node);
+                        }
+                    }
+                    Some("inlineStr") => output.push_runs(cell),
+                    _ => output.push(value),
+                }
             }
-            output.push_str(&cells.join("\t"));
-            output.push('\n');
+            output.push("\n");
         }
     }
-    Ok(output)
+    Ok((output.text, output.truncated))
 }
 
 /// Use the existing macOS converter for legacy Office and RTF with bounded output and timeout.

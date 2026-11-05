@@ -30,13 +30,14 @@ M0-P01 and M0-P02 change no analyzer, scoring, coverage, source admission, gener
 | M0-P01: machinery lock location | `src/store.rs` now includes `../../upstream/openkit-b67cd0f2.Cargo.lock` and explains its provenance role. The old relative include would silently hash Omni's root lock after relocation. The retained bytes preserve upstream machinery identity. | Generic explicit build/dependency identity input instead of a monorepo-relative assumption; do not upstream this host-specific filename. |
 | M0-P02: Rust 1.99 Clippy compatibility | `decode_digest` uses fixed two-byte `as_chunks` instead of `chunks_exact`. Its prior 64-byte validation makes the empty remainder invariant unchanged. Rust 1.99's strict Clippy gate rejected the original form. | Direct mechanical iterator update, with unchanged decoding and public digest-window tests. |
 | DIAG-01: native limit failure context | `set_limit` reports the resource, errno, inherited limits, and requested limits from the failing `getrlimit` or `setrlimit`. | Diagnostic context at that call. Do not upstream a changed ceiling, a fallback, or a resource-policy change. |
+| DIAG-02: self virtual and resident sizes | One summary reports this process's virtual size and resident size at the same install. Linux copies `VmSize` and `VmRSS` from `/proc/self/status`. macOS reads `mach_task_basic_info` `virtual_size` and `resident_size` in bytes. Success writes one stderr line. Failure puts that one summary in the existing error. | Fact at the install call. The AS 2 GiB, file 512 MiB, and CPU order stay unchanged. The numbers are not a ceiling. |
 
 Remove a patch when upstream supplies its responsibility, then rerun the same downstream and parity checks before updating provenance.
 The [change record](../../docs/changes/2026-11-04-kernel-vendor.md) records M0 proof and exclusions.
 
 ## Observation Corrections
 
-OBS-01 and OBS-02 are entries in the same replayable patch as M0-P01, M0-P02, and DIAG-01.
+OBS-01 and OBS-02 are entries in the same replayable patch as M0-P01, M0-P02, DIAG-01, and DIAG-02.
 They do not change production path handling, resource ceilings, or controller policy.
 `PROVENANCE.json` keeps every original upstream hash and records the current vendored hashes of `src/main.rs` and `src/tests.rs`.
 
