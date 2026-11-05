@@ -15,7 +15,8 @@ use std::process::exit;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    attach, generous_limits, pin_object, publish_bytes, read_exact, start_token, variant_name,
+    attach, generous_limits, pin_object, process_state, publish_bytes, read_exact, start_token,
+    variant_name,
 };
 
 fn main() {
@@ -160,7 +161,9 @@ fn inherited_owner(path: Option<String>) -> i32 {
     // drops this guard. The inherited child stays blocked until UNBLOCK.
     let mut child = ChildGuard::arm(pid);
     unsafe { close(fds[0]) };
-    let token = start_token(pid as u32).unwrap_or_else(|| "missing".to_string());
+    let Some(token) = start_token(pid as u32) else {
+        return report_failure(&mut child, "ERROR Observer");
+    };
     say(&format!("CHILD {pid} {token}"));
     say("HELD");
     let mut cache = Some(cache);
@@ -238,7 +241,9 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         }
     }
     let mut child = ChildGuard::arm(pid);
-    let token = start_token(pid as u32).unwrap_or_else(|| "missing".to_string());
+    let Some(token) = start_token(pid as u32) else {
+        return report_failure(&mut child, "ERROR Observer");
+    };
     say(&format!("CHILD {pid} {token}"));
     unsafe { close(fds[1]) };
     let ready = read_byte_bounded(fds[0], CHILD_SIGNAL_MS);
@@ -250,8 +255,10 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         }
         Err(_) => return report_failure(&mut child, "ERROR ChildPipe"),
     }
-    if !observed_zombie(pid) {
-        return report_failure(&mut child, "ERROR ChildUserspace");
+    match observed_zombie(pid) {
+        Ok(true) => {}
+        Ok(false) => return report_failure(&mut child, "ERROR ChildUserspace"),
+        Err(()) => return report_failure(&mut child, "ERROR Observer"),
     }
     say("CHILD_DROPPED");
     say("HELD");
@@ -604,22 +611,83 @@ unsafe fn die_uncollected() -> ! {
     }
 }
 
-fn observed_zombie(pid: i32) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(CHILD_SIGNAL_MS as u64);
-    loop {
-        match proc_state(pid) {
-            Some('Z') => return true,
-            None => return false,
-            Some(_) if Instant::now() >= deadline => return false,
-            Some(_) => thread::yield_now(),
+/// `Ok(true)` is an unreaped zombie. `Ok(false)` is userspace, absence, or the deadline.
+/// `Err` means the native observer could not answer. That is a setup failure, not a pass.
+fn observed_zombie(pid: i32) -> Result<bool, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = Instant::now() + Duration::from_millis(CHILD_SIGNAL_MS as u64);
+        loop {
+            match process_state(pid as u32) {
+                Some('Z') => return Ok(true),
+                None => return Ok(false),
+                Some(_) if Instant::now() >= deadline => return Ok(false),
+                Some(_) => thread::yield_now(),
+            }
         }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        observe_darwin_zombie(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        compile_error!("cache consumer zombie observation is unimplemented for this target");
     }
 }
 
-fn proc_state(pid: i32) -> Option<char> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let end = stat.rfind(')')?;
-    stat[end + 1..].split_whitespace().next()?.chars().next()
+/// Confirm `SZOMB` for this pid and an unreaped exit from `waitid` `WNOWAIT`.
+/// `WNOWAIT` leaves the child waitable. `ChildGuard` still collects it.
+#[cfg(target_os = "macos")]
+fn observe_darwin_zombie(pid: i32) -> Result<bool, ()> {
+    let deadline = Instant::now() + Duration::from_millis(CHILD_SIGNAL_MS as u64);
+    loop {
+        let state = process_state(pid as u32);
+        let exited = unreaped_owned_exit(pid)?;
+        if state == Some('Z') && exited {
+            return Ok(true);
+        }
+        if state.is_none() {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::yield_now();
+    }
+}
+
+/// `Ok(true)` means this pid has exited and remains waitable.
+/// `Ok(false)` means it is still running or is not this parent's unreaped child.
+/// `Err` is a `waitid` failure other than `EINTR` or `ECHILD`.
+#[cfg(target_os = "macos")]
+fn unreaped_owned_exit(pid: i32) -> Result<bool, ()> {
+    if pid <= 0 {
+        return Err(());
+    }
+    // SAFETY: `info` is zeroed `siginfo_t` storage for one `waitid` call.
+    // `P_PID` selects this pid only. `WNOWAIT` does not collect it.
+    unsafe {
+        let mut info = std::mem::zeroed::<libc::siginfo_t>();
+        *libc::__error() = 0;
+        let options = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+        let waited = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, options);
+        if waited != 0 {
+            let err = *libc::__error();
+            if err == EINTR || err == libc::ECHILD {
+                return Ok(false);
+            }
+            return Err(());
+        }
+        if info.si_pid == 0 || info.si_pid != pid {
+            return if info.si_pid == 0 { Ok(false) } else { Err(()) };
+        }
+        match info.si_code {
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED => Ok(true),
+            _ => Ok(false),
+        }
+    }
 }
 
 fn read_byte_bounded(fd: i32, timeout_ms: i32) -> io::Result<u8> {
