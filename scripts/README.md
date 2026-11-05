@@ -75,13 +75,16 @@ Normal exit and interruption also settle remaining command descendants.
 It checks FFmpeg discovery without opening a library or contacting a provider.
 It is artifact startup/health evidence, not the full service or native GUI acceptance suite.
 
-`.github/workflows/ci.yml` runs two fixed jobs on relevant main pushes or manual dispatch: Ubuntu 24.04 x86_64 and macOS 15 ARM64.
+`.github/workflows/ci.yml` runs two fixed headless jobs on relevant main pushes or manual dispatch: Ubuntu 24.04 x86_64 and macOS 15 ARM64.
+GUI milestone M7 is deferred. The headless jobs do not run `python3 scripts/gate.py gui` and are not blocked on a GPUI or NSH launch.
+The local `sh scripts/bundle-macos.sh` path, including its unsigned CI option, remains for the retained desktop bundle and is not this headless gate.
 Each job checks its actual architecture and installs the repository-selected Rust with a minimal profile.
 Actions are pinned by commit; checkout does not retain Git credentials.
 New pushes cancel obsolete runs on the same ref.
 Artifacts and diagnostic evidence have 14-day retention.
-The Linux archive and macOS ZIP are unpacked and their bundled CLI is smoke-tested before upload.
-The ZIP preserves app permissions and bundle structure; no release or deployment is performed.
+Each headless archive is produced by `scripts/bundle-headless.py` from Cargo-selected product binaries, unpacked, smoke-tested, and verified before upload.
+The macOS artifact is a headless tar, not an unsigned `.app`.
+No release or deployment is performed.
 
 ## macOS Bundle
 
@@ -98,6 +101,20 @@ This explicit option omits app signing and app-signature verification only in th
 It preserves required ARM64 linker signatures in executable files; the enclosing app has no distribution signature or notarization.
 The no-argument local path retains all existing signing checks, including post-install verification and recovery behavior.
 The CI artifact is labelled unsigned; this option does not change local signing defaults or claim native launch/Gatekeeper approval.
+The headless workflow does not call this unsigned path. M7 remains deferred, so a GUI launch is not a headless acceptance result.
+
+## Headless Product Archive
+
+`python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage dist/linux-x86_64` copies the already built headless release binaries into a new directory.
+The same command with `--target aarch64-apple-darwin` stages the macOS headless archive.
+Selection is workspace bin targets that require no features, excluding vendor executables.
+At this trunk that selection is `omni`.
+`retrieval-kernel` is omitted because the root product does not call that executable; its seven faces remain in the headless test gate.
+A missing selected file fails the script. The script does not create a worker that Cargo did not name.
+It then runs the existing collector with `--headless` and writes `manifest.json` plus `notice-gaps.json`.
+The named crates adobe-cmap-parser, htmlescape, pdf-extract, and type1-encoding-parser stay explicit: cached source or fallback evidence is retained, and no license text is invented.
+`--verify` recomputes those identities for an unpacked directory.
+Python is not required by the installed CLI.
 
 ## Other Helpers
 

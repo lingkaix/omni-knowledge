@@ -19,7 +19,9 @@ Third-party components and source articles retain their own licenses.
 
 [Extraction dependencies](dependencies-extraction.md) cover the PDF, Office, EPUB, Markdown, and HTML parsers.
 [Renderer assets](../assets/vendor/README.md) retain their licenses and provenance.
-The bundle includes Rust dependency notices and exact unmodified MPL-2.0 source archives under `Contents/Resources/ThirdParty/`.
+The macOS app includes Rust dependency notices and exact unmodified MPL-2.0 source archives under `Contents/Resources/ThirdParty/`.
+The headless Linux and macOS archives use the same collector with `--headless`.
+adobe-cmap-parser 0.4.1, htmlescape 0.3.1, pdf-extract 0.12.1, and type1-encoding-parser 0.1.1 have no dedicated notice file in their cached crates. Their exact source archives or fallback evidence stay in the snapshot. No copyright text is invented for them.
 The locked Darwin graph includes MPL-2.0 components such as cssparser, dtoa-short, and option-ext; their terms remain separate from the project's Apache license.
 The generated inventory states notice-coverage gaps instead of treating SPDX metadata as a complete redistribution audit.
 The compiled GUI and CLI link only macOS system libraries.
