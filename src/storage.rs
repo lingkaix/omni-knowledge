@@ -883,6 +883,7 @@ mod cache_tests {
     #[test]
     fn growing_file_decode_is_bounded_before_parser_allocation() {
         use std::io::{Seek, Write};
+        /// Actual held source and independent writer used to grow its inode at first consumption.
         struct GrowingFile {
             /// Held original descriptor, not a pathname reopened by the parser.
             reader: File,

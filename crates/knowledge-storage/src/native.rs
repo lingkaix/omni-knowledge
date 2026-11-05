@@ -416,6 +416,7 @@ pub(crate) fn displace(
 /// Copy only this operation's candidate to an independent inode, then install without replacement.
 /// The caller pre-admits both copies and the bounded buffer; failed copies stay visible for recovery.
 /// Immutable new-N evidence is never linked to editable home bytes.
+/// Expected describes the already verified stage; native drift or digest mismatch returns Recovery before publication.
 pub(crate) fn install_evidence(
     stage: &File,
     name: &str,

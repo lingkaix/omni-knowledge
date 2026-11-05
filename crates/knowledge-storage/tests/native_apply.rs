@@ -46,8 +46,8 @@ struct InstallingPolicy<'a> {
     claim: &'a Claim,
     /// Exact admitted key.
     key: Key<'a>,
-    /// Select cancellation instead of exclusion revocation.
-    cancel: bool,
+    /// Select exclusion revocation, cancellation, or an actual new child-root boundary.
+    action: u8,
 }
 impl WritePolicy for InstallingPolicy<'_> {
     /// Change current admission only after actual journal I/O and before displacement.
@@ -57,14 +57,24 @@ impl WritePolicy for InstallingPolicy<'_> {
             .unwrap_or_default()
             .contains("\"outcome\":\"installing\"")
         {
-            if self.cancel {
-                self.claim
-                    .owner()
-                    .cancel(self.claim.job(), self.key)
+            match self.action {
+                0 => {
+                    context.revision += 1;
+                    context.outside_scope.push("pages/a.md".into());
+                }
+                1 => {
+                    self.claim
+                        .owner()
+                        .cancel(self.claim.job(), self.key)
+                        .unwrap();
+                }
+                _ => {
+                    fs::write(
+                        self.home.join("pages/omni-knowledge.json"),
+                        b"new child boundary\n",
+                    )
                     .unwrap();
-            } else {
-                context.revision += 1;
-                context.outside_scope.push("pages/a.md".into());
+                }
             }
         }
         Ok(context)
@@ -972,10 +982,10 @@ fn raw_policy_revocation_and_text_history_prerequisite() {
     assert!(!f.home().join("raw/a.md").exists());
 }
 
-/// A policy or stop change after journal/hash work is observed before moving any original.
+/// Policy, stop, and actual child-root changes after journal/hash work stop before displacement.
 #[test]
 fn displacement_rechecks_policy_and_stop_after_installing_record() {
-    for cancel in [false, true] {
+    for action in 0..3 {
         let f = Fixture::new();
         let history = f.history();
         fs::create_dir(f.home().join("pages")).unwrap();
@@ -993,7 +1003,7 @@ fn displacement_rechecks_policy_and_stop_after_installing_record() {
                 home: f.home(),
                 claim: &f.claim,
                 key: f.key(),
-                cancel,
+                action,
             },
         )
         .unwrap();

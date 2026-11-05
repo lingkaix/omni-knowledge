@@ -730,17 +730,12 @@ impl<P: WritePolicy> Store<P> {
                 prepared.candidate.as_ref().map(|o| o.as_str()),
                 "installing",
             )?;
-            // Re-resolve native boundaries and bytes after potentially long hashing/journal I/O.
-            let (current_parent, current_name) = native::parent(&self.root, path, false)?;
-            if native::identity(&current_parent)? != native::identity(&parent)?
-                || current_name != name
-            {
-                return Err(Error::Context);
-            }
+            // Recheck bytes after journal I/O, then policy and native ancestry at the last effect boundary.
             if !displaced && work.observe(&self.root, path)? != entry.expected.version {
                 return Err(Error::Conflict);
             }
             self.admit_intent(&intent, &c, &work)?;
+            self.parent_live(path, &parent, &name, &work)?;
             if !displaced && let Some(expected) = &entry.expected.version {
                 native::displace(&parent, &name, &dir, &format!("old-{n}"))?;
                 let old = work
@@ -760,7 +755,7 @@ impl<P: WritePolicy> Store<P> {
                     work.bytes,
                     || {
                         self.live(&c)?;
-                        work.check()
+                        self.parent_live(path, &parent, &name, &work)
                     },
                 )?;
             }
@@ -1092,6 +1087,23 @@ impl<P: WritePolicy> Store<P> {
         for entry in &intent.entries {
             work.check()?;
             self.selected(&entry.expected.path, context)?;
+        }
+        work.check()
+    }
+    /// Re-resolve actual child/root boundaries after policy callbacks and immediately before native effects.
+    /// A captured parent FD or unchanged policy snapshot cannot grant a newly child-owned path.
+    /// Returns native/path errors, Context on parent/name drift, or the exact live-claim stop error.
+    fn parent_live(
+        &self,
+        path: &str,
+        parent: &File,
+        name: &str,
+        work: &Work<'_>,
+    ) -> Result<(), Error> {
+        work.check()?;
+        let (current_parent, current_name) = native::parent(&self.root, path, false)?;
+        if native::identity(&current_parent)? != native::identity(parent)? || current_name != name {
+            return Err(Error::Context);
         }
         work.check()
     }
