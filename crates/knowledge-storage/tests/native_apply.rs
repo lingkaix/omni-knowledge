@@ -1037,6 +1037,74 @@ fn displacement_rechecks_policy_and_stop_after_installing_record() {
     }
 }
 
+/// Cancellation during controlled serialization stops before more writes or Git effects, retaining partial evidence.
+#[test]
+fn cancellation_during_control_write_retains_partial_evidence_without_settlement() {
+    /// Actual owner requests a stop when the exclusive native intent has received its first byte.
+    struct ControlPolicy<'a> {
+        /// Normal current native fixture context.
+        context: WriteContext,
+        /// Actual selected intent file, not a synthetic progress counter.
+        intent: std::path::PathBuf,
+        /// Exact live execution and original full key.
+        scope: Scope<'a>,
+    }
+    impl WritePolicy for ControlPolicy<'_> {
+        /// Request cancellation at the actual native serialization boundary without releasing resources.
+        fn current(&self) -> Result<WriteContext, Error> {
+            if fs::metadata(&self.intent).is_ok_and(|m| m.len() > 0) {
+                self.scope
+                    .claim
+                    .owner()
+                    .cancel(self.scope.claim.job(), self.scope.key)
+                    .unwrap();
+            }
+            Ok(self.context.clone())
+        }
+    }
+    let f = Fixture::new();
+    let history = f.history();
+    let req = request("control-stop", None, &[("pages/a.md", Some("approved\n"))]);
+    let expected = [Expected {
+        path: "pages/a.md".into(),
+        version: None,
+    }];
+    let op = format!("{:x}", Sha256::digest(req.operation_id.as_bytes()));
+    let dir = f.home().join("journal/recovery").join(op);
+    let store = Store::open(
+        &f.home(),
+        "lib",
+        "writer-a",
+        ControlPolicy {
+            context: f.policy.current().unwrap(),
+            intent: dir.join("intent.json"),
+            scope: f.scope(),
+        },
+    )
+    .unwrap();
+    let before = f.account.status().unwrap().reserved;
+    assert!(matches!(
+        store.prepare(&history, &req, &expected, &f.scope()),
+        Err(Error::Stopped(Cancellation::Requested))
+    ));
+    let partial = fs::read(dir.join("intent.json")).unwrap();
+    assert!(!partial.is_empty());
+    assert!(serde_json::from_slice::<serde_json::Value>(&partial).is_err());
+    assert!(!dir.join("prepared.json").exists());
+    assert!(!f.home().join("pages/a.md").exists());
+    assert_eq!(f.account.status().unwrap().reserved, before);
+    assert!(matches!(
+        f.account
+            .queue()
+            .status(f.claim.job(), f.key())
+            .unwrap()
+            .state,
+        State::Unsettled {
+            cancellation: Some(Cancellation::Requested)
+        }
+    ));
+}
+
 /// Refuse the complete metadata/copy work plan before creating native bookkeeping or returning a loan.
 #[test]
 fn complete_scratch_and_copy_plan_precedes_effects() {

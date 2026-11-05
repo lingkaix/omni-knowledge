@@ -15,6 +15,7 @@ The ordinary native tests execute the actual filesystem and Git calls; the RustD
 `Claim::stop_requested(expected: Key<'_>) -> Result<Option<Cancellation>, JobError>` is additive.
 It validates the exact queue-owned claim generation, complete key, and unsettled state without releasing anything.
 It observes `Requested`, `Superseded`, or `Deadline`, and refuses stale or mismatched claims.
+Controlled parser refills, body chunks, control serialization writes, and journal partial-write attempts check this same live execution; a stop retains partial evidence rather than continuing or fabricating settlement.
 Storage returns additive `Error::Stopped(Cancellation)` or `Error::Claim(JobError)` before continuing controlled executor work.
 Consumers with exhaustive error mapping must add these variants and map them to their existing cancelled, superseded, or stale execution outcome.
 Do not settle a job until the actual children, I/O, and owned allocations have ended.

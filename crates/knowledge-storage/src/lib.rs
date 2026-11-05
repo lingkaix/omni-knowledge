@@ -624,16 +624,34 @@ impl<P: WritePolicy> Store<P> {
         let mut journal =
             journal::Journal::open(&lane.journal, &self.writer, work.control_limit())?;
         self.admit_intent(&intent, &c, &work)?;
-        let begin = journal.append(&intent.operation_id, &intent.fingerprint, None, "intent")?;
+        let begin = journal.append_checked(
+            &intent.operation_id,
+            &intent.fingerprint,
+            None,
+            "intent",
+            || {
+                self.live(&c)?;
+                work.check()
+            },
+        )?;
         self.admit_intent(&intent, &c, &work)?;
-        native::control_new(&dir, "intent.json", &intent)?;
+        native::control_new_checked(&dir, "intent.json", &intent, || {
+            self.live(&c)?;
+            work.check()
+        })?;
         self.admit_intent(&intent, &c, &work)?;
-        native::control_new(&dir, "begin.json", &begin)?;
+        native::control_new_checked(&dir, "begin.json", &begin, || {
+            self.live(&c)?;
+            work.check()
+        })?;
         self.live(&c)?;
         work.check()?;
         let prepared = history.prepare(request, scope.claim)?;
         self.admit_intent(&intent, &c, &work)?;
-        native::control_new(&dir, "prepared.json", &prepared)?;
+        native::control_new_checked(&dir, "prepared.json", &prepared, || {
+            self.live(&c)?;
+            work.check()
+        })?;
         for (n, change) in changes.iter().enumerate() {
             self.admit_intent(&intent, &c, &work)?;
             if let Some(text) = &change.text {
@@ -644,11 +662,15 @@ impl<P: WritePolicy> Store<P> {
             }
         }
         self.admit_intent(&intent, &c, &work)?;
-        journal.append(
+        journal.append_checked(
             &intent.operation_id,
             &intent.fingerprint,
             prepared.candidate.as_ref().map(|o| o.as_str()),
             "prepared",
+            || {
+                self.live(&c)?;
+                work.check()
+            },
         )?;
         self.live(&c)?;
         Ok(Inspection {
@@ -724,11 +746,15 @@ impl<P: WritePolicy> Store<P> {
             self.admit_intent(&intent, &c, &work)?;
             let (parent, name) = native::parent(&self.root, path, true)?;
             self.admit_intent(&intent, &c, &work)?;
-            journal.append(
+            journal.append_checked(
                 operation,
                 &intent.fingerprint,
                 prepared.candidate.as_ref().map(|o| o.as_str()),
                 "installing",
+                || {
+                    self.live(&c)?;
+                    work.check()
+                },
             )?;
             // Recheck bytes after journal I/O, then policy and native ancestry at the last effect boundary.
             if !displaced && work.observe(&self.root, path)? != entry.expected.version {
@@ -767,14 +793,21 @@ impl<P: WritePolicy> Store<P> {
         self.admit_intent(&intent, &c, &work)?;
         if native::regular(&dir, "installed")?.is_none() {
             self.admit_intent(&intent, &c, &work)?;
-            native::create(&dir, "installed", b"1\n")?;
+            native::create_checked(&dir, "installed", b"1\n", || {
+                self.live(&c)?;
+                work.check()
+            })?;
         }
         self.admit_intent(&intent, &c, &work)?;
-        journal.append(
+        journal.append_checked(
             operation,
             &intent.fingerprint,
             prepared.candidate.as_ref().map(|o| o.as_str()),
             "files_installed",
+            || {
+                self.live(&c)?;
+                work.check()
+            },
         )?;
         Ok(Inspection {
             newly_prepared: false,
@@ -823,11 +856,15 @@ impl<P: WritePolicy> Store<P> {
         }
         if intent.proposal {
             self.admit_intent(&intent, &c, &work)?;
-            journal.append(
+            journal.append_checked(
                 operation,
                 &intent.fingerprint,
                 prepared.candidate.as_ref().map(|o| o.as_str()),
                 "proposal",
+                || {
+                    self.live(&c)?;
+                    work.check()
+                },
             )?;
             return Ok(Inspection {
                 newly_prepared: false,
@@ -841,15 +878,22 @@ impl<P: WritePolicy> Store<P> {
             return Err(Error::Indeterminate);
         }
         self.admit_intent(&intent, &c, &work)?;
-        let proof = journal.append(
+        let proof = journal.append_checked(
             operation,
             &intent.fingerprint,
             prepared.candidate.as_ref().map(|o| o.as_str()),
             "saved_local",
+            || {
+                self.live(&c)?;
+                work.check()
+            },
         )?;
         if native::regular(&dir, "saved.json")?.is_none() {
             self.admit_intent(&intent, &c, &work)?;
-            native::control_new(&dir, "saved.json", &proof)?;
+            native::control_new_checked(&dir, "saved.json", &proof, || {
+                self.live(&c)?;
+                work.check()
+            })?;
         }
         Ok(Inspection {
             newly_prepared: false,

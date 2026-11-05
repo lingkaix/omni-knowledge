@@ -276,11 +276,67 @@ pub(crate) fn control_new<T: serde::Serialize>(
     name: &str,
     value: &T,
 ) -> Result<(), Error> {
+    control_new_checked(parent, name, value, || Ok(()))
+}
+/// Stop before each controlled serialization write; preserve partial evidence and the typed stop error.
+pub(crate) fn control_new_checked<T: serde::Serialize>(
+    parent: &File,
+    name: &str,
+    value: &T,
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<(), Error> {
+    check()?;
     let mut f = create_file(parent, name)?;
-    serde_json::to_writer(&mut f, value).map_err(|_| Error::Io)?;
-    f.write_all(b"\n").map_err(|_| Error::Io)?;
+    let result = serde_json::to_writer(
+        CheckedWriter {
+            inner: &mut f,
+            check: &check,
+        },
+        value,
+    );
+    check()?;
+    result.map_err(|_| Error::Io)?;
+    let result = CheckedWriter {
+        inner: &mut f,
+        check: &check,
+    }
+    .write_all(b"\n");
+    check()?;
+    result.map_err(|_| Error::Io)?;
     f.sync_all().map_err(|_| Error::Io)?;
+    check()?;
     parent.sync_all().map_err(|_| Error::Io)
+}
+/// Borrow one actual native writer with no intermediate output allocation.
+struct CheckedWriter<W, F> {
+    /// Actual exclusive evidence descriptor.
+    inner: W,
+    /// Exact current executor/policy check.
+    check: F,
+}
+impl<W: Write, F: Fn() -> Result<(), Error>> Write for CheckedWriter<W, F> {
+    /// Observe the owner before each controllable write, including partial-write retries.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (self.check)().map_err(|_| std::io::Error::other("execution stopped"))?;
+        self.inner.write(bytes)
+    }
+    /// Observe the owner before flushing the actual writer.
+    fn flush(&mut self) -> std::io::Result<()> {
+        (self.check)().map_err(|_| std::io::Error::other("execution stopped"))?;
+        self.inner.flush()
+    }
+}
+/// Write one retained record with stop checks on every actual partial-write attempt.
+/// Preserve the typed stop error and classify unsettled native I/O as Indeterminate.
+pub(crate) fn write_checked(
+    file: &mut File,
+    bytes: &[u8],
+    check: &impl Fn() -> Result<(), Error>,
+) -> Result<(), Error> {
+    check()?;
+    let result = CheckedWriter { inner: file, check }.write_all(bytes);
+    check()?;
+    result.map_err(|_| Error::Indeterminate)
 }
 /// Read exact bounded staged UTF-8 bytes, checking native version/EOF before they become Git input.
 pub(crate) fn text(parent: &File, name: &str, max: u64) -> Result<String, Error> {

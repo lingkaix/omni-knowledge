@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
 };
 
 /// Exact native byte extent of a synchronized journal record, not a permission or logical clock.
@@ -199,7 +199,18 @@ impl Journal {
         candidate: Option<&str>,
         phase: &str,
     ) -> Result<Proof, Error> {
-        self.append_with(operation, intent, candidate, phase, None, None)
+        self.append_with(operation, intent, candidate, phase, (None, None), || Ok(()))
+    }
+    /// Append an operation record with exact live executor checks before controlled reads and writes.
+    pub(crate) fn append_checked(
+        &mut self,
+        operation: &str,
+        intent: &str,
+        candidate: Option<&str>,
+        phase: &str,
+        check: impl Fn() -> Result<(), Error>,
+    ) -> Result<Proof, Error> {
+        self.append_with(operation, intent, candidate, phase, (None, None), check)
     }
     /// Record an actually verified new file observation without assigning a hash-derived source identity.
     pub(crate) fn append_observed(
@@ -210,7 +221,14 @@ impl Journal {
         digest: &str,
         phase: &str,
     ) -> Result<Proof, Error> {
-        self.append_with(operation, intent, None, phase, Some((path, digest)), None)
+        self.append_with(
+            operation,
+            intent,
+            None,
+            phase,
+            (Some((path, digest)), None),
+            || Ok(()),
+        )
     }
     /// Append synchronized metadata before/after real effects and return the exact durable record extent.
     fn append_with(
@@ -219,9 +237,11 @@ impl Journal {
         intent: &str,
         candidate: Option<&str>,
         phase: &str,
-        asset: Option<(&str, &str)>,
-        tracking: Option<TrackingEvidence<'_>>,
+        evidence: (Option<(&str, &str)>, Option<TrackingEvidence<'_>>),
+        check: impl Fn() -> Result<(), Error>,
     ) -> Result<Proof, Error> {
+        check()?;
+        let (asset, tracking) = evidence;
         let observation = match tracking {
             Some(TrackingEvidence::Source(o)) => Some(o),
             _ => None,
@@ -247,6 +267,7 @@ impl Journal {
         if needed > self.max {
             return Err(Error::Budget);
         }
+        check()?;
         let seq = self.last_sequence()?.checked_add(1).ok_or(Error::Budget)?;
         let observed_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -287,9 +308,8 @@ impl Journal {
         }
         bytes.push(b'\n');
         let offset = self.file.metadata().map_err(|_| Error::Io)?.len();
-        self.file
-            .write_all(&bytes)
-            .map_err(|_| Error::Indeterminate)?;
+        native::write_checked(&mut self.file, &bytes, &check)?;
+        check()?;
         self.file.sync_all().map_err(|_| Error::Indeterminate)?;
         Ok(Proof {
             writer: self.writer.clone(),
@@ -318,8 +338,8 @@ impl Journal {
             &digest,
             None,
             "observed",
-            None,
-            Some(TrackingEvidence::Source(observation)),
+            (None, Some(TrackingEvidence::Source(observation))),
+            || Ok(()),
         )
     }
     /// Persist an actual qualified scope boundary only after corresponding native inventory effects are durable.
@@ -345,8 +365,8 @@ impl Journal {
             } else {
                 "reconcile_partial"
             },
-            None,
-            Some(TrackingEvidence::Checkpoint(c)),
+            (None, Some(TrackingEvidence::Checkpoint(c))),
+            || Ok(()),
         )
     }
     /// Validate projected metadata against actual exact synchronized visible bytes.
