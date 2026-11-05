@@ -44,6 +44,18 @@ The held staging calls below use the same owner; CLI/MCP/daemon publication and 
 Legacy raw compatibility returns are not native job owners.
 See the [repair record](../../docs/changes/2026-11-05-foreground-native-extraction.md) for limits and gates.
 
+## Private M4 text-index input boundary (not full index activation)
+
+`NativeProcessing::extract_indexed(actual_claim, max_bytes, child_rss)` calls the SAME M3 funded descriptor producer. It splits a64KiB metadata sibling from that SAME complete live Claim BEFORE native work, leaving it outside M3's `None` child-RSS remainder. The submitted whole `NativeJobPlan` must include this sibling and all separately split consumer/publication work. There is no late global reserve, second account, processor, queue or model.
+
+The resulting `NativeIndexInput` retains the actual M3 value/source/Claim and resource owner. Checked `text`, `source_id`, `source_digest`, `representation` and `source` borrows describe the actual original FD/key, exact produced text SHA and effective consuming processor fingerprint. Its modality is the text EMBEDDING INPUT; original binary MIME/type remains source-owned. Identity fields die before the owner releases metadata credit. This native key is not yet the complete M1 asset-ID/rename integration. Call `complete` only after actual consumers and their split buffers/artifacts are destroyed/settled.
+
+The index-input consumer checks the exact native authority's retained `Process`/Extract command, selected source IDs/library and actual request budget before processing, not a fabricated status/browse grant. `Permit::admitted_command` borrows the sealed command after currentness checks; cloned permits share its Arc AND actual frame resources. Native manually constructed requests pass the existing bounded codec BEFORE that clone. This adds no command or wire authority; the old low-level caller/held M6 bridge still must supply its actual operation and separate destination intent.
+
+Builder controls use real HTML/Unicode, the actual Process scope (read-only refuses; an explicitly controlled native owner chooses the positive read/write policy), actual queue/Claim and M3 parser, then unpublished vector members through exact retained FDs. Precomputed2D numbers test IO/binding only, NOT an embedding backend or semantic quality. The pre-seal status-permit control actuallyFAILS; restored scope binding passes. Removing only native command-size validation actuallyFAILS its oversized-request control. Root30/service119/wholeworkspace strict pass; intermediate import/read-only/private-helper REDs retained. The new global-queue fixture runs in its own account process, with child stdout captured so existing inventory counts are unchanged.
+
+Actual model/provider execution, multi-source whole-tuple production/publication/recovery/retirement, full-corpus Root orchestration, transport/destination authority and native/full-product acceptance remain open.
+
 ## Held EPUB and video staging
 
 Committed M3 ABI `d6ae37d16ddbdde3b33086293f2db2a85eaaef1c` is consumed without editing its producer bodies.

@@ -176,6 +176,130 @@ impl NativeProcessing {
         })
     }
 }
+/// Actual M3-produced text with source/Claim/processor binding retained through index consumption.
+/// Identity fields are facts, not grants; this is NOT a provider, tuple publisher or new processor.
+pub struct NativeIndexInput {
+    representation: knowledge_search::RepresentationIdentity,
+    source_id: String,
+    source_digest: String,
+    owner: NativeExtraction,
+}
+impl NativeIndexInput {
+    /// Borrow the actual paid extraction; direct/extracted source coordinate semantics remain M3-owned.
+    pub fn text(&self) -> Result<&str> {
+        Ok(&self.owner.value()?.text)
+    }
+    /// Original source identity is the actual native processing key, not equal-content deduplication.
+    pub fn source_id(&self) -> Result<&str> {
+        self.owner.source()?;
+        Ok(&self.source_id)
+    }
+    /// Complete original bytes were hashed from the SAME actual selected FD.
+    pub fn source_digest(&self) -> Result<&str> {
+        self.owner.source()?;
+        Ok(&self.source_digest)
+    }
+    /// Digest of the real representation and effective consuming M3/native processor fingerprint.
+    pub fn representation(&self) -> Result<&knowledge_search::RepresentationIdentity> {
+        self.owner.source()?;
+        Ok(&self.representation)
+    }
+    /// Retain/check the actual source through later controlled reads and delivery.
+    pub fn source(&self) -> Result<&NativeSource> {
+        self.owner.source()
+    }
+    /// Finish only after consumer buffers/artifacts and their split work have settled.
+    /// Destroy these metadata allocations BEFORE their actual M3/native owner releases credit.
+    pub fn complete(self) -> std::result::Result<NativeSource, NativeExtractionError> {
+        let Self {
+            representation,
+            source_id,
+            source_digest,
+            owner,
+        } = self;
+        drop(representation);
+        drop(source_id);
+        drop(source_digest);
+        owner.complete()
+    }
+}
+impl NativeProcessing {
+    /// Consume the existing actual Claim and M3 FD producer; reserve the metadata sibling
+    /// BEFORE parsing/execution, so `None` child RSS cannot spend its retained share.
+    /// The submitted complete NativeJobPlan must already include this64KiB sibling.
+    pub fn extract_indexed(
+        self,
+        claim: Claim,
+        max_bytes: usize,
+        child_rss_bytes: Option<u64>,
+    ) -> std::result::Result<NativeIndexInput, NativeExtractionError> {
+        let mut owner = self.run(claim, Inputs::default(), |processing, claim, inputs| {
+            processing
+                .source()
+                .indexed_extract_scope(claim, max_bytes)?;
+            let metadata = Account::current()?.split_claim(
+                claim,
+                processing.key(),
+                knowledge_core::jobs::Reservation {
+                    memory_bytes: 64 * 1024,
+                    temporary_bytes: 0,
+                },
+            )?;
+            inputs.resources.push(metadata);
+            knowledge_processing::extract::extract_file_funded(
+                processing.source().file()?,
+                processing.source().hint(),
+                max_bytes,
+                child_rss_bytes,
+                &mut processing.funding(claim)?,
+            )
+        })?;
+        let facts = (|| -> Result<_> {
+            use sha2::{Digest, Sha256};
+            let value = owner.value()?;
+            anyhow::ensure!(
+                matches!(value.status.as_str(), "extracted" | "partial"),
+                "no actual text representation"
+            );
+            let mut hash = Sha256::new();
+            for chunk in value.text.as_bytes().chunks(64 * 1024) {
+                owner.source()?;
+                hash.update(chunk);
+            }
+            owner.source()?;
+            let key = owner
+                .processing
+                .as_ref()
+                .expect("native processing owner")
+                .key();
+            Ok((
+                knowledge_search::RepresentationIdentity {
+                    digest: hex::encode(hash.finalize()),
+                    processor: key.processor.as_str().to_owned(),
+                    modality: knowledge_search::VectorModality::Text,
+                },
+                key.source.to_owned(),
+                key.version.as_str().to_owned(),
+            ))
+        })();
+        match facts {
+            Ok((representation, source_id, source_digest)) => Ok(NativeIndexInput {
+                representation,
+                source_id,
+                source_digest,
+                owner,
+            }),
+            Err(cause) => {
+                owner.pending = Some(cause);
+                Err(NativeAdmittedError {
+                    cause: anyhow::anyhow!("native index representation refused"),
+                    owner: Box::new(owner),
+                })
+            }
+        }
+    }
+}
+
 impl<T> NativeAdmitted<T> {
     /// Borrow the SAME checked source for prepaid response construction and controlled output boundaries.
     pub fn source(&self) -> Result<&NativeSource> {

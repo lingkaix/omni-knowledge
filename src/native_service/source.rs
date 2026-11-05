@@ -20,6 +20,39 @@ pub struct NativeSource {
     permit: Permit,
 }
 impl NativeSource {
+    /// Validate this concrete processing effect against the actual sealed admitted request,
+    /// never a status/browse permit, caller boolean or naked source ID.
+    pub(super) fn indexed_extract_scope(&self, claim: &Claim, max_bytes: usize) -> Result<()> {
+        self.check()?;
+        let wire::Command::Process {
+            library_id,
+            source_ids,
+            recipe,
+            budget,
+            ..
+        } = self.permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("native index input requires the actual Process command");
+        };
+        anyhow::ensure!(
+            library_id == &self.library
+                && *recipe == wire::ProcessRecipe::Extract
+                && source_ids
+                    .iter()
+                    .any(|id| id.as_str().strip_prefix("source-") == Some(self.source.as_str())),
+            "native processing source/recipe differs from admitted command"
+        );
+        let actual = claim.budget();
+        anyhow::ensure!(
+            max_bytes as u64 <= budget.max_bytes.get()
+                && actual.max_bytes <= budget.max_bytes.get()
+                && actual.max_files <= budget.max_files.get()
+                && actual.max_millis <= budget.max_millis.get()
+                && actual.max_memory_bytes <= budget.max_memory_bytes.get(),
+            "native processing exceeds the actual admitted request budget"
+        );
+        Ok(())
+    }
     pub(super) fn open(
         library: &wire::Id,
         path: &wire::RelativePath,

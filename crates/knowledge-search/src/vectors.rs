@@ -46,10 +46,39 @@ pub struct ModelIdentity {
     pub preprocessing: String,
 }
 
+/// Embedding-input modality; original media/type remains source-owned. This never
+/// selects or authorizes a native processor (e.g. PDF-derived text is a text input).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorModality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+/// Complete produced-representation data identity, not a source or execution grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepresentationIdentity {
+    pub digest: String,
+    pub processor: String,
+    pub modality: VectorModality,
+}
+/// Row facts for actual caller eligibility BEFORE distance/candidate limiting.
+/// The callback is not authority; native hosts retain their actual opaque owners.
+#[derive(Clone, Copy)]
+pub struct VectorCandidate<'a> {
+    pub source_id: &'a str,
+    pub source_digest: &'a str,
+    pub representation: &'a RepresentationIdentity,
+    pub locator: &'a str,
+}
 #[derive(Clone, Debug)]
 pub struct VectorRow {
     pub source_id: String,
     pub source_digest: String,
+    pub representation: RepresentationIdentity,
     pub locator: String,
     pub vector: Vec<f32>,
 }
@@ -72,10 +101,29 @@ struct Manifest {
 struct RowMeta {
     source_id: String,
     source_digest: String,
+    representation: RepresentationIdentity,
     locator: String,
     offset: u64,
     /// Hash of this exact row, allowing eligibility before any payload access.
     sha256: String,
+}
+
+impl RowMeta {
+    fn candidate(&self) -> VectorCandidate<'_> {
+        VectorCandidate {
+            source_id: &self.source_id,
+            source_digest: &self.source_digest,
+            representation: &self.representation,
+            locator: &self.locator,
+        }
+    }
+}
+fn valid_representation(identity: &RepresentationIdentity) -> bool {
+    [&identity.digest, &identity.processor].iter().all(|s| {
+        s.len() == 64
+            && s.bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    })
 }
 
 /// Native descriptor identity only; the enclosing native caller must additionally
@@ -86,6 +134,8 @@ struct NativeReader {
     segment: File,
     metadata: File,
     metadata_stamp: NativeStamp,
+    header: File,
+    header_stamp: NativeStamp,
     pin: File,
     segment_bytes: u64,
 }
@@ -93,7 +143,7 @@ impl NativeReader {
     fn open(
         root: &Path,
         generation: &str,
-        created: Option<(File, File)>,
+        created: Option<(File, File, File)>,
     ) -> Result<Self, VectorError> {
         use std::os::unix::fs::OpenOptionsExt;
         let root = fs::OpenOptions::new()
@@ -106,14 +156,16 @@ impl NativeReader {
         let directory = Self::component(&root, generation, true)?;
         let pin = Self::component(&directory, "READERS", false)?;
         fs2::FileExt::try_lock_shared(&pin).map_err(|_| VectorError::Pinned)?;
-        let (segment, metadata) = match created {
+        let (segment, metadata, header) = match created {
             Some(files) => files,
             None => (
                 Self::component(&directory, "segment.bin", false)?,
                 Self::component(&directory, "rows.bin", false)?,
+                Self::component(&directory, "manifest.json", false)?,
             ),
         };
         let metadata_stamp = NativeStamp::of(&metadata)?;
+        let header_stamp = NativeStamp::of(&header)?;
         if !segment.metadata().map_err(io)?.is_file() {
             return Err(VectorError::Identity("nonregular vector segment".into()));
         }
@@ -124,6 +176,8 @@ impl NativeReader {
             segment,
             metadata,
             metadata_stamp,
+            header,
+            header_stamp,
             pin,
             segment_bytes,
         };
@@ -148,6 +202,10 @@ impl NativeReader {
         Self::entry(&self.directory, "READERS", &self.pin)?;
         Self::entry(&self.directory, "segment.bin", &self.segment)?;
         Self::entry(&self.directory, "rows.bin", &self.metadata)?;
+        Self::entry(&self.directory, "manifest.json", &self.header)?;
+        if NativeStamp::of(&self.header)? != self.header_stamp {
+            return Err(invalid("vector header version drift"));
+        }
         if NativeStamp::of(&self.metadata)? != self.metadata_stamp {
             return Err(invalid("vector metadata version drift"));
         }
@@ -219,6 +277,12 @@ pub struct VectorStore {
     native: Source,
     /// Actual affine envelope; the original grant and all its clones are consumed.
     _work: std::sync::Arc<Work>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildMode {
+    CompatibilityCurrent,
+    Prepared,
 }
 
 impl VectorStore {
@@ -330,6 +394,55 @@ impl VectorStore {
         )
     }
 
+    /// Prepare immutable data ONLY; do not select a vector CURRENT independently of the
+    /// caller's complete lexical/vector/source tuple. The same actual paid owner follows exports.
+    pub fn prepare(
+        root: &Path,
+        identity: &ModelIdentity,
+        rows: &[VectorRow],
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+    ) -> Result<PreparedVectors, VectorError> {
+        let plan = row_plan(rows)?;
+        Self::prepare_stream(
+            root,
+            identity,
+            &plan,
+            rows.iter().map(|row| {
+                if !valid_vector(identity, &row.vector) {
+                    return Err(VectorError::Vector(row.source_id.clone()));
+                }
+                Ok(row.clone())
+            }),
+            grant,
+            deadline,
+        )
+    }
+    /// Streaming preparation under the complete existing envelope, before producer advancement.
+    pub fn prepare_stream<I>(
+        root: &Path,
+        identity: &ModelIdentity,
+        plan: &VectorBuildPlan,
+        rows: I,
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+    ) -> Result<PreparedVectors, VectorError>
+    where
+        I: IntoIterator<Item = Result<VectorRow, VectorError>>,
+    {
+        Ok(PreparedVectors {
+            store: Self::build_stream_mode(
+                root,
+                identity,
+                plan,
+                rows,
+                grant,
+                deadline,
+                BuildMode::Prepared,
+            )?,
+        })
+    }
+
     /// Stream one admitted row at a time; neither float payload nor corpus metadata is assembled.
     /// Plan facts grant nothing: the actual complete same-account envelope is consumed BEFORE IO.
     /// This standalone CURRENT is a compatibility seam, not a native whole-tuple publisher.
@@ -340,6 +453,28 @@ impl VectorStore {
         rows: I,
         grant: &AccountGrant,
         deadline: Option<Instant>,
+    ) -> Result<Self, VectorError>
+    where
+        I: IntoIterator<Item = Result<VectorRow, VectorError>>,
+    {
+        Self::build_stream_mode(
+            root,
+            identity,
+            plan,
+            rows,
+            grant,
+            deadline,
+            BuildMode::CompatibilityCurrent,
+        )
+    }
+    fn build_stream_mode<I>(
+        root: &Path,
+        identity: &ModelIdentity,
+        plan: &VectorBuildPlan,
+        rows: I,
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+        mode: BuildMode,
     ) -> Result<Self, VectorError>
     where
         I: IntoIterator<Item = Result<VectorRow, VectorError>>,
@@ -401,6 +536,7 @@ impl VectorStore {
                 || row.source_id.is_empty()
                 || row.source_digest.len() != 64
                 || !row.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || !valid_representation(&row.representation)
                 || row.locator.is_empty()
             {
                 return Err(VectorError::Vector(row.source_id));
@@ -418,6 +554,7 @@ impl VectorStore {
             let meta = RowMeta {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 offset: count
                     .checked_mul(row_bytes)
@@ -440,7 +577,7 @@ impl VectorStore {
         let (segment, segment_sha256, segment_bytes) = payload.finish(&mut work, deadline)?;
         let (row_file, metadata_sha256, metadata_bytes) = table.finish(&mut work, deadline)?;
         let manifest = Manifest {
-            format_version: 2,
+            format_version: 3,
             identity: identity.clone(),
             rows: count,
             metadata_sha256,
@@ -461,15 +598,18 @@ impl VectorStore {
         let mut metadata_file = create_component(&stage.join("manifest.json"))?;
         write_funded(&mut metadata_file, &metadata, &mut work, deadline)?;
         metadata_file.sync_all().map_err(io)?;
-        drop(metadata_file);
         drop(metadata);
         let marker = create_component(&stage.join("READERS"))?;
         marker.sync_all().map_err(io)?;
         drop(marker);
         fs::rename(&stage, &directory).map_err(io)?;
-        let native = NativeReader::open(root, &generation, Some((segment, row_file)))?;
+        let native =
+            NativeReader::open(root, &generation, Some((segment, row_file, metadata_file)))?;
         if deadline.is_some_and(|limit| Instant::now() >= limit) {
             return Err(VectorError::Grant(GrantError::Deadline));
+        }
+        if mode == BuildMode::Prepared {
+            return Self::from_native(root, generation, manifest, native, work);
         }
         let temporary = root.join("CURRENT.next");
         let mut pointer = create_component(&temporary)?;
@@ -516,7 +656,7 @@ impl VectorStore {
         }
         let native = NativeReader::open(root, &generation, None)?;
         drop(scope);
-        let file = native.open_component("manifest.json")?;
+        let file = native.header.try_clone().map_err(io)?;
         if file.metadata().map_err(io)?.len() > cap {
             return Err(VectorError::Grant(GrantError::TooSmall));
         }
@@ -589,6 +729,7 @@ impl VectorStore {
             Ok(VectorRow {
                 source_id: row.source_id.clone(),
                 source_digest: row.source_digest.clone(),
+                representation: row.representation.clone(),
                 locator: row.locator.clone(),
                 vector,
             })
@@ -618,6 +759,19 @@ impl VectorStore {
     ) -> Result<VectorResult, VectorError>
     where
         F: FnMut(&str) -> Result<bool, VectorError>,
+    {
+        self.query_rows(query, limit, |row| eligible(row.source_id))
+    }
+    /// Full dependency metadata is available BEFORE distance. Native callers bind it
+    /// to their current real source/representation/tag scope, never a bare ID grant.
+    pub fn query_rows<F>(
+        self,
+        query: &[f32],
+        limit: usize,
+        mut eligible: F,
+    ) -> Result<VectorResult, VectorError>
+    where
+        F: FnMut(VectorCandidate<'_>) -> Result<bool, VectorError>,
     {
         if !valid_vector(&self.manifest.identity, query) {
             return Err(VectorError::Vector("query".into()));
@@ -660,10 +814,11 @@ impl VectorStore {
                 || row.source_digest.len() != 64
                 || row.source_id.is_empty()
                 || row.locator.is_empty()
+                || !valid_representation(&row.representation)
             {
                 return Err(invalid("invalid paged row identity or order"));
             }
-            if !eligible(&row.source_id)? {
+            if !eligible(row.candidate())? {
                 continue;
             }
             self.native.check(&self.generation)?;
@@ -718,6 +873,7 @@ impl VectorStore {
             evidence.push(VectorEvidence {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 score,
             });
@@ -826,11 +982,71 @@ impl VectorStore {
     }
 }
 
+/// Immutable unpublished vector artifacts, not permission to publish a native tuple.
+/// No independent vector CURRENT is switched. Actual native hosts retain source/model
+/// guards and separately fund their complete consumer/publication/delivery envelope.
+pub struct PreparedVectors {
+    store: VectorStore,
+}
+impl PreparedVectors {
+    pub fn generation(&self) -> &str {
+        self.store.generation()
+    }
+    pub fn check(&self) -> Result<(), VectorError> {
+        self.store.native.check(&self.store.generation)
+    }
+    /// Clone an exact created descriptor, retaining its actual paid/pinned preparation owner.
+    /// Only the three known immutable members are available; the caller pays its read buffers.
+    pub fn component(
+        self: &std::sync::Arc<Self>,
+        name: &str,
+    ) -> Result<PreparedComponent, VectorError> {
+        self.check()?;
+        let Source::Native(native) = &self.store.native else {
+            return Err(invalid("not a native prepared generation"));
+        };
+        let file = match name {
+            "manifest.json" => &native.header,
+            "rows.bin" => &native.metadata,
+            "segment.bin" => &native.segment,
+            _ => return Err(invalid("unknown prepared member")),
+        }
+        .try_clone()
+        .map_err(io)?;
+        self.check()?;
+        Ok(PreparedComponent {
+            file,
+            position: 0,
+            owner: self.clone(),
+        })
+    }
+}
+/// Streaming exact member; FD dies before its source/reader/pin/credit owner.
+pub struct PreparedComponent {
+    file: File,
+    position: u64,
+    owner: std::sync::Arc<PreparedVectors>,
+}
+impl Read for PreparedComponent {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        self.owner.check().map_err(std::io::Error::other)?;
+        let count = self.file.read_at(output, self.position)?;
+        self.owner.check().map_err(std::io::Error::other)?;
+        self.position = self
+            .position
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("prepared member offset overflow"))?;
+        Ok(count)
+    }
+}
+
 /// Best exact row for a ranked file; more locations stream through `visit_evidence`.
 #[derive(Clone, Debug)]
 pub struct VectorEvidence {
     pub source_id: String,
     pub source_digest: String,
+    pub representation: RepresentationIdentity,
     pub locator: String,
     pub score: f32,
 }
@@ -893,9 +1109,22 @@ impl VectorResult {
     /// caller rechecks actual source scope before delivery and pays for collection.
     pub fn visit_evidence(
         &self,
+        visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
+    ) -> Result<(), VectorError> {
+        self.visit_rows(|_| Ok(true), visit)
+    }
+    /// Re-admit each representation under current source/tag/dependency scope BEFORE
+    /// reading its payload or computing distance; collect only under separate actual credit.
+    pub fn visit_rows(
+        &self,
+        mut eligible: impl FnMut(VectorCandidate<'_>) -> Result<bool, VectorError>,
         mut visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
     ) -> Result<(), VectorError> {
-        let selected: BTreeSet<_> = self.ranked.iter().map(|(id, _)| id.as_str()).collect();
+        let selected: std::collections::BTreeMap<_, _> = self
+            .evidence
+            .iter()
+            .map(|hit| (hit.source_id.as_str(), hit))
+            .collect();
         let mut offset = 0;
         let mut bytes = vec![
             0;
@@ -915,7 +1144,11 @@ impl VectorResult {
                 self.store.manifest.max_row_bytes,
             )?;
             self.store.native.check(&self.store.generation)?;
-            if !selected.contains(row.source_id.as_str()) {
+            if selected
+                .get(row.source_id.as_str())
+                .is_none_or(|winner| winner.source_digest != row.source_digest)
+                || !eligible(row.candidate())?
+            {
                 continue;
             }
             self.file
@@ -937,6 +1170,7 @@ impl VectorResult {
             visit(&VectorEvidence {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 score: cosine(&self.query, &vector),
             })?;
@@ -1046,7 +1280,7 @@ fn check_manifest(
     if &manifest.identity != identity {
         return Err(VectorError::Identity("model identity mismatch".into()));
     }
-    if manifest.format_version != 2
+    if manifest.format_version != 3
         || manifest.segment_bytes
             != manifest
                 .rows
@@ -1071,6 +1305,8 @@ fn row_plan(rows: &[VectorRow]) -> Result<VectorBuildPlan, VectorError> {
         let strings = (row.source_id.len() as u64)
             .checked_add(row.source_digest.len() as u64)
             .and_then(|n| n.checked_add(row.locator.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.digest.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.processor.len() as u64))
             .ok_or_else(|| invalid("row size overflow"))?;
         let bound = strings
             .checked_mul(6)

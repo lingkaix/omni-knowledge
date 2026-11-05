@@ -177,6 +177,7 @@ impl NativeAuthority {
             return Err(ErrorCode::OwnerRequired);
         }
         let permit = Permit {
+            command: Arc::new(command.clone()),
             session: session.clone(),
             revisions,
             write,
@@ -290,6 +291,7 @@ impl Owner {
 /// A retained authorization context; domain adapters must check it at every controllable effect/chunk.
 #[derive(Clone)]
 pub struct Permit {
+    command: Arc<Command>,
     session: Session,
     revisions: Vec<(Selection, u64)>,
     write: bool,
@@ -297,6 +299,13 @@ pub struct Permit {
     resources: Option<Arc<crate::runtime::FrameResources>>,
 }
 impl Permit {
+    /// Borrow the EXACT command admitted by this native authority, after currentness checks.
+    /// It is a retained observation, not a DTO-created grant; clones share the same command
+    /// and actual frame holding rather than duplicating large request buffers/spending credit.
+    pub fn admitted_command(&self) -> Result<&Command, ErrorCode> {
+        self.check()?;
+        Ok(&self.command)
+    }
     /// Reserve retained aggregate/output bytes BEFORE cloning/growing buffers. The real holding
     /// follows every cloned permit and Delivery through the final transport write settlement.
     pub fn reserve_result(&self, bytes: u64) -> Result<(), ErrorCode> {
