@@ -94,8 +94,8 @@ impl SshSigner {
         let public_key =
             public_material(std::str::from_utf8(&bytes[..n]).map_err(|_| Error::Invalid)?)?;
         let runtime = native::Runtime::default();
-        let scratch = native::Scratch::new(&std::env::temp_dir(), &runtime)?;
         let call = Call::new(claim)?;
+        let scratch = native::Scratch::new(&std::env::temp_dir(), &call)?;
         let path = scratch.path().join("selected.pub");
         fs::write(&path, &public_key)?;
         let output = tool(
@@ -204,7 +204,7 @@ impl History {
         let path = destination.join("identity");
         let public_path = destination.join("identity.pub");
         let call = Call::new(claim)?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let mut args = vec![
             "-q",
             "-t",
@@ -258,7 +258,7 @@ impl History {
     ) -> Result<Verification, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         self.qualify_version(version, scratch.path(), &call)?;
         let actual = self.git(
             &["cat-file", "commit", version.as_str()],

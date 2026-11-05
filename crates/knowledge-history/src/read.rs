@@ -123,7 +123,7 @@ impl History {
         if let Some(after) = after {
             validate_id(after)?;
         }
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let count = format!("--count={}", limit.checked_add(1).ok_or(Error::Capacity)?);
         // Native namespace-scoped glob union implements an exclusive ASCII cursor even on older system Git.
         // No --start-after feature dependency, unbounded prefix scan, private-ref output or local branch index.
@@ -198,7 +198,7 @@ impl History {
         validate_id(proposal_id)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let name = format!("refs/heads/omni-proposals/{proposal_id}");
         let expected_base = self.reference(ACCEPTED, scratch.path(), &call)?;
         let candidate = self
@@ -234,7 +234,7 @@ impl History {
         let call = Call::new(claim)?;
         self.validate()?;
         check_limit(limit, &call)?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let accepted = self.reference(ACCEPTED, scratch.path(), &call)?;
         let Some(accepted) = accepted else {
             return Ok(CommitPage {
@@ -288,7 +288,7 @@ impl History {
     pub fn version(&self, version: &Oid, claim: &Claim) -> Result<CommitInfo, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         self.qualify_version(version, scratch.path(), &call)?;
         self.commit_info(version, scratch.path(), &call)
     }
@@ -299,7 +299,7 @@ impl History {
         self.validate_path(path)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         self.qualify_version(version, scratch.path(), &call)?;
         self.base_tree(Some(version), scratch.path(), &call)?;
         if self.binding.existing.is_some() {
@@ -326,9 +326,9 @@ impl History {
         validate_id(operation_id)?;
         self.validate_path(path)?;
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let intent = self.read_intent(operation_id)?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         if self.reference(
             &format!("refs/omni/trees/{operation_id}"),
             scratch.path(),

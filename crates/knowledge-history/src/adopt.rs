@@ -67,7 +67,7 @@ impl History {
         let call = Call::new(claim)?;
         let runtime = native::Runtime::default();
         let digest = inspect_configuration(&repo, &runtime, &call)?;
-        let scratch = native::Scratch::new(&std::env::temp_dir(), &runtime)?;
+        let scratch = native::Scratch::new(&std::env::temp_dir(), &call)?;
         run(
             &repo,
             scratch.path(),
@@ -148,7 +148,7 @@ impl History {
             signer: None,
             committer: None,
         };
-        let lock = history.lock()?;
+        let lock = history.lock(&call)?;
         if binding_path.exists() {
             let mut file = tempfile::NamedTempFile::new_in(&state)?;
             file.write_all(&serde_json::to_vec(&history.binding).map_err(|_| Error::Recovery)?)?;
@@ -158,7 +158,7 @@ impl History {
         } else {
             persist(&binding_path, &history.binding)?;
         }
-        let scratch = history.scratch()?;
+        let scratch = history.scratch(&call)?;
         if history
             .reference(ACCEPTED, scratch.path(), &call)?
             .is_none()
@@ -312,7 +312,7 @@ fn inspect_configuration(
     ) {
         return Err(Error::ContextMismatch);
     }
-    let scratch = native::Scratch::new(&std::env::temp_dir(), runtime)?;
+    let scratch = native::Scratch::new(&std::env::temp_dir(), call)?;
     let parser = scratch.path().join("parser.git");
     fs::create_dir(&parser)?;
     run(

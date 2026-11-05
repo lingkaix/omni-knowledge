@@ -316,15 +316,15 @@ pub struct History {
     committer: Option<GitIdentity>,
 }
 /// Explicitly unlock the owned open-file description before close; unrelated concurrent fork/exec windows must not prolong it.
-struct WriterLock<'a>(Option<OwnedWriterLock>, &'a native::Runtime);
-impl Drop for WriterLock<'_> {
+struct WriterLock(Option<OwnedWriterLock>, native::Retention);
+impl Drop for WriterLock {
     /// Closing alone can leave a transient fork-inherited descriptor holding the flock until its exec.
     fn drop(&mut self) {
         if let Some(guard) = self.0.take()
             && guard.is_original_owner()
-            && self.1.has_pending()
+            && let Some(owner) = self.1.get()
         {
-            self.1.retain_lock(guard.into_file());
+            owner.retain_lock(guard.into_file());
         }
         // Otherwise OwnedWriterLock explicitly unlocks only in the acquiring process.
     }
@@ -346,6 +346,8 @@ struct Call {
     bytes_left: Cell<u64>,
     /// Remaining examined entries, conservatively counting repeated tree reads.
     files_left: Cell<u64>,
+    /// This exact public call's native owner, shared only with its own scratch/writer guards.
+    retention: native::Retention,
 }
 impl Call {
     /// Bind work to a live caller claim without creating or settling a reservation.
@@ -372,6 +374,7 @@ impl Call {
             file_limit: b.max_bytes,
             bytes_left: Cell::new(b.max_bytes),
             files_left: Cell::new(b.max_files),
+            retention: Default::default(),
         };
         call.check()?;
         if call.limit == 0 || call.rss_limit < (1 << 20) {
@@ -479,7 +482,7 @@ impl History {
         };
         fs::create_dir(history.repo.join("omni-state"))?;
         fs::create_dir(history.repo.join("omni-state/operations"))?;
-        let scratch = history.scratch()?;
+        let scratch = history.scratch(&call)?;
         // --template overrides all template configuration; this repo is newly owned and empty.
         run(
             &history.repo,
@@ -542,7 +545,7 @@ impl History {
     pub fn head(&self, claim: &Claim) -> Result<Option<Oid>, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         self.reference(ACCEPTED, scratch.path(), &call)
     }
 
@@ -576,7 +579,7 @@ impl History {
         claim: &Claim,
     ) -> Result<Prepared, Error> {
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         validate_id(&request.operation_id)?;
         if observation_ids.len() as u64 > call.files {
             return Err(Error::Capacity);
@@ -614,7 +617,7 @@ impl History {
         if let Some(intent) = self.existing(&request.operation_id, &fingerprint)? {
             return self.finish_prepare(intent, &call);
         }
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let index = scratch.path().join("index");
         self.base_tree(request.base.as_ref(), scratch.path(), &call)?;
         if let Some(base) = &request.base {
@@ -696,7 +699,7 @@ impl History {
             return Err(Error::ContextMismatch);
         }
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let fingerprint =
             digest(&serde_json::to_vec(&(operation_id, confirmation)).map_err(|_| Error::Invalid)?);
         if let Some(intent) = self.existing(operation_id, &fingerprint)? {
@@ -708,7 +711,7 @@ impl History {
             }
             return self.finish_prepare(intent, &call);
         }
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let proposal_ref = format!("refs/heads/omni-proposals/{}", confirmation.proposal_id);
         if self.reference(ACCEPTED, scratch.path(), &call)? != Some(confirmation.base.clone())
             || self.reference(&proposal_ref, scratch.path(), &call)?
@@ -745,7 +748,7 @@ impl History {
     pub fn publish(&self, operation_id: &str, claim: &Claim) -> Result<State, Error> {
         validate_id(operation_id)?;
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let intent = self.read_intent(operation_id)?;
         let state = self.inspect_intent(&intent, &call)?;
         if !matches!(state, State::Prepared(_)) {
@@ -784,7 +787,7 @@ impl History {
                 candidate.as_str()
             )
         });
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         match self.git(
             &["update-ref", "--stdin", "--no-deref"],
             input.as_bytes(),
@@ -812,7 +815,7 @@ impl History {
     pub fn inspect(&self, operation_id: &str, claim: &Claim) -> Result<State, Error> {
         validate_id(operation_id)?;
         let call = Call::new(claim)?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         self.inspect_intent(&self.read_intent(operation_id)?, &call)
     }
 
@@ -825,7 +828,7 @@ impl History {
     ) -> Result<Comparison, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let tree = self.base_tree(Some(candidate), scratch.path(), &call)?;
         self.compare_tree(base, &tree, scratch.path(), &call)
     }
@@ -835,7 +838,7 @@ impl History {
         self.validate_path(path)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         self.base_tree(Some(commit), scratch.path(), &call)?;
         if self.binding.existing.is_some() {
             self.editable_base(commit, path, scratch.path(), &call)?;
@@ -915,7 +918,7 @@ impl History {
     }
 
     /// Take only the owned cooperative lock; native Git CAS still handles outside ref writers.
-    fn lock(&self) -> Result<WriterLock<'_>, Error> {
+    fn lock(&self, call: &Call) -> Result<WriterLock, Error> {
         self.validate()?;
         let path = self.repo.join("omni-state/writer.lock");
         if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
@@ -934,7 +937,10 @@ impl History {
                 Error::Io
             }
         })?;
-        Ok(WriterLock(Some(OwnedWriterLock::new(file)), &self.runtime))
+        Ok(WriterLock(
+            Some(OwnedWriterLock::new(file)),
+            call.retention.clone(),
+        ))
     }
 
     /// Resolve only the fixed accepted ref or validated immutable proposal namespace.
@@ -1222,7 +1228,7 @@ impl History {
         if intent.prepared.unchanged {
             return Ok(intent.prepared);
         }
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(call)?;
         self.validate()?;
         let oid = if self.owner.mode == Mode::SigningRequired {
             self.signed_candidate(&intent, scratch.path(), call)?
@@ -1326,7 +1332,7 @@ impl History {
     /// Derive publication from actual immutable refs, never an optimistic receipt status bit.
     fn inspect_intent(&self, intent: &Intent, call: &Call) -> Result<State, Error> {
         let mut prepared = intent.prepared.clone();
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(call)?;
         let candidate = self.reference(
             &format!("refs/omni/prepared/{}", prepared.operation_id),
             scratch.path(),
@@ -1449,8 +1455,8 @@ impl History {
     }
 
     /// Private scratch must outlive unresolved child/FD/file effects.
-    fn scratch(&self) -> Result<native::Scratch<'_>, Error> {
-        native::Scratch::new(&self.repo.join("omni-state"), &self.runtime)
+    fn scratch(&self, call: &Call) -> Result<native::Scratch, Error> {
+        native::Scratch::new(&self.repo.join("omni-state"), call)
     }
 
     /// Inspect the actual retained process/evidence, never turn serialized PID facts into signalling authority.

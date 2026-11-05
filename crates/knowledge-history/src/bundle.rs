@@ -98,7 +98,7 @@ impl History {
     ) -> Result<BundleReport, BundleError> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let _lock = self.lock()?;
+        let _lock = self.lock(&call)?;
         let initial = file.metadata()?;
         if !initial.is_file() {
             return Err(BundleError::Integrity);
@@ -110,7 +110,7 @@ impl History {
         if initial.len() == 0 || need > call.bytes_left.get() {
             return Err(Error::Capacity.into());
         }
-        let scratch = self.scratch()?;
+        let scratch = self.scratch(&call)?;
         let input = scratch.path().join("held-input.bundle");
         let mut output = OpenOptions::new()
             .create_new(true)

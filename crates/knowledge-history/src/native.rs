@@ -39,8 +39,11 @@ struct Pending {
 #[derive(Clone)]
 pub struct UnsettledChild {
     inner: Arc<Mutex<Pending>>,
-    unknown: Arc<AtomicBool>,
+    /// Completion belongs only to this exact native owner, never a reusable runtime-wide flag.
+    settled: Arc<AtomicBool>,
 }
+/// One public call's actual unresolved owner; guards bind here before they can unwind.
+pub(crate) type Retention = Arc<std::sync::OnceLock<UnsettledChild>>;
 impl std::fmt::Debug for UnsettledChild {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("UnsettledChild")
@@ -83,8 +86,41 @@ impl UnsettledChild {
                 return Err(Error::Unsettled(self.clone()));
             }
         }
-        self.unknown.store(false, Ordering::Release);
+        self.settled.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// The runtime may retire only this exact owner after whole native/lock collection.
+    fn is_settled(&self) -> bool {
+        self.settled.load(Ordering::Acquire)
+    }
+
+    /// Attach only this call's actual descriptor, serialized against this owner's whole collection.
+    pub(crate) fn retain_lock(&self, file: File) {
+        match self.inner.lock() {
+            Ok(mut pending) if pending.owner_pid == std::process::id() => {
+                if self.is_settled() {
+                    let _ = FileExt::unlock(&file);
+                } else {
+                    pending.locks.push(file);
+                }
+            }
+            _ => std::mem::forget(file),
+        }
+    }
+
+    /// Keep this call's recognized directory until its actual owner is wholly collected; no later runtime owner is consulted.
+    fn retain_directory(&self, directory: tempfile::TempDir) {
+        match self.inner.lock() {
+            Ok(mut pending) if pending.owner_pid == std::process::id() => {
+                if !self.is_settled() {
+                    pending.artifacts.push(directory.keep());
+                }
+            }
+            _ => {
+                let _ = directory.keep();
+            }
+        }
     }
 }
 impl Drop for Pending {
@@ -103,16 +139,16 @@ impl Drop for Pending {
 }
 
 /// Private scratch retained whenever an actual child can still access its paths.
-pub(crate) struct Scratch<'a> {
+pub(crate) struct Scratch {
     directory: Option<tempfile::TempDir>,
-    runtime: &'a Runtime,
+    retention: Retention,
 }
-impl<'a> Scratch<'a> {
-    /// Create only below the selected external state directory.
-    pub fn new(parent: &Path, runtime: &'a Runtime) -> Result<Self, Error> {
+impl Scratch {
+    /// Create only below the selected external state directory, bound to this exact call's native owner.
+    pub fn new(parent: &Path, call: &Call) -> Result<Self, Error> {
         Ok(Self {
             directory: Some(tempfile::tempdir_in(parent)?),
-            runtime,
+            retention: call.retention.clone(),
         })
     }
     /// Borrow the live private path; the directory exists until this owning guard is dropped.
@@ -120,13 +156,13 @@ impl<'a> Scratch<'a> {
         self.directory.as_ref().expect("live owned scratch").path()
     }
 }
-impl Drop for Scratch<'_> {
-    /// Never remove paths while native effects/handles remain unknown.
+impl Drop for Scratch {
+    /// A stale/different runtime generation cannot decide this call's directory lifetime.
     fn drop(&mut self) {
-        if self.runtime.has_pending()
+        if let Some(owner) = self.retention.get()
             && let Some(directory) = self.directory.take()
         {
-            self.runtime.retain_artifact(directory.keep());
+            owner.retain_directory(directory);
         }
     }
 }
@@ -136,8 +172,6 @@ impl Drop for Scratch<'_> {
 pub(crate) struct Runtime {
     /// Actual unresolved process owner, not a transaction registry.
     pending: Mutex<Option<UnsettledChild>>,
-    /// Fast drop-guard decision without blocking on an executing child.
-    unknown: Arc<AtomicBool>,
 }
 
 /// Bounded actual native result, including nonzero status for verification/refusal classification.
@@ -151,38 +185,6 @@ pub(crate) struct Output {
 }
 
 impl Runtime {
-    /// Whether actual native collection remains unknown.
-    pub fn has_pending(&self) -> bool {
-        self.unknown.load(Ordering::Acquire)
-    }
-
-    /// Keep the writer's actual open-file description while its child remains unknown.
-    pub fn retain_lock(&self, file: File) {
-        match self.pending.lock() {
-            Ok(mut slot) => {
-                if let Some(pending) = slot.as_mut() {
-                    match pending.inner.lock() {
-                        Ok(mut owned) => owned.locks.push(file),
-                        Err(_) => std::mem::forget(file),
-                    }
-                } else {
-                    let _ = FileExt::unlock(&file);
-                }
-            }
-            Err(_) => std::mem::forget(file),
-        }
-    }
-
-    /// Keep only a recognized owned scratch directory after an uncertain effect.
-    pub fn retain_artifact(&self, path: PathBuf) {
-        if let Ok(mut slot) = self.pending.lock()
-            && let Some(pending) = slot.as_mut()
-            && let Ok(mut owned) = pending.inner.lock()
-        {
-            owned.artifacts.push(path);
-        }
-    }
-
     /// Inspect actual retained native identity/evidence without signalling it.
     pub fn pending(&self) -> Result<Option<(ProcessIdentity, Vec<PathBuf>)>, Error> {
         let slot = self.pending.try_lock().map_err(|_| Error::Busy)?;
@@ -208,9 +210,13 @@ impl Runtime {
         call: &Call,
     ) -> Result<Output, Error> {
         call.check()?;
+        // An uncertain public call aborts; retry is a new explicit call, never a second owner in its guard scope.
+        if call.retention.get().is_some() {
+            return Err(Error::Recovery);
+        }
         let mut slot = self.pending.try_lock().map_err(|_| Error::Busy)?;
         if let Some(pending) = slot.as_ref() {
-            if self.has_pending() {
+            if !pending.is_settled() {
                 return Err(Error::Unsettled(pending.clone()));
             }
             slot.take();
@@ -238,14 +244,14 @@ impl Runtime {
                     pid: child.id(),
                     start: None,
                 };
-                return self.abandon(&mut slot, child, identity);
+                return self.abandon(&mut slot, child, identity, call);
             }
         };
         let Some(mut stdout) = child.stdout.take() else {
-            return self.abandon(&mut slot, child, identity);
+            return self.abandon(&mut slot, child, identity, call);
         };
         let Some(mut stderr) = child.stderr.take() else {
-            return self.abandon(&mut slot, child, identity);
+            return self.abandon(&mut slot, child, identity, call);
         };
         let mut stdin = child.stdin.take();
         let mut out_done = false;
@@ -313,7 +319,7 @@ impl Runtime {
         child.stdout = Some(stdout);
         child.stderr = Some(stderr);
         if collect(&mut child, identity, Duration::from_secs(2)).is_err() {
-            return self.abandon(&mut slot, child, identity);
+            return self.abandon(&mut slot, child, identity, call);
         }
         result?;
         let status = child.try_wait()?.ok_or(Error::Recovery)?;
@@ -332,6 +338,7 @@ impl Runtime {
         slot: &mut Option<UnsettledChild>,
         child: Child,
         identity: ProcessIdentity,
+        call: &Call,
     ) -> Result<T, Error> {
         let pending = UnsettledChild {
             inner: Arc::new(Mutex::new(Pending {
@@ -342,10 +349,14 @@ impl Runtime {
                 owner_pid: std::process::id(),
                 collected: false,
             })),
-            unknown: self.unknown.clone(),
+            settled: Arc::new(AtomicBool::new(false)),
         };
+        // execute checks an empty call scope before spawning, and aborts on its first unresolved child.
+        assert!(
+            call.retention.set(pending.clone()).is_ok(),
+            "one native owner per public call"
+        );
         *slot = Some(pending.clone());
-        self.unknown.store(true, Ordering::Release);
         Err(Error::Unsettled(pending))
     }
 }
