@@ -133,6 +133,8 @@ struct NativeReader {
     segment: File,
     metadata: File,
     metadata_stamp: NativeStamp,
+    header: File,
+    header_stamp: NativeStamp,
     pin: File,
     segment_bytes: u64,
 }
@@ -140,7 +142,7 @@ impl NativeReader {
     fn open(
         root: &Path,
         generation: &str,
-        created: Option<(File, File)>,
+        created: Option<(File, File, File)>,
     ) -> Result<Self, VectorError> {
         use std::os::unix::fs::OpenOptionsExt;
         let root = fs::OpenOptions::new()
@@ -153,14 +155,16 @@ impl NativeReader {
         let directory = Self::component(&root, generation, true)?;
         let pin = Self::component(&directory, "READERS", false)?;
         fs2::FileExt::try_lock_shared(&pin).map_err(|_| VectorError::Pinned)?;
-        let (segment, metadata) = match created {
+        let (segment, metadata, header) = match created {
             Some(files) => files,
             None => (
                 Self::component(&directory, "segment.bin", false)?,
                 Self::component(&directory, "rows.bin", false)?,
+                Self::component(&directory, "manifest.json", false)?,
             ),
         };
         let metadata_stamp = NativeStamp::of(&metadata)?;
+        let header_stamp = NativeStamp::of(&header)?;
         if !segment.metadata().map_err(io)?.is_file() {
             return Err(VectorError::Identity("nonregular vector segment".into()));
         }
@@ -171,6 +175,8 @@ impl NativeReader {
             segment,
             metadata,
             metadata_stamp,
+            header,
+            header_stamp,
             pin,
             segment_bytes,
         };
@@ -195,6 +201,10 @@ impl NativeReader {
         Self::entry(&self.directory, "READERS", &self.pin)?;
         Self::entry(&self.directory, "segment.bin", &self.segment)?;
         Self::entry(&self.directory, "rows.bin", &self.metadata)?;
+        Self::entry(&self.directory, "manifest.json", &self.header)?;
+        if NativeStamp::of(&self.header)? != self.header_stamp {
+            return Err(invalid("vector header version drift"));
+        }
         if NativeStamp::of(&self.metadata)? != self.metadata_stamp {
             return Err(invalid("vector metadata version drift"));
         }
@@ -266,6 +276,12 @@ pub struct VectorStore {
     native: Source,
     /// Actual affine envelope; the original grant and all its clones are consumed.
     _work: std::sync::Arc<Work>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildMode {
+    CompatibilityCurrent,
+    Prepared,
 }
 
 impl VectorStore {
@@ -377,6 +393,55 @@ impl VectorStore {
         )
     }
 
+    /// Prepare immutable data ONLY; do not select a vector CURRENT independently of the
+    /// caller's complete lexical/vector/source tuple. The same actual paid owner follows exports.
+    pub fn prepare(
+        root: &Path,
+        identity: &ModelIdentity,
+        rows: &[VectorRow],
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+    ) -> Result<PreparedVectors, VectorError> {
+        let plan = row_plan(rows)?;
+        Self::prepare_stream(
+            root,
+            identity,
+            &plan,
+            rows.iter().map(|row| {
+                if !valid_vector(identity, &row.vector) {
+                    return Err(VectorError::Vector(row.source_id.clone()));
+                }
+                Ok(row.clone())
+            }),
+            grant,
+            deadline,
+        )
+    }
+    /// Streaming preparation under the complete existing envelope, before producer advancement.
+    pub fn prepare_stream<I>(
+        root: &Path,
+        identity: &ModelIdentity,
+        plan: &VectorBuildPlan,
+        rows: I,
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+    ) -> Result<PreparedVectors, VectorError>
+    where
+        I: IntoIterator<Item = Result<VectorRow, VectorError>>,
+    {
+        Ok(PreparedVectors {
+            store: Self::build_stream_mode(
+                root,
+                identity,
+                plan,
+                rows,
+                grant,
+                deadline,
+                BuildMode::Prepared,
+            )?,
+        })
+    }
+
     /// Stream one admitted row at a time; neither float payload nor corpus metadata is assembled.
     /// Plan facts grant nothing: the actual complete same-account envelope is consumed BEFORE IO.
     /// This standalone CURRENT is a compatibility seam, not a native whole-tuple publisher.
@@ -387,6 +452,28 @@ impl VectorStore {
         rows: I,
         grant: &AccountGrant,
         deadline: Option<Instant>,
+    ) -> Result<Self, VectorError>
+    where
+        I: IntoIterator<Item = Result<VectorRow, VectorError>>,
+    {
+        Self::build_stream_mode(
+            root,
+            identity,
+            plan,
+            rows,
+            grant,
+            deadline,
+            BuildMode::CompatibilityCurrent,
+        )
+    }
+    fn build_stream_mode<I>(
+        root: &Path,
+        identity: &ModelIdentity,
+        plan: &VectorBuildPlan,
+        rows: I,
+        grant: &AccountGrant,
+        deadline: Option<Instant>,
+        mode: BuildMode,
     ) -> Result<Self, VectorError>
     where
         I: IntoIterator<Item = Result<VectorRow, VectorError>>,
@@ -510,15 +597,18 @@ impl VectorStore {
         let mut metadata_file = create_component(&stage.join("manifest.json"))?;
         write_funded(&mut metadata_file, &metadata, &mut work, deadline)?;
         metadata_file.sync_all().map_err(io)?;
-        drop(metadata_file);
         drop(metadata);
         let marker = create_component(&stage.join("READERS"))?;
         marker.sync_all().map_err(io)?;
         drop(marker);
         fs::rename(&stage, &directory).map_err(io)?;
-        let native = NativeReader::open(root, &generation, Some((segment, row_file)))?;
+        let native =
+            NativeReader::open(root, &generation, Some((segment, row_file, metadata_file)))?;
         if deadline.is_some_and(|limit| Instant::now() >= limit) {
             return Err(VectorError::Grant(GrantError::Deadline));
+        }
+        if mode == BuildMode::Prepared {
+            return Self::from_native(root, generation, manifest, native, work);
         }
         let temporary = root.join("CURRENT.next");
         let mut pointer = create_component(&temporary)?;
@@ -565,7 +655,7 @@ impl VectorStore {
         }
         let native = NativeReader::open(root, &generation, None)?;
         drop(scope);
-        let file = native.open_component("manifest.json")?;
+        let file = native.header.try_clone().map_err(io)?;
         if file.metadata().map_err(io)?.len() > cap {
             return Err(VectorError::Grant(GrantError::TooSmall));
         }
@@ -888,6 +978,65 @@ impl VectorStore {
 
     pub fn generation(&self) -> &str {
         &self.generation
+    }
+}
+
+/// Immutable unpublished vector artifacts, not permission to publish a native tuple.
+/// No independent vector CURRENT is switched. Actual native hosts retain source/model
+/// guards and separately fund their complete consumer/publication/delivery envelope.
+pub struct PreparedVectors {
+    store: VectorStore,
+}
+impl PreparedVectors {
+    pub fn generation(&self) -> &str {
+        self.store.generation()
+    }
+    pub fn check(&self) -> Result<(), VectorError> {
+        self.store.native.check(&self.store.generation)
+    }
+    /// Clone an exact created descriptor, retaining its actual paid/pinned preparation owner.
+    /// Only the three known immutable members are available; the caller pays its read buffers.
+    pub fn component(
+        self: &std::sync::Arc<Self>,
+        name: &str,
+    ) -> Result<PreparedComponent, VectorError> {
+        self.check()?;
+        let Source::Native(native) = &self.store.native else {
+            return Err(invalid("not a native prepared generation"));
+        };
+        let file = match name {
+            "manifest.json" => &native.header,
+            "rows.bin" => &native.metadata,
+            "segment.bin" => &native.segment,
+            _ => return Err(invalid("unknown prepared member")),
+        }
+        .try_clone()
+        .map_err(io)?;
+        self.check()?;
+        Ok(PreparedComponent {
+            file,
+            position: 0,
+            owner: self.clone(),
+        })
+    }
+}
+/// Streaming exact member; FD dies before its source/reader/pin/credit owner.
+pub struct PreparedComponent {
+    file: File,
+    position: u64,
+    owner: std::sync::Arc<PreparedVectors>,
+}
+impl Read for PreparedComponent {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        self.owner.check().map_err(std::io::Error::other)?;
+        let count = self.file.read_at(output, self.position)?;
+        self.owner.check().map_err(std::io::Error::other)?;
+        self.position = self
+            .position
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("prepared member offset overflow"))?;
+        Ok(count)
     }
 }
 

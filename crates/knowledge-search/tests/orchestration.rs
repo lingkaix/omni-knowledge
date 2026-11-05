@@ -349,6 +349,84 @@ fn written_row_dependencies_bind_representation_processor_and_modality() {
 }
 
 #[test]
+fn preparation_never_switches_current_and_real_component_retains_the_prepared_pin() {
+    use std::io::Read;
+    let root = vector_root();
+    let row = VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        representation: fixture_representation(),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    };
+    let old = VectorStore::build(
+        root.path(),
+        &identity(),
+        std::slice::from_ref(&row),
+        &grant(1024),
+        None,
+    )
+    .unwrap();
+    let previous = fs::read(root.path().join("CURRENT")).unwrap();
+    let mut next = row;
+    next.locator = "line:2".into();
+    next.vector = vec![0.0, 1.0];
+    let prepared = std::sync::Arc::new(
+        VectorStore::prepare(root.path(), &identity(), &[next], &grant(1024), None).unwrap(),
+    );
+    let generation = prepared.generation().to_owned();
+    assert_ne!(old.generation(), generation);
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), previous);
+    assert!(prepared.component("../not-a-member").is_err());
+    let mut member = prepared.component("segment.bin").unwrap();
+    drop(prepared);
+    assert!(
+        VectorStore::retire(root.path(), &generation).is_err(),
+        "actual exported descriptor owner still pins unpublished generation"
+    );
+    let buffers = AccountGrant::reserve(
+        knowledge_core::jobs::Reservation {
+            memory_bytes: 64 * 1024,
+            temporary_bytes: 0,
+        },
+        knowledge_core::admission::Origin::BeforeVerification,
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    member.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, [0.0f32.to_le_bytes(), 1.0f32.to_le_bytes()].concat());
+    drop(bytes);
+    drop(buffers);
+    drop(member);
+    VectorStore::retire(root.path(), &generation).unwrap();
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), previous);
+}
+
+#[test]
+fn identical_bytes_in_a_replaced_header_are_not_the_selected_tuple_member() {
+    let root = vector_root();
+    let row = VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        representation: fixture_representation(),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    };
+    let built = VectorStore::build(root.path(), &identity(), &[row], &grant(1024), None).unwrap();
+    let header = root.path().join(built.generation()).join("manifest.json");
+    let bytes = fs::read(&header).unwrap();
+    let replacement = root.path().join("new-header");
+    fs::write(&replacement, bytes).unwrap();
+    fs::rename(replacement, header).unwrap();
+    assert!(
+        built
+            .query(&BTreeSet::from(["source".into()]), &[1.0, 0.0])
+            .is_err(),
+        "hash-equal replacement is not the actual selected member FD"
+    );
+}
+
+#[test]
 fn complete_dependency_filter_precedes_payload_and_evidence_distance() {
     use std::os::unix::fs::FileExt;
     let root = vector_root();
