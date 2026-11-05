@@ -6,7 +6,8 @@ The [storage owner](../../docs/specs/storage.md) governs mount identity, verify-
 [Product](../../docs/specs/product.md) places ordinary local reads ahead of the optional GUI.
 [Service](../../docs/specs/service.md) still owns exposure and read admission; this crate does not cut over to it.
 
-This adapter now includes M1 shared-admission verification and caller-driven Linux native hints.
+This adapter includes M1 shared-admission verification and native hints behind the same public watch interface.
+The [FSEvents consumer contract](fsevents.md) describes the macOS helper, lifetime, cursor handoff, and remaining native qualification.
 Builder evidence is not independent M0/M1 acceptance or an application authority change.
 
 ## What The Caller Must Already Know
@@ -76,9 +77,13 @@ Only the native owner may acknowledge a completed durable relevant scan at an un
 New/incomplete directory coverage cannot be repaired by a quiet interval or acknowledgement; rebuild the watch after reconciliation.
 Native watch/instance/descriptor exhaustion is `WatchError::Exhausted`, never empty success or evidence of absence.
 Drop closes the exact native descriptor and destroys owned policy metadata before settling its independent holding; execution mount slots are not retained.
-monitor uses the actual notify 7 FSEvents binding on macOS; watch remains the Linux-only hint primitive and returns Unsupported on macOS.
-FSEvents callback faults and gaps require reconciliation; its exact watcher stops and joins before runtime/policy memory holdings settle.
-The native-only delivery/resource test requires actual macOS execution; Linux compilation does not qualify that binding.
+On macOS, both watch and monitor use one actual device-relative FSEvents stream in the prepaid finite-lease omni-fsevents helper.
+The helper receives a held root FD, resolves its no-firmlink device-relative path, and sends bounded metadata-only callback frames.
+It retains callback context and native objects until process exit; only confirmed exit permits parent settlement.
+Unknown stop retains exact process/transport handles and the Account charge; EOF and a void stop request are not quiescence.
+Opaque CF runtime costs use the existing processing worker RSS observer, not a fabricated fixed CF allocation bound; sampling and syscall overshoot remain explicit limits.
+Native drop/coalescing/root/volume loss and lease expiry require bounded catch-up and stream rebuild, not acknowledgement-based coverage repair.
+The native-only delivery/resource/cursor/restart tests require actual macOS execution; Linux compilation does not qualify this binding.
 The frozen backend reliable_watch capability remains false; these hints do not claim durable replay or end-to-end tracking qualification.
 
 ## Streaming, OS-Mounted NAS And Explicit Fallback

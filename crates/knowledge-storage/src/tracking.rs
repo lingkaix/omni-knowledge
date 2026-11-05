@@ -86,12 +86,47 @@ pub struct Checkpoint {
     /// Current native scheduling classification.
     pub schedule: Schedule,
 }
+/// Preserve watch refusal classifications without converting continuity loss into empty success.
+fn watch_error(e: knowledge_local::WatchError) -> Error {
+    use knowledge_local::WatchError;
+    match e {
+        WatchError::Admission(e) => Error::Admission(e),
+        WatchError::WaitingMemory => Error::Waiting(knowledge_core::admission::Waiting::Memory),
+        WatchError::Budget => Error::Budget,
+        WatchError::Backend(e) => Error::Backend(e),
+        WatchError::Unsupported => Error::Unsupported,
+        WatchError::QuiescenceUnknown => Error::Indeterminate,
+        WatchError::Native | WatchError::Exhausted | WatchError::LeaseExpired => {
+            Error::Backend(BackendError::Unavailable(Unavailable::Changed))
+        }
+    }
+}
+/// Native cursor retained only after its corresponding complete inventory checkpoint is durable.
+/// It is diagnostic replay state, not source identity, read permission, or permission to prune on restart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventCursor {
+    /// Exact held native root (device, inode).
+    pub root: (u64, u64),
+    /// Selected backend/library/mount qualifier.
+    pub backend: BackendIdentity,
+    /// Current policy and exclusion scope fingerprint.
+    pub read_scope: String,
+    /// Actual complete durable inventory checkpoint this record follows.
+    pub scan: String,
+    /// Actual device event-store UUID.
+    pub volume: [u8; 16],
+    /// Observed device-relative FSEvent ID, captured before that inventory scan.
+    pub event_id: u64,
+}
 /// Bounded durable replay output; caller retains pre-verification memory through these owned values.
 pub struct Replay {
     /// Actual validated metadata records, never source bodies.
     pub observations: Vec<Observation>,
     /// Actual complete/partial boundaries let restart retain the last complete scan independently.
     pub checkpoints: Vec<Checkpoint>,
+    /// Post-inventory native event cursors; restart still requires actual full bounded catch-up.
+    pub event_cursors: Vec<EventCursor>,
     /// Next exact retained byte position; malformed bytes are never skipped.
     pub next_offset: u64,
     /// The selected current stream EOF was actually reached.
@@ -338,6 +373,68 @@ fn generated_json<T: Serialize>(
     Ok(())
 }
 impl<P: WritePolicy> Store<P> {
+    /// Reconcile the exact watched mount, then persist its pre-scan native ID only after durability.
+    /// Gaps, concurrent hints, partial scans and current root/scope drift never advance a cursor.
+    /// Restart deliberately uses a fresh stream plus full bounded catch-up, not assumed replay continuity.
+    /// The host still owns debounce scheduling and the lifetime of its prepaid input/result holding.
+    ///
+    /// Compiled consumer shape only; actual native durability requires the native integration test.
+    /// ```no_run
+    /// use knowledge_local::{HintWatch, LocalReadPolicy};
+    /// use knowledge_storage::{Error, Preflight, ReconcileOptions, Reconciled, Schedule, Store, WritePolicy};
+    /// fn catch_up<P: WritePolicy, R: LocalReadPolicy>(
+    ///     store: &Store<P>, watch: &mut HintWatch<'_, R>, preflight: &Preflight<'_>,
+    /// ) -> Result<Reconciled, Error> {
+    ///     store.reconcile_watched(watch, ReconcileOptions {
+    ///         verify_bytes: true, schedule: Schedule::StartupPeriodic,
+    ///     }, preflight)
+    /// }
+    /// ```
+    pub fn reconcile_watched<R: LocalReadPolicy>(
+        &self,
+        watch: &mut knowledge_local::HintWatch<'_, R>,
+        options: ReconcileOptions,
+        preflight: &Preflight<'_>,
+    ) -> Result<Reconciled, Error> {
+        let b = Bounds::new(preflight)?;
+        let before = watch.poll().map_err(watch_error)?;
+        let cursor = watch.native_cursor().map_err(watch_error)?;
+        let mount = watch.mount();
+        let scope = mount
+            .read_scope(preflight.budget, preflight.holding)
+            .map_err(Error::Backend)?;
+        let result = self.reconcile_local(mount, options, preflight)?;
+        let after = watch.poll().map_err(watch_error)?;
+        if result.complete && before.epoch == after.epoch && after.coverage_complete {
+            if let Some(cursor) = cursor {
+                if cursor.root != mount.root_identity().map_err(Error::Backend)?
+                    || scope
+                        != mount
+                            .read_scope(preflight.budget, preflight.holding)
+                            .map_err(Error::Backend)?
+                {
+                    return Err(Error::Context);
+                }
+                let c = self.gate()?;
+                self.live(&c)?;
+                b.check()?;
+                let lane = self.lane()?;
+                let mut journal = journal::Journal::open(&lane.journal, &self.writer, b.control())?;
+                journal.append_event_cursor(&EventCursor {
+                    root: cursor.root,
+                    backend: mount.context(),
+                    read_scope: scope,
+                    scan: result.last_complete.clone().ok_or(Error::Recovery)?,
+                    volume: cursor.volume,
+                    event_id: cursor.event_id,
+                })?;
+            }
+            watch
+                .acknowledge_reconciliation(after.epoch)
+                .map_err(watch_error)?;
+        }
+        Ok(result)
+    }
     /// Replay validated visible observations with a bounded working set and an exact byte cursor.
     /// Root/policy/writer checks remain native; malformed bytes are retained and reported, not skipped.
     pub fn replay_tracking(&self, offset: u64, preflight: &Preflight<'_>) -> Result<Replay, Error> {
@@ -347,12 +444,14 @@ impl<P: WritePolicy> Store<P> {
         let mut journal = journal::Journal::read(&lane.journal, &self.writer, b.control())?;
         let mut observations = Vec::new();
         let mut checkpoints = Vec::new();
+        let mut event_cursors = Vec::new();
         let mut cursor = offset;
         let mut consumed = 0u64;
         let mut issue = None;
         let mut complete = false;
         while consumed < b.bytes
-            && ((observations.len() + checkpoints.len()) as u64) < preflight.budget.max_files
+            && ((observations.len() + checkpoints.len() + event_cursors.len()) as u64)
+                < preflight.budget.max_files
         {
             b.check()?;
             match journal.next_tracking(cursor, b.control().min(b.memory / 64)) {
@@ -364,6 +463,12 @@ impl<P: WritePolicy> Store<P> {
                             return Err(Error::Recovery);
                         }
                         checkpoints.push(checkpoint.clone());
+                    }
+                    if let Some(journal::ReplayItem::EventCursor(cursor)) = &item {
+                        if cursor.backend.library_id != self.library {
+                            return Err(Error::Recovery);
+                        }
+                        event_cursors.push(cursor.clone());
                     }
                     if let Some(journal::ReplayItem::Source(observation, _)) = item {
                         if observation.stat.backend.library_id != self.library {
@@ -381,7 +486,9 @@ impl<P: WritePolicy> Store<P> {
                     break;
                 }
             }
-            if (observations.len() + checkpoints.len()) as u64 * b.control() > b.memory / 4 {
+            if (observations.len() + checkpoints.len() + event_cursors.len()) as u64 * b.control()
+                > b.memory / 4
+            {
                 break;
             }
         }
@@ -389,6 +496,7 @@ impl<P: WritePolicy> Store<P> {
         Ok(Replay {
             observations,
             checkpoints,
+            event_cursors,
             next_offset: cursor,
             complete,
             issue,

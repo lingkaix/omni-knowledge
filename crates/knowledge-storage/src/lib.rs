@@ -9,8 +9,8 @@ mod tracking;
 pub use auxiliary::{JsonSize, start_resources};
 pub use migration::{MigrationInventory, MigrationItem, MigrationKind};
 pub use tracking::{
-    ChangeKind, Checkpoint, Observation, ReconcileOptions, Reconciled, Replay, Schedule,
-    Verification,
+    ChangeKind, Checkpoint, EventCursor, Observation, ReconcileOptions, Reconciled, Replay,
+    Schedule, Verification,
 };
 mod journal;
 mod native;

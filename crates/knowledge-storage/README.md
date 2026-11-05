@@ -68,7 +68,13 @@ Startup/lost continuity/overflow triggers bounded current-source reconciliation,
 Qualified birth/generation/volume identity can support continuity; equal digests, inode alone or restored mtime cannot merge assets or establish absence.
 Previous complete generations and live pins remain the cache owner's responsibility; this module never evicts them to obtain capacity.
 Builder checks use actual private files, competing native destinations, interrupted/reopened operations and real Git; they are not independent admission/durability acceptance.
-The local adapter now supplies admitted full-source verification, admitted stat-first enumeration and caller-driven Linux inotify hints.
+The local adapter supplies admitted full-source verification, admitted stat-first enumeration and the shared inotify/FSEvents watch interface.
+Store::reconcile_watched consumes the exact watch-owned mount and appends an optional typed event_cursor only after its complete inventory checkpoint is synchronized and current root, scope, and hint generation still agree.
+The event_cursor contains root, backend/library/mount, read_scope, scan, native volume UUID, and device-relative event ID.
+Old records remain readable; older binaries that reject the new optional field must not be used as event-cursor readers.
+Replay::event_cursors exposes these retained observations, not native replay permission.
+Restart always opens a fresh stream and performs real bounded catch-up with known-descendant inspection; no persisted cursor authorizes pruning.
+A post-scan watch failure can return an error while the already synchronized inventory remains visible; no rollback is implied.
 ## Durable Inventory And Replay
 
 Store::reconcile_local streams eager metadata with finite working memory, optionally verifies actual bodies, and appends version-1 observations to the selected writer journal.

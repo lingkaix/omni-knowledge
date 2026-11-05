@@ -498,7 +498,7 @@ fn hard_link_ambiguity_does_not_transplant_source_identity() {
     assert!(!ids.contains(&new.source_id));
     assert!(new.identity_ambiguous);
 }
-/// Real FSEvents source binding, exact stop/join and event delivery; compiled/run only by native macOS CI.
+/// Real FSEvents source binding, confirmed runtime exit and event delivery; compiled/run only by native macOS CI.
 #[cfg(target_os = "macos")]
 #[test]
 fn actual_fsevents_native_delivery_and_resource_settlement() {
@@ -544,6 +544,202 @@ fn actual_fsevents_native_delivery_and_resource_settlement() {
     );
     drop(monitor);
     assert_eq!(f.account.status().unwrap().reserved.memory_bytes, before);
+}
+
+/// Storage 125: actual native IDs cannot precede durable complete inventory; restart performs real catch-up.
+#[cfg(target_os = "macos")]
+#[test]
+fn native_cursor_follows_inventory_and_restart_never_assumes_continuity() {
+    let f = Fixture::new();
+    let mount = f.mount();
+    let store = f.store();
+    let watch_budget = Budget {
+        max_memory_bytes: 16 * M,
+        ..f.preflight().budget
+    };
+    let mut watch = mount.watch(watch_budget).unwrap();
+    assert!(watch.poll().unwrap().reconciliation_required);
+    fs::write(f.root().join("pages/native.md"), b"actual native source").unwrap();
+    let start = std::time::Instant::now();
+    while watch.native_cursor().unwrap().is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "native event ID not delivered"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        store
+            .replay_tracking(0, &f.preflight())
+            .unwrap()
+            .event_cursors
+            .is_empty()
+    );
+    let partial = store
+        .reconcile_watched(
+            &mut watch,
+            ReconcileOptions {
+                verify_bytes: false,
+                schedule: Schedule::StartupPeriodic,
+            },
+            &Preflight {
+                budget: Budget {
+                    max_files: 1,
+                    ..f.preflight().budget
+                },
+                ..f.preflight()
+            },
+        )
+        .unwrap();
+    assert!(!partial.complete);
+    assert!(
+        store
+            .replay_tracking(0, &f.preflight())
+            .unwrap()
+            .event_cursors
+            .is_empty()
+    );
+    std::thread::sleep(Duration::from_millis(250));
+    let complete = store
+        .reconcile_watched(
+            &mut watch,
+            ReconcileOptions {
+                verify_bytes: true,
+                schedule: Schedule::StartupPeriodic,
+            },
+            &f.preflight(),
+        )
+        .unwrap();
+    assert!(complete.complete);
+    let replay = store.replay_tracking(0, &f.preflight()).unwrap();
+    let cursor = replay
+        .event_cursors
+        .last()
+        .expect("native cursor after durable inventory");
+    assert_eq!(Some(&cursor.scan), complete.last_complete.as_ref());
+    assert!(
+        replay
+            .checkpoints
+            .iter()
+            .any(|c| c.scan == cursor.scan && c.complete)
+    );
+    let lines = fs::read_to_string(f.root().join("journal/tracking-writer.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = lines
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let inventory_index = records
+        .iter()
+        .position(|r| r["checkpoint"]["scan"] == cursor.scan)
+        .unwrap();
+    let cursor_index = records
+        .iter()
+        .position(|r| r["event_cursor"]["scan"] == cursor.scan)
+        .unwrap();
+    assert!(
+        inventory_index < cursor_index,
+        "event cursor preceded corresponding inventory durability"
+    );
+    watch.close().unwrap();
+    drop(store);
+    fs::remove_file(f.root().join("pages/native.md")).unwrap();
+    let mut restarted = mount.watch(watch_budget).unwrap();
+    assert!(restarted.poll().unwrap().reconciliation_required);
+    // A newly delivered native ID is possible even immediately after startup, but it cannot acknowledge old inventory.
+    let _ = restarted.native_cursor().unwrap();
+    assert!(
+        restarted.poll().unwrap().reconciliation_required,
+        "restart invented native continuity"
+    );
+    let store = f.store();
+    let caught_up = store
+        .reconcile_watched(
+            &mut restarted,
+            ReconcileOptions {
+                verify_bytes: true,
+                schedule: Schedule::StartupPeriodic,
+            },
+            &f.preflight(),
+        )
+        .unwrap();
+    assert!(caught_up.complete);
+    assert!(
+        store
+            .replay_tracking(0, &f.preflight())
+            .unwrap()
+            .observations
+            .iter()
+            .any(|o| o.stat.path.as_str() == "pages/native.md" && o.change == ChangeKind::Deleted)
+    );
+    restarted.close().unwrap();
+
+    // Real native work loss must lead to bounded inventory/known-descendant reconciliation, never cursor advancement.
+    fs::write(f.root().join("pages/gap-old.md"), b"known descendant").unwrap();
+    assert!(f.scan().complete);
+    let cursor_count = store
+        .replay_tracking(0, &f.preflight())
+        .unwrap()
+        .event_cursors
+        .len();
+    let mut limited = mount
+        .watch(Budget {
+            max_files: 2,
+            ..watch_budget
+        })
+        .unwrap();
+    fs::remove_file(f.root().join("pages/gap-old.md")).unwrap();
+    for i in 0..8 {
+        fs::write(
+            f.root().join(format!("pages/storm-{i}.md")),
+            b"actual native hint",
+        )
+        .unwrap();
+    }
+    let start = std::time::Instant::now();
+    loop {
+        match limited.poll() {
+            Err(_) => break,
+            Ok(h) if !h.coverage_complete => {
+                assert!(h.reconciliation_required);
+                break;
+            }
+            _ => (),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "native work loss was not exposed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Ok(h) = limited.acknowledge_reconciliation(0) {
+        assert!(h.reconciliation_required);
+    }
+    let reconciled = store
+        .reconcile_local(
+            &mount,
+            ReconcileOptions {
+                verify_bytes: true,
+                schedule: Schedule::StartupPeriodic,
+            },
+            &f.preflight(),
+        )
+        .unwrap();
+    assert!(reconciled.complete);
+    let replay = store.replay_tracking(0, &f.preflight()).unwrap();
+    assert_eq!(replay.event_cursors.len(), cursor_count);
+    assert!(
+        replay
+            .observations
+            .iter()
+            .any(|o| o.stat.path.as_str() == "pages/gap-old.md" && o.change == ChangeKind::Deleted)
+    );
+    assert!(
+        replay
+            .observations
+            .iter()
+            .any(|o| o.stat.path.as_str() == "pages/storm-7.md" && o.change == ChangeKind::Created)
+    );
+    limited.close().unwrap();
 }
 
 /// Sequential native writers preserve source IDs from visible evidence, not equal content.

@@ -52,6 +52,15 @@ A resumed byte cursor validates its bounded predecessor, including EOF; invalid,
 Root cold decoding bounds actual encoded reads before parsing, including a concurrently growing held FD, and the existing resident owner retains its memory charge through its last reader.
 The retained non-search owned-snapshot caller still has its separately documented integration lifetime gap.
 
+## Required Native Event Adapter
+
+The [FSEvents consumer contract](../knowledge-local/fsevents.md) describes this additive native slice; it does not reopen the seven corrections above.
+`LocalMount::watch(Budget)` and `monitor` share the same real FSEvents owner on macOS.
+`HintWatch::mount`, `native_cursor`, and `close` expose the exact owner, observed candidate cursor, and confirmed-or-unknown stop outcome.
+`Store::reconcile_watched(&mut HintWatch, ReconcileOptions, &Preflight) -> Result<Reconciled, Error>` has a compiled generic consumer in its RustDoc.
+`Replay::event_cursors` returns post-inventory `EventCursor` records; restart still performs full bounded catch-up, never assumed event replay.
+macOS startup/packaging owners must build and include the sibling `omni-fsevents` executable; this slice does not edit their callers.
+
 ## Qualification
 
 Linux runtime proof, native macOS proof, M6 caller composition, and independent affected-scope acceptance remain distinct gates.

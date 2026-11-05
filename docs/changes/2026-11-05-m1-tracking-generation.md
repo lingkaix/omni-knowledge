@@ -32,5 +32,5 @@ The unchanged positive Linux watch remains RED at native_apply.rs:651 with Exhau
 Strict all-target knowledge-storage Clippy, warning-denied docs, workspace format check, and diff checks pass; exact commands and raw outcomes remain in ../gates/critical-*.log outside Git.
 The production delta is 30 added and 4 removed lines; the regression adds 34 lines and does not alter any existing assertion.
 Native hosted confirmation and independent consequential acceptance remain outstanding; this local pass does not waive them or the separately assigned Git failures.
-The required FSEvents implementation remains preserved separately in ../gates/fsevents-pending.patch and ../pending-native while this urgent correction lands.
+During this urgent landing, the required FSEvents work was preserved in ../gates/fsevents-pending.patch and ../pending-native, then restored for the separate [native adapter follow-up](2026-11-05-m1-fsevents.md).
 Linux inotify capacity remains an environment observation, not a reason to weaken or skip its positive watch check.
