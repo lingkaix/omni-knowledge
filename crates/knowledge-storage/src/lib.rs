@@ -30,8 +30,9 @@ use std::{
     time::Instant,
 };
 
-/// Fixed errors never disclose rejected content, native paths or Git stderr.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Errors never disclose rejected content, native paths or Git stderr.
+/// A retained native History error can own unsettled resources and is deliberately not Copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// Invalid normalized input or unsupported durable encoding.
     Invalid,
