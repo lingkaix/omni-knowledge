@@ -82,7 +82,7 @@ Each job checks its actual architecture and installs the repository-selected Rus
 Actions are pinned by commit; checkout does not retain Git credentials.
 New pushes cancel obsolete runs on the same ref.
 Artifacts and diagnostic evidence have 14-day retention.
-Each headless archive is produced by `scripts/bundle-headless.py` from Cargo-selected product binaries, unpacked, smoke-tested, and verified before upload.
+Each headless archive is produced by `scripts/bundle-headless.py` from Cargo-selected product binaries, unpacked, smoke-tested, and verified before upload. The workflow then runs `scripts/helper-lookup-smoke.py` on the unpacked archive. On macOS that smoke also runs the installed `omni-fsevents` sibling. `omni --help` remains a separate CLI health check.
 The macOS artifact is a headless tar, not an unsigned `.app`.
 No release or deployment is performed.
 
@@ -108,9 +108,11 @@ The headless workflow does not call this unsigned path. M7 remains deferred, so 
 `python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage dist/linux-x86_64` copies the already built headless release binaries into a new directory.
 The same command with `--target aarch64-apple-darwin` stages the macOS headless archive.
 Selection is workspace bin targets that require no features, excluding vendor executables.
-At this trunk that selection is `omni`.
+`omni` keeps its Cargo name. `parser-worker` is copied beside it only when `crates/knowledge-processing/src/worker.rs` joins that basename and Cargo metadata names `parser-worker` from `parser-worker.rs`. This trunk does not declare that lookup and does not have that bin, so the archive does not invent the file. `omni-fsevents` must be the single normal `knowledge-local` bin from `src/bin/omni-fsevents/main.rs`, and `crates/knowledge-local/src/fsevents.rs` must join `omni-fsevents`. An apple-darwin archive installs that basename beside `omni`. Every other target records the Cargo name and omits the file; a Linux build of the same target is not FSEvents proof.
 `retrieval-kernel` is omitted because the root product does not call that executable; its seven faces remain in the headless test gate.
-A missing selected file fails the script. The script does not create a worker that Cargo did not name.
+A missing selected file, an ambiguous helper target, or a helper whose bytes match `omni` fails the script. The script does not create a worker that Cargo did not name.
+The notice snapshot must contain the normal and build registry crates of `knowledge-processing`, and of `knowledge-local` when `omni-fsevents` is installed.
+`python3 -B scripts/helper-lookup-smoke.py --stage <unpacked-archive> --evidence-dir <directory>` starts one account on an owned directory descriptor and calls `extract_admitted` and `read_epub_admitted`. The harness is not part of the archive. On Darwin it also calls `LocalMount::watch` with the staged sibling beside the harness. On Linux the FSEvents result is unobserved.
 It then runs the existing collector with `--headless` and writes `manifest.json` plus `notice-gaps.json`.
 The named crates adobe-cmap-parser, htmlescape, pdf-extract, and type1-encoding-parser stay explicit: cached source or fallback evidence is retained, and no license text is invented.
 `--verify` recomputes those identities for an unpacked directory.

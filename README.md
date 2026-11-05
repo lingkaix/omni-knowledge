@@ -17,7 +17,7 @@ Linux headless builds and macOS GUI builds have separate gates; native platform 
 The current delivery gate is headless. GUI milestone M7 is deferred and does not block the headless Linux or macOS archive.
 [First usable version](first-usable-version.md) stays in progress until final Linux and macOS CI, milestone authority, durability, ZIP admission, and the actual entry points pass.
 Trunk `faab733` already contains the integrated core, cache, wire, local, jobs, public-test, B1/B2, and kernel self-VM work. That presence is not milestone acceptance.
-`python3 -B scripts/bundle-headless.py` stages `omni`, the project license, and the existing notice snapshot. It does not add a worker Cargo did not select.
+`python3 -B scripts/bundle-headless.py` stages `omni`, the project license, and the existing notice snapshot. It installs `parser-worker` only when Cargo metadata and the parent lookup both name that basename. It installs `omni-fsevents` beside `omni` only in an apple-darwin archive. It does not add any other worker Cargo did not select.
 
 ## Try The Retained First Version
 

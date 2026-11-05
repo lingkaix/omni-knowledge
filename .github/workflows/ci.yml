@@ -66,6 +66,7 @@ jobs:
           tar -xzf dist/omni-linux-x86_64.tar.gz -C temp/artifact-smoke
           python3 scripts/gate.py smoke --binary temp/artifact-smoke/omni --evidence-dir temp/ci-evidence/archived-smoke
           python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage temp/artifact-smoke --verify
+          python3 -B scripts/helper-lookup-smoke.py --stage temp/artifact-smoke --evidence-dir temp/ci-evidence/helper-lookup
           sha256sum dist/omni-linux-x86_64.tar.gz
       - name: Upload Linux artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -114,6 +115,7 @@ jobs:
           tar -xzf dist/omni-macos-arm64-headless.tar.gz -C temp/artifact-smoke
           python3 scripts/gate.py smoke --binary temp/artifact-smoke/omni --evidence-dir temp/ci-evidence/archived-smoke
           python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage temp/artifact-smoke --verify
+          python3 -B scripts/helper-lookup-smoke.py --stage temp/artifact-smoke --evidence-dir temp/ci-evidence/helper-lookup
           shasum -a 256 dist/omni-macos-arm64-headless.tar.gz
       - name: Upload macOS headless artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

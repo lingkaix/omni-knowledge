@@ -12,7 +12,7 @@ A GPUI or NSH launch is not required for the headless gate and is not treated as
 | Item | State |
 | --- | --- |
 | Trunk contains integrated core, cache, wire, local, jobs, public tests, B1/B2, and the kernel self-VM diagnostic at `faab733` | Present in this branch base. Presence is not acceptance. |
-| Headless archive selects Cargo workspace product binaries and does not invent a worker | Script landed in this change. `omni` is the selected binary. `retrieval-kernel` stays out of the archive because the root product does not call it. |
+| Headless archive selects Cargo workspace product binaries and does not invent a worker | `omni` is installed. `parser-worker` is installed only when Cargo metadata and the parent lookup both name it; this trunk has neither, so no parser helper is invented. `omni-fsevents` is installed beside `omni` on apple-darwin only. `retrieval-kernel` stays out. A Linux binary is not FSEvents proof. Native macOS execution of that helper remains unobserved. |
 | Linux x86_64 headless archive, notices, and CLI smoke | Local observation is recorded in the M8 change record. Hosted CI is not run by this lane. |
 | macOS arm64 headless archive | Defined in the workflow. Not executed here. Native macOS remains pending. |
 | Seven kernel faces and the macOS RSS watchdog typed error | Remain in the headless test gate. This change does not ignore, exclude, or retune them. The AS ceiling is unchanged. |
