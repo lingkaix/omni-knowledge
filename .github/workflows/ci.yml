@@ -131,7 +131,7 @@ jobs:
       - name: Full headless workspace gate (includes available FSEvents tests)
         env:
           OMNI_NATIVE_TRACE: '1'
-        run: python3 scripts/gate.py headless
+        run: python3 scripts/native-gate-observer.py
       - name: Stage macOS headless artifact
         run: |
           python3 -B tests/tools/headless_stage.py
