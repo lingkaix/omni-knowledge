@@ -29,6 +29,7 @@ pub(crate) struct Member {
     pub local_offset: u64,
     pub data_offset: u64,
     pub directory: bool,
+    pub flags: u16,
 }
 
 pub(crate) fn list(file: &mut File, work: &mut Work<'_>) -> Result<Vec<Member>, Error> {
@@ -107,7 +108,10 @@ pub(crate) fn stream(
     Ok(hex(&sha.finalize()))
 }
 
-pub(crate) fn write_zip(file: File, parts: &[(&str, Method, &[u8])]) -> Result<File, Error> {
+pub(crate) fn write_zip<W: Write + Seek>(
+    file: W,
+    parts: &[(&str, Method, &[u8])],
+) -> Result<W, Error> {
     let mut zip = ZipWriter::new(file);
     for (name, method, bytes) in parts {
         let options = SimpleFileOptions::default().compression_method(match method {
@@ -286,7 +290,10 @@ fn read_eocd(file: &mut File, len: u64, work: &mut Work<'_>) -> Result<Eocd, Err
     if disk != 0 || cd_disk != 0 {
         return Err(Error::Hostile);
     }
-    let eocd_pos = len - window + index as u64;
+    let base = len.checked_sub(window).ok_or(Error::Hostile)?;
+    let eocd_pos = base
+        .checked_add(u64::try_from(index).map_err(|_| Error::Hostile)?)
+        .ok_or(Error::Hostile)?;
     let need_zip64 = entries == u16::MAX
         || entries_disk == u16::MAX
         || cd_size == u32::MAX
@@ -312,11 +319,18 @@ fn read_eocd(file: &mut File, len: u64, work: &mut Work<'_>) -> Result<Eocd, Err
         return Err(Error::Hostile);
     }
     let zip64_at = u64_at(&buf, locator + 8)?;
-    if zip64_at >= eocd_pos || eocd_pos - zip64_at > window {
-        return read_zip64(file, work, zip64_at, eocd_pos);
+    let locator_pos = eocd_pos.checked_sub(20).ok_or(Error::Hostile)?;
+    let record_end = zip64_at.checked_add(56).ok_or(Error::Hostile)?;
+    if zip64_at >= len || record_end != locator_pos {
+        return Err(Error::Hostile);
     }
-    let local = usize::try_from(zip64_at - (len - window)).map_err(|_| Error::Hostile)?;
-    parse_zip64(&buf, local, eocd_pos)
+    match zip64_at.checked_sub(base) {
+        Some(local) if local.checked_add(56).is_some_and(|end| end <= window) => {
+            let local = usize::try_from(local).map_err(|_| Error::Hostile)?;
+            parse_zip64(&buf, local, eocd_pos)
+        }
+        _ => read_zip64(file, work, zip64_at, eocd_pos),
+    }
 }
 
 fn read_zip64(file: &mut File, work: &mut Work<'_>, at: u64, eocd_pos: u64) -> Result<Eocd, Error> {
@@ -431,6 +445,7 @@ fn read_central(file: &mut File, work: &mut Work<'_>, cursor: &mut u64) -> Resul
         local_offset,
         data_offset: 0,
         directory,
+        flags,
     })
 }
 
@@ -471,7 +486,11 @@ fn bind_local(
         &mut extra,
     )?;
     let local_name = normalize_name(&name, flags, work)?;
-    if local_name != member.name || method != member.method || crc != member.crc {
+    if local_name != member.name
+        || method != member.method
+        || crc != member.crc
+        || flags != member.flags
+    {
         return Err(Error::Disagreement);
     }
     let (compressed, uncompressed, _) = zip64_fields(&extra, comp32, uncomp32, 0, 0)?;
@@ -614,7 +633,10 @@ fn zip64_fields(
                 offset = take_u64(body, &mut at)?;
             }
             if disk == u16::MAX {
-                let _disk64 = take_u32(body, &mut at)?;
+                let disk64 = take_u32(body, &mut at)?;
+                if disk64 != 0 {
+                    return Err(Error::Hostile);
+                }
             }
             if at != body.len() {
                 return Err(Error::Disagreement);

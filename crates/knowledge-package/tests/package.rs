@@ -7,8 +7,8 @@ use knowledge_core::data::{ContentDigest, RelativePath};
 use knowledge_core::jobs::Reservation;
 use knowledge_package::{
     ApplyOutcome, ApplyState, Availability, Bounds, Capture, DigestState, Error, ExternalRef,
-    GitAdmit, GitTransactions, Input, Method, Preset, Quotas, Role, SafeApply, V1HostContext,
-    V1State, Window, Work, apply, capture, inspect, stage, v1_import_plan,
+    GitAdmit, GitTransactions, IndexCoverage, Input, Method, Preset, Quotas, Role, SafeApply,
+    V1HostContext, V1State, Window, Work, apply, capture, inspect, stage, v1_import_plan,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -161,10 +161,43 @@ fn work<'a>(bounds: &'a Bounds, holding: &'a mut Holding, cancel: &'a AtomicBool
     Work::new(bounds, holding, cancel).expect("work")
 }
 
-fn run<T>(limits: &Bounds, cancel: &AtomicBool, body: impl FnOnce(&mut Work<'_>) -> T) -> T {
+struct Held<T> {
+    value: Option<T>,
+    session: Option<Session>,
+}
+
+impl<T> Drop for Held<T> {
+    fn drop(&mut self) {
+        self.value.take();
+        self.session.take();
+    }
+}
+
+impl<T> std::ops::Deref for Held<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().expect("held value")
+    }
+}
+
+impl<T> Held<T> {
+    fn account_open(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.holding.remaining().is_ok())
+    }
+}
+
+fn run<T>(limits: &Bounds, cancel: &AtomicBool, body: impl FnOnce(&mut Work<'_>) -> T) -> Held<T> {
     let mut session = open_account();
-    let mut job = work(limits, &mut session.holding, cancel);
-    body(&mut job)
+    let value = {
+        let mut job = work(limits, &mut session.holding, cancel);
+        body(&mut job)
+    };
+    Held {
+        value: Some(value),
+        session: Some(session),
+    }
 }
 
 fn rel(value: &str) -> RelativePath {
@@ -266,18 +299,27 @@ fn roundtrip_preserves_bytes_and_skips_history_index_and_conflicts() {
     };
     let limits = bounds(8_000_000);
     let cancel = AtomicBool::new(false);
-    let captured = run(&limits, &cancel, |job| {
-        capture(&mut request, &mut inputs, job).expect("capture")
-    });
-    assert!(captured.linked);
+    {
+        let captured = run(&limits, &cancel, |job| {
+            capture(&mut request, &mut inputs, job).expect("capture")
+        });
+        assert!(captured.linked);
+        assert!(captured.account_open());
+    }
     let mut archive = File::open(&dest).unwrap();
-    let preview = run(&limits, &cancel, |job| {
-        inspect(&mut archive, job, &[rel("pages/keep.md")]).expect("inspect")
-    });
-    assert_eq!(preview.conflicts, vec![rel("pages/keep.md")]);
-    assert!(preview.installable);
-    assert_eq!(preview.manifest.coverage.omitted, 2);
-    assert!(preview.manifest.indexes.is_some());
+    {
+        let preview = run(&limits, &cancel, |job| {
+            inspect(&mut archive, job, &[rel("pages/keep.md")]).expect("inspect")
+        });
+        assert!(preview.account_open());
+        assert_eq!(preview.conflicts, vec![rel("pages/keep.md")]);
+        assert!(preview.installable);
+        assert_eq!(preview.manifest.coverage.omitted, 2);
+        assert!(preview.manifest.indexes.is_some());
+        assert!(preview.manifest.indexes.as_ref().is_some_and(|set| {
+            !set.compatible && set.fallback.as_deref() == Some("kernel_not_wired")
+        }));
+    }
     let mut archive = File::open(&dest).unwrap();
     let staged = run(&limits, &cancel, |job| {
         stage(
@@ -351,7 +393,7 @@ fn destination_and_require_complete_do_not_clobber() {
     let error = run(&limits, &cancel, |job| {
         capture(&mut request, &mut inputs, job).expect_err("incomplete")
     });
-    assert_eq!(error, Error::RequireComplete);
+    assert_eq!(&*error, &Error::RequireComplete);
     assert_eq!(fs::read(&dest).unwrap(), b"keep");
 }
 
@@ -380,7 +422,7 @@ fn drift_and_forbidden_source_refuse() {
     let error = run(&limits, &cancel, |job| {
         capture(&mut request, &mut inputs, job).expect_err("drift")
     });
-    assert_eq!(error, Error::Drift);
+    assert_eq!(&*error, &Error::Drift);
     assert!(!dest.exists());
 }
 
@@ -561,7 +603,7 @@ fn interrupted_generation_is_not_replayed() {
     let error = run(&limits, &cancel, |job| {
         stage(&mut file, job, &private, "op", &[]).expect_err("interrupted")
     });
-    assert_eq!(error, Error::Interrupted);
+    assert_eq!(&*error, &Error::Interrupted);
     assert_eq!(
         fs::read(private.join("op").join("partial.bin")).unwrap(),
         b"half"
@@ -579,12 +621,15 @@ fn foreign_v1_is_hashed_and_refused() {
     fs::write(root.join("page.md"), b"body\r\n").unwrap();
     let limits = bounds(1_000_000);
     let cancel = AtomicBool::new(false);
-    let plan = run(&limits, &cancel, |job| {
-        v1_import_plan(&root, None, job).expect("v1")
-    });
-    assert_eq!(plan.state, V1State::CompatibilityRefused);
-    assert!(!plan.host_context);
-    assert_eq!(plan.files.len(), 1);
+    {
+        let plan = run(&limits, &cancel, |job| {
+            v1_import_plan(&root, None, job).expect("v1")
+        });
+        assert!(plan.account_open());
+        assert_eq!(plan.state, V1State::CompatibilityRefused);
+        assert!(!plan.host_context);
+        assert_eq!(plan.files.len(), 1);
+    }
     assert_eq!(fs::read(root.join("page.md")).unwrap(), b"body\r\n");
     let host = V1HostContext {
         owner: "o".into(),
@@ -594,8 +639,255 @@ fn foreign_v1_is_hashed_and_refused() {
     let again = run(&limits, &cancel, |job| {
         v1_import_plan(&root, Some(&host), job).unwrap()
     });
+    assert!(again.account_open());
     assert_eq!(again.state, V1State::CompatibilityRefused);
     assert!(again.host_context);
+}
+
+#[test]
+fn framing_flags_disk_and_eocd_offset_refuse() {
+    let limits = bounds(1_000_000);
+    let mut flags = classic(&[item(b"a.txt", b"hi")]);
+    let cd = 30 + b"a.txt".len() + 2;
+    flags[cd + 8] = 0;
+    flags[cd + 9] = 0;
+    assert_eq!(inspect_raw(&flags, &limits), Err(Error::Disagreement));
+    assert_eq!(
+        inspect_raw(&zip64_disk_seven(), &limits),
+        Err(Error::Hostile)
+    );
+    assert_eq!(
+        inspect_raw(&eocd_tail_outside_window(), &limits),
+        Err(Error::Hostile)
+    );
+    assert_eq!(
+        inspect_raw(&classic(&[item(b"a.txt", b"hi")]), &limits),
+        Err(Error::Invalid)
+    );
+}
+
+#[test]
+fn aggregate_call_memory_and_archive_bytes_are_bounded() {
+    let huge = classic(&[item(b"manifest.json", &vec![b'a'; 200_000])]);
+    let mut tight = bounds(1_000_000);
+    tight.budget.max_memory_bytes = 90_000;
+    assert_eq!(inspect_raw(&huge, &tight), Err(Error::TooLarge));
+    let mut small = bounds(1_000_000);
+    small.budget.max_memory_bytes = 90_000;
+    assert_eq!(
+        inspect_raw(&classic(&[item(b"manifest.json", b"{}")]), &small),
+        Err(Error::Invalid)
+    );
+    let root = dir("zipbytes");
+    let private = root.join("private");
+    fs::create_dir(&private).unwrap();
+    let dest = root.join("out.zip");
+    let text = b"hi";
+    let mut reader = &text[..];
+    let mut inputs = [Input {
+        path: rel("pages/a.md"),
+        role: Role::Core,
+        mount_id: None,
+        source_id: None,
+        expected: None,
+        reader: &mut reader,
+    }];
+    let mut request = base_capture(&private, &dest);
+    let mut narrow = bounds(1_000_000);
+    narrow.budget.max_bytes = 40;
+    let cancel = AtomicBool::new(false);
+    {
+        let error = run(&narrow, &cancel, |job| {
+            capture(&mut request, &mut inputs, job).expect_err("zip")
+        });
+        assert_eq!(&*error, &Error::TooLarge);
+        assert!(!dest.exists());
+    }
+    let mut reader = &text[..];
+    inputs[0].reader = &mut reader;
+    let wide = bounds(1_000_000);
+    let captured = run(&wide, &cancel, |job| {
+        capture(&mut request, &mut inputs, job).expect("control")
+    });
+    assert!(captured.linked);
+    assert!(captured.account_open());
+}
+
+#[test]
+fn stale_complete_generation_is_not_reused() {
+    let root = dir("stale");
+    let private = root.join("private");
+    fs::create_dir(&private).unwrap();
+    let first = root.join("first.zip");
+    let second = root.join("second.zip");
+    let limits = bounds(1_000_000);
+    let cancel = AtomicBool::new(false);
+    let text = b"alpha";
+    let mut reader = &text[..];
+    let mut inputs = [Input {
+        path: rel("pages/a.md"),
+        role: Role::Core,
+        mount_id: None,
+        source_id: None,
+        expected: None,
+        reader: &mut reader,
+    }];
+    let mut request = base_capture(&private, &first);
+    {
+        let _captured = run(&limits, &cancel, |job| {
+            capture(&mut request, &mut inputs, job).expect("first")
+        });
+    }
+    let mut archive = File::open(&first).unwrap();
+    let snapshot = {
+        let staged = run(&limits, &cancel, |job| {
+            stage(&mut archive, job, &private, "op", &[rel("pages/a.md")]).expect("stage")
+        });
+        assert_eq!(staged.conflicts.len(), 1);
+        assert!(staged.account_open());
+        staged.snapshot_id.as_str().to_owned()
+    };
+    let mut broken = File::open(write_bytes(&root.join("broken.zip"), &[0, 1, 2, 3, 4])).unwrap();
+    {
+        let error = run(&limits, &cancel, |job| {
+            stage(&mut broken, job, &private, "op", &[rel("pages/a.md")]).expect_err("truncated")
+        });
+        assert_eq!(&*error, &Error::Truncated);
+    }
+    let plan = fs::read_to_string(private.join("op").join("PLAN")).unwrap();
+    assert!(plan.starts_with(&snapshot));
+    let other = b"beta";
+    let mut reader = &other[..];
+    inputs[0].reader = &mut reader;
+    request.destination = &second;
+    request.operation_id = "other";
+    {
+        let _captured = run(&limits, &cancel, |job| {
+            capture(&mut request, &mut inputs, job).expect("second")
+        });
+    }
+    let mut other_zip = File::open(&second).unwrap();
+    {
+        let error = run(&limits, &cancel, |job| {
+            stage(&mut other_zip, job, &private, "op", &[]).expect_err("changed")
+        });
+        assert_eq!(&*error, &Error::Conflict);
+    }
+    assert!(
+        fs::read_to_string(private.join("op").join("PLAN"))
+            .unwrap()
+            .starts_with(&snapshot)
+    );
+    let mut archive = File::open(&first).unwrap();
+    let staged = run(&limits, &cancel, |job| {
+        stage(&mut archive, job, &private, "op", &[rel("pages/a.md")]).expect("reuse")
+    });
+    assert_eq!(staged.conflicts.len(), 1);
+    assert_eq!(staged.snapshot_id.as_str(), snapshot);
+    let core = staged
+        .files
+        .iter()
+        .find(|file| file.path.as_str() == "pages/a.md")
+        .expect("core")
+        .staged
+        .clone();
+    fs::write(&core, b"tampered").unwrap();
+    let mut home = Home {
+        root: root.join("home"),
+        calls: Vec::new(),
+    };
+    fs::create_dir_all(&home.root).unwrap();
+    let mut git = HistorySpy { calls: 0 };
+    let applied = apply(&staged, &mut home, &mut git).expect("apply");
+    assert_eq!(applied.state, ApplyState::Refused);
+    assert!(home.calls.is_empty());
+    assert_eq!(fs::read(&core).unwrap(), b"tampered");
+}
+
+#[test]
+fn canonical_extension_and_index_fallback_keep_core() {
+    let root = dir("canon");
+    let private = root.join("private");
+    fs::create_dir(&private).unwrap();
+    let dest = root.join("out.zip");
+    let text = b"hi";
+    let mut reader = &text[..];
+    let mut inputs = [Input {
+        path: rel("pages/a.md"),
+        role: Role::Core,
+        mount_id: None,
+        source_id: None,
+        expected: None,
+        reader: &mut reader,
+    }];
+    let mut request = base_capture(&private, &dest);
+    let limits = bounds(1_000_000);
+    let cancel = AtomicBool::new(false);
+    {
+        let captured = run(&limits, &cancel, |job| {
+            capture(&mut request, &mut inputs, job).expect("capture")
+        });
+        assert!(captured.linked);
+    }
+    let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
+    let mut manifest = String::new();
+    archive
+        .by_name("manifest.json")
+        .unwrap()
+        .read_to_string(&mut manifest)
+        .unwrap();
+    drop(archive);
+    let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    value["ratio_hint"] = serde_json::json!(0.5);
+    value["coverage"]["indexes"] = serde_json::json!("complete");
+    value["indexes"] = serde_json::json!({
+        "compatible": true,
+        "paths": ["indexes/gen"]
+    });
+    value["\u{10000}"] = serde_json::json!(1);
+    value["\u{E000}"] = serde_json::json!(2);
+    let canonical = serde_json_canonicalizer::to_vec(&value).unwrap();
+    let bytes = zip_with_manifest(&canonical, b"hi");
+    {
+        let mut file = File::open(write_bytes(&root.join("canon.zip"), &bytes)).unwrap();
+        let preview = run(&limits, &cancel, |job| {
+            inspect(&mut file, job, &[]).expect("inspect")
+        });
+        assert!(preview.account_open());
+        assert!(preview.installable);
+        assert_eq!(preview.manifest.extra["ratio_hint"], serde_json::json!(0.5));
+        let indexes = preview.manifest.indexes.as_ref().expect("indexes");
+        assert!(indexes.compatible);
+        assert_eq!(indexes.fallback.as_deref(), Some("kernel_not_wired"));
+        assert_eq!(preview.manifest.coverage.indexes, IndexCoverage::Complete);
+        assert_eq!(preview.manifest.required_features.len(), 0);
+    }
+    let canonical_text = std::str::from_utf8(&canonical).unwrap();
+    let first = canonical_text.find("\"\u{10000}\"").expect("utf16 low key");
+    let second = canonical_text.find("\"\u{E000}\"").expect("utf16 high key");
+    assert!(first < second);
+    let reversed = reverse_utf16_keys(&canonical);
+    assert_eq!(
+        inspect_raw(&zip_with_manifest(&reversed, b"hi"), &limits),
+        Err(Error::Invalid)
+    );
+    let mut required = value;
+    required["required_features"] = serde_json::json!(["search"]);
+    let required_bytes = serde_json_canonicalizer::to_vec(&required).unwrap();
+    let required_zip = zip_with_manifest(&required_bytes, b"hi");
+    let need = write_bytes(&root.join("need.zip"), &required_zip);
+    {
+        let mut file = File::open(&need).unwrap();
+        let preview = run(&limits, &cancel, |job| {
+            inspect(&mut file, job, &[]).expect("required")
+        });
+        assert!(!preview.installable);
+    }
+    let mut file = File::open(&need).unwrap();
+    let error = run(&limits, &cancel, |job| {
+        stage(&mut file, job, &private, "need", &[]).expect_err("feature")
+    });
+    assert_eq!(&*error, &Error::Unsupported);
 }
 
 struct Item<'a> {
@@ -933,6 +1225,64 @@ fn inspect_while_memory_is_short(bytes: &[u8], limits: &Bounds) -> Result<(), Er
 fn write_bytes(path: &Path, bytes: &[u8]) -> PathBuf {
     fs::write(path, bytes).unwrap();
     path.to_path_buf()
+}
+
+fn zip64_disk_seven() -> Vec<u8> {
+    let payload = b"hi";
+    let name = b"a.txt";
+    let mut extra = Vec::new();
+    extra.extend(1u16.to_le_bytes());
+    extra.extend(4u16.to_le_bytes());
+    extra.extend(7u32.to_le_bytes());
+    let mut local = local_header(&item(name, payload), 0);
+    local.extend(payload);
+    let mut central = central_header(&item(name, payload), 0, &extra);
+    let disk_at = 34;
+    central[disk_at..disk_at + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    let cd_offset = local.len() as u32;
+    let cd_size = central.len() as u32;
+    let mut out = local;
+    out.extend(central);
+    out.extend(eocd(1, cd_size, cd_offset));
+    out
+}
+
+fn eocd_tail_outside_window() -> Vec<u8> {
+    let len = 70_000;
+    let eocd_at = 4_480;
+    let mut bytes = vec![0u8; len];
+    let locator = eocd_at - 20;
+    bytes[locator..locator + 4].copy_from_slice(&0x07064b50u32.to_le_bytes());
+    bytes[locator + 8..locator + 16].copy_from_slice(&4_442u64.to_le_bytes());
+    bytes[locator + 16..locator + 20].copy_from_slice(&1u32.to_le_bytes());
+    bytes[eocd_at..eocd_at + 4].copy_from_slice(&0x06054b50u32.to_le_bytes());
+    bytes[eocd_at + 8..eocd_at + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+    bytes[eocd_at + 10..eocd_at + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+    bytes[eocd_at + 12..eocd_at + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[eocd_at + 16..eocd_at + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+    let comment = u16::try_from(len - (eocd_at + 22)).unwrap();
+    bytes[eocd_at + 20..eocd_at + 22].copy_from_slice(&comment.to_le_bytes());
+    bytes
+}
+
+fn zip_with_manifest(manifest: &[u8], page: &[u8]) -> Vec<u8> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(page).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut core = item(b"pages/a.md", page);
+    core.method = 8;
+    core.compressed = compressed;
+    let manifest_item = item(b"manifest.json", manifest);
+    classic(&[manifest_item, core])
+}
+
+fn reverse_utf16_keys(canonical: &[u8]) -> Vec<u8> {
+    std::str::from_utf8(canonical)
+        .unwrap()
+        .replacen("\"\u{10000}\"", "\"@@SWAP@@\"", 1)
+        .replacen("\"\u{E000}\"", "\"\u{10000}\"", 1)
+        .replacen("\"@@SWAP@@\"", "\"\u{E000}\"", 1)
+        .into_bytes()
 }
 
 fn base_capture<'a>(private_dir: &'a Path, destination: &'a Path) -> Capture<'a> {

@@ -21,20 +21,31 @@ Conflicts and indeterminate results stop the call. Already saved paths are not r
 
 Consume only the history seam fixed in `2c86db6`: `prepare`, `publish`, `inspect`, and `prepare_confirmation`.
 Publication in that commit checks the confirmed proposal inside the native transaction.
-This crate does not call history and does not run `git`.
-`GitTransactions::admit_inert_bundle` only hands the staged bundle path to that owner.
-`2c86db6` has no `git bundle verify` and does not admit an arbitrary imported repository. A bundle stays inert until that owner verifies it. `GitAdmit::Inert` is not a verified import.
+This crate does not run `git` and does not add a second history engine.
+`GitTransactions::admit_inert_bundle` hands the staged bundle path to that owner.
+`2c86db6` still has no `git bundle verify`. `GitAdmit::Inert` is not a verified import.
+Bundle verification remains required. It is unfinished until history exposes that check on `2c86db6`.
 
 ## Index
 
-Package indexes are STORED and are not installed into the home.
-`compatible: true` is `Unsupported`. Querying a STORED index is the retrieval kernel's Directory provider, not a function of this crate.
+Package indexes stay STORED and are not copied into the home.
+`compatible: true` does not refuse the package. An incompatible generation needs an explicit reason.
+Until the kernel Directory provider is called, both cases record fallback `kernel_not_wired` and leave core bytes installable.
+Search of STORED generations and exact float32 vectors remains required. It is unfinished. `required_features` still refuse installation.
 
 ## EPUB
 
 `docs/specs/package.md` keeps EPUB as a processing operation, not a snapshot preset.
-`knowledge_processing::read_epub` and `export_epub` own that result. This crate has no EPUB function and assigns no snapshot id to one.
+The required preset path is `knowledge_processing::read_epub` and `export_epub` at frozen `9a807f9`, in this workspace, without a second writer or a second account.
+That call is unfinished here.
 
-## Not claimed
+## Still required
 
-SSH `Signature::Unverified` is not trust. `v1_import_plan` returns `CompatibilityRefused` and does not invent owner, revision, or review facts.
+These are not closed by this crate and are not waived:
+
+- SSH signer policy. `Signature::Unverified` is not trust.
+- Kernel query of STORED index generations and exact float32 vectors.
+- Genuine v1 inventory mapping and truthful export context. `v1_import_plan` still returns `CompatibilityRefused` and does not invent owner, revision, or review facts.
+- `git bundle verify` through history `2c86db6` once that function exists. Do not shell out to Git.
+- M1 `Store::install` when `knowledge-storage` is a committed workspace member. `apply` still delegates through `SafeApply` and refuses tampered staged bytes.
+- EPUB through processing `9a807f9` on the shared account. Admission stays P1 `d51cdde`.

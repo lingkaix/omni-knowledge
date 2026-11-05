@@ -78,16 +78,34 @@ pub(crate) fn emit(manifest: &Manifest) -> Result<Vec<u8>, Error> {
         }
         map.insert(key.clone(), value.clone());
     }
-    serde_json::to_vec(&Value::Object(map)).map_err(|_| Error::Invalid)
+    canonical_bytes(&Value::Object(map))
 }
 
 pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest, Error> {
-    let value = decode(bytes)?;
-    let again = serde_json::to_vec(&value).map_err(|_| Error::Invalid)?;
+    if bytes.is_empty() || bytes.len() > 1_048_576 {
+        return Err(Error::Invalid);
+    }
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
+    if value_depth(&value) > 32 {
+        return Err(Error::Invalid);
+    }
+    let again = canonical_bytes(&value)?;
     if again.as_slice() != bytes {
         return Err(Error::Invalid);
     }
     interpret(value)
+}
+
+fn canonical_bytes(value: &Value) -> Result<Vec<u8>, Error> {
+    serde_json_canonicalizer::to_vec(value).map_err(|_| Error::Invalid)
+}
+
+fn value_depth(value: &Value) -> u32 {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(value_depth).max().unwrap_or(0),
+        Value::Object(map) => 1 + map.values().map(value_depth).max().unwrap_or(0),
+        _ => 1,
+    }
 }
 
 fn interpret(value: Value) -> Result<Manifest, Error> {
@@ -157,212 +175,6 @@ fn interpret(value: Value) -> Result<Manifest, Error> {
         coverage,
         extra: obj,
     })
-}
-
-fn decode(bytes: &[u8]) -> Result<Value, Error> {
-    if bytes.is_empty() || bytes.len() > 1_048_576 {
-        return Err(Error::Invalid);
-    }
-    let mut parser = Parser {
-        bytes,
-        index: 0,
-        depth: 0,
-    };
-    let value = parser.value()?;
-    if parser.index != bytes.len() {
-        return Err(Error::Invalid);
-    }
-    Ok(value)
-}
-
-struct Parser<'a> {
-    bytes: &'a [u8],
-    index: usize,
-    depth: u32,
-}
-
-impl<'a> Parser<'a> {
-    fn value(&mut self) -> Result<Value, Error> {
-        if self.depth > 32 {
-            return Err(Error::Invalid);
-        }
-        self.depth += 1;
-        let next = self.peek()?;
-        let value = match next {
-            b'{' => self.object()?,
-            b'[' => self.array()?,
-            b'"' => Value::String(self.string()?),
-            b't' => self.literal(b"true", Value::Bool(true))?,
-            b'f' => self.literal(b"false", Value::Bool(false))?,
-            b'n' => self.literal(b"null", Value::Null)?,
-            b'0'..=b'9' => self.number()?,
-            _ => return Err(Error::Invalid),
-        };
-        self.depth -= 1;
-        Ok(value)
-    }
-
-    fn object(&mut self) -> Result<Value, Error> {
-        self.eat(b'{')?;
-        let mut map = Map::new();
-        let mut previous: Option<Vec<u16>> = None;
-        if self.peek()? == b'}' {
-            self.eat(b'}')?;
-            return Ok(Value::Object(map));
-        }
-        loop {
-            let key = self.string()?;
-            let encoded: Vec<u16> = key.encode_utf16().collect();
-            if previous
-                .as_ref()
-                .is_some_and(|prior| prior.as_slice() >= encoded.as_slice())
-            {
-                return Err(Error::Invalid);
-            }
-            previous = Some(encoded);
-            self.eat(b':')?;
-            let value = self.value()?;
-            map.insert(key, value);
-            match self.bump()? {
-                b',' => continue,
-                b'}' => break,
-                _ => return Err(Error::Invalid),
-            }
-        }
-        Ok(Value::Object(map))
-    }
-
-    fn array(&mut self) -> Result<Value, Error> {
-        self.eat(b'[')?;
-        let mut items = Vec::new();
-        if self.peek()? == b']' {
-            self.eat(b']')?;
-            return Ok(Value::Array(items));
-        }
-        loop {
-            items.push(self.value()?);
-            match self.bump()? {
-                b',' => continue,
-                b']' => break,
-                _ => return Err(Error::Invalid),
-            }
-        }
-        Ok(Value::Array(items))
-    }
-
-    fn number(&mut self) -> Result<Value, Error> {
-        let start = self.index;
-        let first = self.bump()?;
-        if first == b'0' {
-            if self.index < self.bytes.len() && self.bytes[self.index].is_ascii_digit() {
-                return Err(Error::Invalid);
-            }
-        } else {
-            while self.index < self.bytes.len() && self.bytes[self.index].is_ascii_digit() {
-                self.index += 1;
-            }
-        }
-        if self.index < self.bytes.len()
-            && matches!(self.bytes[self.index], b'.' | b'e' | b'E' | b'+' | b'-')
-        {
-            return Err(Error::Invalid);
-        }
-        let text =
-            std::str::from_utf8(&self.bytes[start..self.index]).map_err(|_| Error::Invalid)?;
-        let value: u64 = text.parse().map_err(|_| Error::Invalid)?;
-        Ok(Value::Number(Number::from(value)))
-    }
-
-    fn string(&mut self) -> Result<String, Error> {
-        self.eat(b'"')?;
-        let mut out = String::new();
-        loop {
-            match self.bump()? {
-                b'"' => return Ok(out),
-                b'\\' => {
-                    let escaped = match self.bump()? {
-                        b'"' => '"',
-                        b'\\' => '\\',
-                        b'/' => '/',
-                        b'b' => '\u{0008}',
-                        b'f' => '\u{000c}',
-                        b'n' => '\n',
-                        b'r' => '\r',
-                        b't' => '\t',
-                        b'u' => self.unicode()?,
-                        _ => return Err(Error::Invalid),
-                    };
-                    out.push(escaped);
-                }
-                byte if byte < 0x20 => return Err(Error::Invalid),
-                byte => {
-                    let width = utf8_width(byte)?;
-                    let start = self.index - 1;
-                    if self.index + width - 1 > self.bytes.len() {
-                        return Err(Error::Invalid);
-                    }
-                    self.index += width - 1;
-                    let text = std::str::from_utf8(&self.bytes[start..self.index])
-                        .map_err(|_| Error::Invalid)?;
-                    out.push_str(text);
-                }
-            }
-        }
-    }
-
-    fn unicode(&mut self) -> Result<char, Error> {
-        let mut unit = 0u32;
-        for _ in 0..4 {
-            unit = (unit << 4) | hex_value(self.bump()?)? as u32;
-        }
-        char::from_u32(unit).ok_or(Error::Invalid)
-    }
-
-    fn literal(&mut self, rest: &[u8], value: Value) -> Result<Value, Error> {
-        self.eat(rest[0])?;
-        for byte in &rest[1..] {
-            self.eat(*byte)?;
-        }
-        Ok(value)
-    }
-
-    fn peek(&self) -> Result<u8, Error> {
-        self.bytes.get(self.index).copied().ok_or(Error::Invalid)
-    }
-    fn bump(&mut self) -> Result<u8, Error> {
-        let byte = self.peek()?;
-        self.index += 1;
-        Ok(byte)
-    }
-    fn eat(&mut self, expected: u8) -> Result<(), Error> {
-        if self.bump()? != expected {
-            return Err(Error::Invalid);
-        }
-        Ok(())
-    }
-}
-
-fn utf8_width(first: u8) -> Result<usize, Error> {
-    if first < 0x80 {
-        Ok(1)
-    } else if first & 0b1110_0000 == 0b1100_0000 {
-        Ok(2)
-    } else if first & 0b1111_0000 == 0b1110_0000 {
-        Ok(3)
-    } else if first & 0b1111_1000 == 0b1111_0000 {
-        Ok(4)
-    } else {
-        Err(Error::Invalid)
-    }
-}
-
-fn hex_value(byte: u8) -> Result<u8, Error> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::Invalid),
-    }
 }
 
 fn window(window: &Window) -> Result<Value, Error> {
@@ -610,7 +422,7 @@ fn indexes(indexes: Option<&IndexSet>) -> Result<Value, Error> {
         return Ok(Value::Null);
     };
     let mut map = Map::new();
-    map.insert("compatible".into(), Value::Bool(false));
+    map.insert("compatible".into(), Value::Bool(indexes.compatible));
     map.insert(
         "paths".into(),
         Value::Array(
@@ -621,7 +433,9 @@ fn indexes(indexes: Option<&IndexSet>) -> Result<Value, Error> {
                 .collect::<Result<_, _>>()?,
         ),
     );
-    map.insert("reason".into(), Value::String("kernel_not_wired".into()));
+    if let Some(reason) = &indexes.fallback {
+        map.insert("reason".into(), Value::String(checked_token(reason)?));
+    }
     Ok(Value::Object(map))
 }
 
@@ -633,9 +447,6 @@ fn parse_indexes(value: Value) -> Result<Option<IndexSet>, Error> {
                 Some(Value::Bool(value)) => value,
                 _ => return Err(Error::Invalid),
             };
-            if compatible {
-                return Err(Error::Unsupported);
-            }
             let paths = match obj.remove("paths") {
                 Some(Value::Array(items)) => items
                     .into_iter()
@@ -643,15 +454,29 @@ fn parse_indexes(value: Value) -> Result<Option<IndexSet>, Error> {
                     .collect::<Result<Vec<_>, _>>()?,
                 _ => return Err(Error::Invalid),
             };
-            let reason = match obj.remove("reason") {
-                Some(Value::String(reason)) if reason == "kernel_not_wired" => reason,
+            let declared = match obj.remove("reason") {
+                None => None,
+                Some(Value::String(reason)) if !reason.is_empty() => Some(reason),
                 _ => return Err(Error::Invalid),
             };
-            let _ = reason;
+            if !compatible && declared.is_none() {
+                return Err(Error::Invalid);
+            }
             if !obj.is_empty() {
                 return Err(Error::Invalid);
             }
-            Ok(Some(IndexSet { paths }))
+            // Compatible generations still need the kernel Directory provider.
+            // Until that query exists, core bytes stay usable and the index is omitted.
+            let fallback = if compatible {
+                Some(declared.unwrap_or_else(|| "kernel_not_wired".into()))
+            } else {
+                declared
+            };
+            Ok(Some(IndexSet {
+                paths,
+                compatible,
+                fallback,
+            }))
         }
         _ => Err(Error::Invalid),
     }

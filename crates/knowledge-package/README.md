@@ -32,8 +32,8 @@ This crate adds no corpus cap and no second reservation counter.
 | Scratch `finish` | Release a dead inflate window without releasing retained names or output. | Every header would stay charged until the host finished the whole call. |
 | Private generation plus owner traits | Keep a previous complete generation and let storage and history perform the final write. | This crate would grow a second rollback and Git engine. |
 
-No registry, workflow engine, or destination writer is required for this slice.
-Direct index search and SSH signature trust stay outside this crate. `Signature::Unverified` is not a valid signature.
+No registry, workflow engine, or destination writer is added in this slice.
+SSH signer policy, kernel search of STORED generations and float32 vectors, genuine v1 mapping, history bundle verification, M1 install, and EPUB presets remain required and unfinished. `Signature::Unverified` is not trust. `required_features` still refuse installation. See [OWNER.md](OWNER.md).
 
 ## Checks
 
