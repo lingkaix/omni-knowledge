@@ -131,6 +131,13 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def create_stage_directory(stage: Path) -> None:
+    """Create a fresh stage and missing parents without reusing an existing entry."""
+    if stage.exists() or stage.is_symlink():
+        raise ValueError("stage must be a new directory")
+    stage.mkdir(parents=True)
+
+
 def stage_archive(target: str, stage: Path) -> None:
     """Copy built product binaries, the project license, and collector output into a new directory."""
     if stage.exists() or stage.is_symlink():
@@ -140,7 +147,7 @@ def stage_archive(target: str, stage: Path) -> None:
     if "omni" not in bins:
         raise ValueError("headless graph did not select the omni binary")
     built = release_dir(metadata, target)
-    stage.mkdir()
+    create_stage_directory(stage)
     binary_rows = []
     for name in bins:
         source = built / name
