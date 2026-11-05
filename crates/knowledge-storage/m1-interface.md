@@ -37,7 +37,7 @@ Recovery/home bytes are authored operation evidence, not generated-cache-volume 
 ## Recovery And Tracking
 
 New text-save `new-N` files remain independent from editable home inodes.
-Only the selected operation's necessary content is copied through bounded scratch, synchronized, and installed by no-replace rename.
+Only the selected operation's necessary content is copied through bounded scratch, checked against its actual selected native stage version and complete expected digest, synchronized, and installed by no-replace rename.
 A failed copy remains visible, and an unknown copy is never deleted or adopted by a retry.
 No whole-library snapshot or unconditional rollback is introduced.
 A historical saved receipt can remain `SavedLocal` with `current_matches: false` after a normal in-place edit.

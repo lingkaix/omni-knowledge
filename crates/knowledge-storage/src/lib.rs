@@ -756,6 +756,7 @@ impl<P: WritePolicy> Store<P> {
                     &format!("new-{n}"),
                     &parent,
                     &name,
+                    staged.as_ref().ok_or(Error::Recovery)?,
                     work.bytes,
                     || {
                         self.live(&c)?;

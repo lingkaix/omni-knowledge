@@ -421,18 +421,33 @@ pub(crate) fn install_evidence(
     name: &str,
     parent: &File,
     target: &str,
+    expected: &Version,
     max: u64,
     check: impl Fn() -> Result<(), Error>,
 ) -> Result<(), Error> {
     check()?;
     let mut source = regular(stage, name)?.ok_or(Error::Recovery)?;
     let before = source.metadata().map_err(|_| Error::Io)?;
+    if stamp(&before)
+        != (
+            expected.device,
+            expected.inode,
+            expected.length,
+            expected.modified.0,
+            expected.modified.1,
+            expected.changed.0,
+            expected.changed.1,
+        )
+    {
+        return Err(Error::Recovery);
+    }
     if before.len().checked_mul(2).is_none_or(|n| n > max) {
         return Err(Error::Budget);
     }
     let copy_name = format!("copy-{name}");
     let mut copy = create_file(stage, &copy_name)?;
     let mut remaining = before.len();
+    let mut digest = Sha256::new();
     let mut buffer = [0u8; 8192];
     while remaining > 0 {
         check()?;
@@ -443,11 +458,13 @@ pub(crate) fn install_evidence(
         }
         check()?;
         copy.write_all(&buffer[..n]).map_err(|_| Error::Io)?;
+        digest.update(&buffer[..n]);
         remaining -= n as u64;
     }
     let mut extra = [0];
     check()?;
     if source.read(&mut extra).map_err(|_| Error::Io)? != 0
+        || format!("{:x}", digest.finalize()) != expected.digest
         || stamp(&before) != stamp(&source.metadata().map_err(|_| Error::Io)?)
     {
         return Err(Error::Recovery);

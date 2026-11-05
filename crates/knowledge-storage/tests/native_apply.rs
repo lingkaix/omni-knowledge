@@ -1080,6 +1080,74 @@ fn complete_scratch_and_copy_plan_precedes_effects() {
     assert_eq!(f.account.status().unwrap().reserved, before);
 }
 
+/// Changed evidence after staging/hash work cannot become unapproved installed bytes.
+#[test]
+fn changed_candidate_is_rejected_before_independent_copy_publication() {
+    /// Change an owned candidate only after the real installing journal record exists.
+    struct CandidatePolicy {
+        /// Actual native approval remains unchanged; byte identity must still be checked at use.
+        context: WriteContext,
+        /// Actual selected disposable home.
+        home: std::path::PathBuf,
+        /// Exact operation-qualified evidence directory.
+        evidence: std::path::PathBuf,
+    }
+    impl WritePolicy for CandidatePolicy {
+        /// Inject actual in-place candidate drift during the displacement boundary.
+        fn current(&self) -> Result<WriteContext, Error> {
+            if fs::read_to_string(self.home.join("journal/writer-a.jsonl"))
+                .unwrap_or_default()
+                .contains("\"outcome\":\"installing\"")
+            {
+                fs::write(self.evidence.join("new-0"), b"not the approved candidate\n").unwrap();
+            }
+            Ok(self.context.clone())
+        }
+    }
+    let f = Fixture::new();
+    let history = f.history();
+    fs::create_dir(f.home().join("pages")).unwrap();
+    fs::write(f.home().join("pages/a.md"), b"owned original\n").unwrap();
+    let expected = [Expected {
+        path: "pages/a.md".into(),
+        version: f.store().observe("pages/a.md", &f.scope()).unwrap(),
+    }];
+    let req = request(
+        "candidate-drift",
+        None,
+        &[("pages/a.md", Some("approved candidate\n"))],
+    );
+    let op = format!("{:x}", Sha256::digest(req.operation_id.as_bytes()));
+    let evidence = f.home().join("journal/recovery").join(op);
+    let store = Store::open(
+        &f.home(),
+        "lib",
+        "writer-a",
+        CandidatePolicy {
+            context: f.policy.current().unwrap(),
+            home: f.home(),
+            evidence: evidence.clone(),
+        },
+    )
+    .unwrap();
+    store
+        .prepare(&history, &req, &expected, &f.scope())
+        .unwrap();
+    assert!(matches!(
+        store.install(&history, &req.operation_id, &f.scope()),
+        Err(Error::Recovery)
+    ));
+    assert!(fs::read(f.home().join("pages/a.md")).is_err());
+    assert_eq!(
+        fs::read(evidence.join("old-0")).unwrap(),
+        b"owned original\n"
+    );
+    assert_eq!(
+        fs::read(evidence.join("new-0")).unwrap(),
+        b"not the approved candidate\n"
+    );
+}
+
 /// In-place home editing must not mutate historical candidate and receipt evidence.
 #[test]
 fn saved_operation_survives_in_place_home_edit() {
