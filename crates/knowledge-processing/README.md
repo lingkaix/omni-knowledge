@@ -28,6 +28,16 @@ The runner polls the real claim cancellation state and deadline during I/O and R
 `None` for RSS uses only credit left after all planned concurrent buffers, not the whole account in addition to those buffers.
 There is no fixed 512 MiB child ceiling or whole-corpus cap.
 
+## Private funded text-provider transport (not native model activation)
+
+`embedding::funded::FundedTextProvider::requirement(config)` declares the complete conservative64MiB client/runtime/response-JSON/request/output envelope plus checked configuration copying. `open(config, Funding::Claim)` transfers that SAME job's complete credit BEFORE endpoint validation/client/runtime construction; an undersized claim refuses before contact even with all otherwise-free account credit held. Split/construct this sibling BEFORE M3's `None` child-RSS remainder. It is a logical envelope, not a measured allocation/RSS result or a raised hostile ceiling.
+
+`embed_text(self, text, &EmbeddingControl)` consumes the producer; `EmbeddedText::vector` is a checked borrow and `into_provider` destroys the actual vector BEFORE returning the same producer/credit. No cloneable reusable output grant or second resource pool exists. The host separately prepays buffers copied into vector-row consumers. Client/HTTP tasks/IO current-thread runtime are destroyed before the actual holding is finished.
+
+The native transport uses one owned current-thread asynchronous HTTP runtime so actual source/model/Claim/deadline checks can run every10ms while waiting for headers/body, rather than leaving an uncancellable blocking worker behind. It uses the SAME endpoint, discovery, protocol and numeric validators as the unchanged mature compatibility adapter, not another backend/schema. Complete response refill checks remain bounded at2MiB; text48KiB; request timeout cannot enlarge the actual owning deadline. Existing local WeMM remains EXTERNAL and is never implicitly started/downloaded.
+
+Actual HTTP/Claim/owned-source neutral controls cover insufficient admission-before-contact, all-free-credit pressure, two numeric outputs via affine producer return, live Core cancellation and deadline during a slow response. Fixture server threads have actual joins and retained prepaid lifetimes. Removing ONLY the wait checkpoints actually fails the slow cancellation oracle; restored code passes. The E0382 producer-reuse guide compiles as a failure. These contract fixtures prove NO embedding quality, native model/source/receiver grant, loaded WeMM identity or full Root activation. `EmbeddingControl` is a trusted host obligation; a callback/DTO/loopback/model name/fingerprint is not authority. Root still must supply its actual selected package/receiver/source/policy/Claim owners and full tuple pipeline.
+
 ## Compiled funded descriptor API
 
 `Funding` is available at `knowledge_processing::funding::Funding` and through each Root extraction/media/EPUB shim.

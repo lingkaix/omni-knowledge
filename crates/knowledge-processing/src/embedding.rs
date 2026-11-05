@@ -12,6 +12,8 @@ use std::path::Path;
 use std::time::Duration;
 use url::{Host, Url};
 
+pub mod funded;
+
 /// Largest media input that leaves room for base64 and JSON within the provider's 64 MiB limit.
 const MAX_MEDIA_BYTES: u64 = 40 * 1024 * 1024;
 /// Maximum response size accepted from the local service.
@@ -104,57 +106,7 @@ impl EmbeddingClient {
     /// Validates configuration and builds transport without starting or contacting a service.
     /// Returns an error for remote URLs, incomplete identities, or invalid deadlines.
     pub fn new(config: &EmbeddingConfig) -> Result<Self> {
-        let mut endpoint = Url::parse(&config.endpoint).context("Invalid embedding endpoint")?;
-        ensure!(
-            endpoint.scheme() == "http",
-            "Embedding endpoint must use local HTTP"
-        );
-        ensure!(
-            endpoint.username().is_empty() && endpoint.password().is_none(),
-            "Embedding endpoint must not contain credentials"
-        );
-        ensure!(
-            endpoint.query().is_none() && endpoint.fragment().is_none(),
-            "Embedding endpoint must not contain a query or fragment"
-        );
-        ensure!(
-            endpoint.path().is_empty() || endpoint.path() == "/",
-            "Embedding endpoint must be a base URL without a path prefix"
-        );
-        match endpoint.host() {
-            Some(Host::Ipv4(address)) => {
-                ensure!(address.is_loopback(), "Embedding endpoint must be loopback")
-            }
-            Some(Host::Ipv6(address)) => {
-                ensure!(address.is_loopback(), "Embedding endpoint must be loopback")
-            }
-            Some(Host::Domain("localhost")) => {
-                endpoint
-                    .set_ip_host(IpAddr::from([127, 0, 0, 1]))
-                    .map_err(|_| anyhow::anyhow!("Cannot canonicalize localhost"))?
-            }
-            _ => bail!("Embedding endpoint must use a literal loopback address or localhost"),
-        }
-        ensure!(
-            !config.model.trim().is_empty() && !config.embedding_space.trim().is_empty(),
-            "Embedding model and space identity must be explicit"
-        );
-        ensure!(
-            config.package_fingerprint.len() == 64
-                && config
-                    .package_fingerprint
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit()),
-            "Embedding package fingerprint must be a full SHA-256 value"
-        );
-        ensure!(
-            (1..=8192).contains(&config.dimension),
-            "Embedding dimension must be from 1 through 8192"
-        );
-        ensure!(
-            (1..=600).contains(&config.timeout_seconds),
-            "Embedding timeout must be from 1 through 600 seconds"
-        );
+        let endpoint = validated_endpoint(config)?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(config.timeout_seconds))
@@ -175,43 +127,14 @@ impl EmbeddingClient {
         let health = self.read_json(self.client.get(self.url("health")?).send().context(
             "Local embedding service is unavailable; start the configured WeMM provider",
         )?)?;
-        ensure!(
-            health["status"].as_str() == Some("ready"),
-            "Local embedding service is not ready"
-        );
-        ensure!(
-            health["package_fingerprint"].as_str()
-                == Some(self.config.package_fingerprint.as_str()),
-            "Embedding package fingerprint mismatch; rebuild with the intended provider"
-        );
+        check_health(&self.config, &health)?;
         let models = self.read_json(
             self.client
                 .get(self.url("v1/models")?)
                 .send()
                 .context("Cannot inspect local embedding models")?,
         )?;
-        let models = models["data"]
-            .as_array()
-            .context("Embedding model list is missing")?;
-        let model = models
-            .iter()
-            .find(|entry| entry["id"].as_str() == Some(self.config.model.as_str()))
-            .context("Configured embedding model is unavailable")?;
-        ensure!(
-            model["dimension"].as_u64() == Some(self.config.dimension as u64),
-            "Embedding model dimension mismatch"
-        );
-        ensure!(
-            model["embedding_space"].as_str() == Some(self.config.embedding_space.as_str()),
-            "Embedding model space mismatch; existing vectors cannot be mixed"
-        );
-        Ok(ProviderHealth {
-            backend: health["backend"].as_str().unwrap_or("unknown").into(),
-            package_fingerprint: self.config.package_fingerprint.clone(),
-            model: self.config.model.clone(),
-            dimension: self.config.dimension,
-            embedding_space: self.config.embedding_space.clone(),
-        })
+        checked_models(&self.config, &health, &models)
     }
 
     /// Embeds bounded UTF-8 text after a fresh provider identity check.
@@ -282,44 +205,7 @@ impl EmbeddingClient {
                 .send()
                 .context("Local embedding request failed")?,
         )?;
-        ensure!(
-            response["model"].as_str() == Some(self.config.model.as_str()),
-            "Embedding response model mismatch"
-        );
-        ensure!(
-            response["indexed"]["dimension"].as_u64() == Some(self.config.dimension as u64),
-            "Embedding response dimension mismatch"
-        );
-        ensure!(
-            response["indexed"]["embedding_space"].as_str()
-                == Some(self.config.embedding_space.as_str()),
-            "Embedding response space mismatch"
-        );
-        let data = response["data"]
-            .as_array()
-            .context("Embedding response has no data")?;
-        ensure!(
-            data.len() == 1 && data[0]["index"].as_u64() == Some(0),
-            "Embedding response must contain exactly one vector at index zero"
-        );
-        let values = data[0]["embedding"]
-            .as_array()
-            .context("Embedding response has no vector")?;
-        ensure!(
-            values.len() == self.config.dimension,
-            "Embedding vector has the wrong length"
-        );
-        let vector: Vec<f32> = values
-            .iter()
-            .map(|value| {
-                value
-                    .as_f64()
-                    .map(|number| number as f32)
-                    .context("Embedding vector contains a nonnumeric value")
-            })
-            .collect::<Result<_>>()?;
-        validate_vector(&vector)?;
-        Ok(vector)
+        checked_embedding(&self.config, &response)
     }
 
     /// Joins an API path to the validated base URL.
@@ -347,6 +233,144 @@ impl EmbeddingClient {
         );
         serde_json::from_slice(&bytes).context("Local embedding response is not valid JSON")
     }
+}
+
+/// Reuse exact legacy endpoint/identity/deadline checks; this validation grants no native authority.
+fn validated_endpoint(config: &EmbeddingConfig) -> Result<Url> {
+    let mut endpoint = Url::parse(&config.endpoint).context("Invalid embedding endpoint")?;
+    ensure!(
+        endpoint.scheme() == "http",
+        "Embedding endpoint must use local HTTP"
+    );
+    ensure!(
+        endpoint.username().is_empty() && endpoint.password().is_none(),
+        "Embedding endpoint must not contain credentials"
+    );
+    ensure!(
+        endpoint.query().is_none() && endpoint.fragment().is_none(),
+        "Embedding endpoint must not contain a query or fragment"
+    );
+    ensure!(
+        endpoint.path().is_empty() || endpoint.path() == "/",
+        "Embedding endpoint must be a base URL without a path prefix"
+    );
+    match endpoint.host() {
+        Some(Host::Ipv4(address)) => {
+            ensure!(address.is_loopback(), "Embedding endpoint must be loopback")
+        }
+        Some(Host::Ipv6(address)) => {
+            ensure!(address.is_loopback(), "Embedding endpoint must be loopback")
+        }
+        Some(Host::Domain("localhost")) => endpoint
+            .set_ip_host(IpAddr::from([127, 0, 0, 1]))
+            .map_err(|_| anyhow::anyhow!("Cannot canonicalize localhost"))?,
+        _ => bail!("Embedding endpoint must use a literal loopback address or localhost"),
+    }
+    ensure!(
+        !config.model.trim().is_empty() && !config.embedding_space.trim().is_empty(),
+        "Embedding model and space identity must be explicit"
+    );
+    ensure!(
+        config.package_fingerprint.len() == 64
+            && config
+                .package_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "Embedding package fingerprint must be a full SHA-256 value"
+    );
+    ensure!(
+        (1..=8192).contains(&config.dimension),
+        "Embedding dimension must be from 1 through 8192"
+    );
+    ensure!(
+        (1..=600).contains(&config.timeout_seconds),
+        "Embedding timeout must be from 1 through 600 seconds"
+    );
+    Ok(endpoint)
+}
+
+/// Validate health before proceeding to model discovery or sending content.
+fn check_health(config: &EmbeddingConfig, health: &Value) -> Result<()> {
+    ensure!(
+        health["status"].as_str() == Some("ready"),
+        "Local embedding service is not ready"
+    );
+    ensure!(
+        health["package_fingerprint"].as_str() == Some(config.package_fingerprint.as_str()),
+        "Embedding package fingerprint mismatch; rebuild with the intended provider"
+    );
+    Ok(())
+}
+
+/// Bind discovery facts without treating them as native package/source/receiver authority.
+fn checked_models(
+    config: &EmbeddingConfig,
+    health: &Value,
+    models: &Value,
+) -> Result<ProviderHealth> {
+    let models = models["data"]
+        .as_array()
+        .context("Embedding model list is missing")?;
+    let model = models
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(config.model.as_str()))
+        .context("Configured embedding model is unavailable")?;
+    ensure!(
+        model["dimension"].as_u64() == Some(config.dimension as u64),
+        "Embedding model dimension mismatch"
+    );
+    ensure!(
+        model["embedding_space"].as_str() == Some(config.embedding_space.as_str()),
+        "Embedding model space mismatch; existing vectors cannot be mixed"
+    );
+    Ok(ProviderHealth {
+        backend: health["backend"].as_str().unwrap_or("unknown").into(),
+        package_fingerprint: config.package_fingerprint.clone(),
+        model: config.model.clone(),
+        dimension: config.dimension,
+        embedding_space: config.embedding_space.clone(),
+    })
+}
+
+/// The ONE existing protocol/numeric parser, shared by compatibility and funded transports.
+fn checked_embedding(config: &EmbeddingConfig, response: &Value) -> Result<Vec<f32>> {
+    ensure!(
+        response["model"].as_str() == Some(config.model.as_str()),
+        "Embedding response model mismatch"
+    );
+    ensure!(
+        response["indexed"]["dimension"].as_u64() == Some(config.dimension as u64),
+        "Embedding response dimension mismatch"
+    );
+    ensure!(
+        response["indexed"]["embedding_space"].as_str() == Some(config.embedding_space.as_str()),
+        "Embedding response space mismatch"
+    );
+    let data = response["data"]
+        .as_array()
+        .context("Embedding response has no data")?;
+    ensure!(
+        data.len() == 1 && data[0]["index"].as_u64() == Some(0),
+        "Embedding response must contain exactly one vector at index zero"
+    );
+    let values = data[0]["embedding"]
+        .as_array()
+        .context("Embedding response has no vector")?;
+    ensure!(
+        values.len() == config.dimension,
+        "Embedding vector has the wrong length"
+    );
+    let vector: Vec<f32> = values
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .map(|number| number as f32)
+                .context("Embedding vector contains a nonnumeric value")
+        })
+        .collect::<Result<_>>()?;
+    validate_vector(&vector)?;
+    Ok(vector)
 }
 
 /// Rejects empty, nonfinite, and zero-norm vectors before they reach durable indexes.
