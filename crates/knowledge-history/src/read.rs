@@ -39,6 +39,8 @@ pub struct RecordedAttribution {
     pub session: Option<String>,
     /// External observation origin, when recorded explicitly.
     pub origin: Option<String>,
+    /// Recorded stable-observation evidence IDs, never source/read authority.
+    pub observation_ids: Vec<String>,
 }
 
 /// Actual immutable commit metadata under the admitted history context.
@@ -121,28 +123,45 @@ impl History {
         if let Some(after) = after {
             validate_id(after)?;
         }
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         let count = format!("--count={}", limit.checked_add(1).ok_or(Error::Capacity)?);
-        let cursor = format!(
-            "--start-after=refs/heads/omni-proposals/{}",
-            after.unwrap_or("")
-        );
-        // Native start-after cannot combine with patterns/custom sort. Default ordering is refname;
-        // the formatter emits only this contiguous namespace, never another ref's name/OID.
-        let args = [
+        // Native namespace-scoped glob union implements an exclusive ASCII cursor even on older system Git.
+        // No --start-after feature dependency, unbounded prefix scan, private-ref output or local branch index.
+        let prefix = "refs/heads/omni-proposals/";
+        let mut patterns = Vec::new();
+        if let Some(after) = after {
+            const ALPHABET: &[u8] =
+                b"-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
+            for (index, byte) in after.bytes().enumerate() {
+                let greater: String = ALPHABET
+                    .iter()
+                    .copied()
+                    .filter(|v| *v > byte)
+                    .map(char::from)
+                    .collect();
+                if !greater.is_empty() {
+                    patterns.push(format!("{prefix}{}[{greater}]*", &after[..index]));
+                }
+            }
+            patterns.push(format!("{prefix}{after}?*")); // Never invoke native enumeration with no namespace pattern.
+        } else {
+            patterns.push(prefix.to_owned());
+        }
+        if patterns.iter().map(String::len).sum::<usize>() > call.limit {
+            return Err(Error::Capacity);
+        }
+        let mut args = vec![
             "for-each-ref",
-            "--format=%(if:equals=refs/heads/omni-proposals)%(refname:rstrip=-3)%(then)%(refname) %(objectname) %(symref)%(else)END%(end)",
+            "--sort=refname",
+            "--format=%(refname) %(objectname) %(symref)",
             &count,
-            &cursor,
         ];
+        args.extend(patterns.iter().map(String::as_str));
         let listing = self.git(&args, b"", scratch.path(), None, &call)?;
         let text = std::str::from_utf8(&listing).map_err(|_| Error::Recovery)?;
         let mut names = Vec::new();
         for line in text.lines() {
             call.account_files(1)?;
-            if line == "END" {
-                break;
-            }
             let fields: Vec<_> = line.split(' ').collect();
             if fields.len() != 3 || !fields[2].is_empty() {
                 return Err(Error::Recovery);
@@ -179,7 +198,7 @@ impl History {
         validate_id(proposal_id)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         let name = format!("refs/heads/omni-proposals/{proposal_id}");
         let expected_base = self.reference(ACCEPTED, scratch.path(), &call)?;
         let candidate = self
@@ -215,7 +234,7 @@ impl History {
         let call = Call::new(claim)?;
         self.validate()?;
         check_limit(limit, &call)?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         let accepted = self.reference(ACCEPTED, scratch.path(), &call)?;
         let Some(accepted) = accepted else {
             return Ok(CommitPage {
@@ -269,7 +288,7 @@ impl History {
     pub fn version(&self, version: &Oid, claim: &Claim) -> Result<CommitInfo, Error> {
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         self.qualify_version(version, scratch.path(), &call)?;
         self.commit_info(version, scratch.path(), &call)
     }
@@ -280,7 +299,7 @@ impl History {
         self.validate_path(path)?;
         let call = Call::new(claim)?;
         self.validate()?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         self.qualify_version(version, scratch.path(), &call)?;
         self.base_tree(Some(version), scratch.path(), &call)?;
         let spec = format!("{}:{path}", version.as_str());
@@ -306,7 +325,7 @@ impl History {
         let call = Call::new(claim)?;
         let _lock = self.lock()?;
         let intent = self.read_intent(operation_id)?;
-        let scratch = tempfile::tempdir_in(self.repo.join("omni-state"))?;
+        let scratch = self.scratch()?;
         if self.reference(
             &format!("refs/omni/trees/{operation_id}"),
             scratch.path(),
@@ -442,6 +461,11 @@ impl History {
                 "Omni-Tool" => &mut attribution.tool,
                 "Omni-Session-Id" => &mut attribution.session,
                 "Omni-Origin" => &mut attribution.origin,
+                "Omni-Observation-Id" => {
+                    validate_id(value).map_err(|_| Error::Recovery)?;
+                    attribution.observation_ids.push(value.to_owned());
+                    continue;
+                }
                 _ => continue,
             };
             if field.is_some() {

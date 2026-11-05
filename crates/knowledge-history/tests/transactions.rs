@@ -1294,3 +1294,635 @@ fn signing_blocked_candidate_has_an_actual_bounded_read_side() {
     );
     assert_eq!(history.head(&admission.claim).unwrap(), None);
 }
+
+/// The only credential fixture is a disposable explicit native agent/socket and a 0700 system-key directory outside cache.
+struct OwnedAgent {
+    root: Option<tempfile::TempDir>,
+    child: std::process::Child,
+    start: String,
+}
+impl OwnedAgent {
+    /// Native Linux start observation for the exact child fixture; no host agent/configuration lookup.
+    fn start_of(pid: u32) -> String {
+        #[cfg(target_os = "linux")]
+        {
+            fs::read_to_string(format!("/proc/{pid}/stat"))
+                .unwrap()
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .nth(19)
+                .unwrap()
+                .to_owned()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let output = Command::new("/bin/ps")
+                .args(["-p", &pid.to_string(), "-o", "lstart="])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+    }
+    fn new() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("omni-owned-native-ssh-")
+            .tempdir_in(std::path::Path::new("/tmp").canonicalize().unwrap())
+            .unwrap();
+        let socket = root.path().join("agent.sock");
+        let child = Command::new("/usr/bin/ssh-agent")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "C")
+            .args(["-D", "-a"])
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = Self::start_of(child.id());
+        let end = Instant::now() + Duration::from_secs(2);
+        while !socket.exists() {
+            assert!(Instant::now() < end, "owned native agent startup deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Self {
+            root: Some(root),
+            child,
+            start,
+        }
+    }
+    fn socket(&self) -> std::path::PathBuf {
+        self.root.as_ref().unwrap().path().join("agent.sock")
+    }
+    fn key(&self, name: &str) -> std::path::PathBuf {
+        self.root.as_ref().unwrap().path().join(name)
+    }
+    /// Lock the actual owned agent using an ephemeral random askpass fixture, not a signing/verification replacement.
+    fn lock(&mut self) {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        let mut bytes = [0u8; 24];
+        fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
+        let pass: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let askpass = self.key("owned-askpass");
+        fs::write(&askpass, format!("#!/bin/sh\nprintf '%s\\n' '{pass}'\n")).unwrap();
+        fs::set_permissions(&askpass, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut helper = Command::new("/usr/bin/ssh-add")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "C")
+            .env("SSH_AUTH_SOCK", self.socket())
+            .env("SSH_ASKPASS", &askpass)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", "owned-fixture:0")
+            .arg("-x")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = helper.try_wait().unwrap() {
+                assert!(status.success(), "actual owned agent lock refused");
+                break;
+            }
+            if Instant::now() >= end {
+                let _ = helper.kill();
+                let cleanup = Instant::now() + Duration::from_secs(2);
+                while helper.try_wait().unwrap().is_none() {
+                    if Instant::now() >= cleanup {
+                        if let Some(root) = self.root.take() {
+                            let _ = root.keep();
+                        }
+                        std::mem::forget(helper);
+                        panic!("owned lock helper collection unknown");
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                panic!("owned lock helper exceeded deadline after actual collection");
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        fs::remove_file(askpass).unwrap();
+    }
+    /// Finite exact-child stop/reap; if collection were unknown its credential directory would be retained rather than deleted.
+    fn stop(&mut self) {
+        if self.child.try_wait().unwrap().is_none() {
+            assert_eq!(Self::start_of(self.child.id()), self.start);
+            self.child.kill().unwrap();
+            let end = Instant::now() + Duration::from_secs(2);
+            while self.child.try_wait().unwrap().is_none() {
+                if Instant::now() >= end {
+                    if let Some(root) = self.root.take() {
+                        let _ = root.keep();
+                    }
+                    panic!("owned agent collection unknown");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+impl Drop for OwnedAgent {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Real SSH signatures, native trust, actual provider refusal and distinct author/committer survive reopen without unsigned fallback.
+#[test]
+fn actual_native_ssh_signing_verification_locked_missing_and_reopen() {
+    use knowledge_history::{GitIdentity, KeyProtection, KnownSigner, SignatureState};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("home")).unwrap();
+    let admission = Admission::new();
+    let mut context = owner(false);
+    context.mode = Mode::SigningRequired;
+    let history = History::init(
+        &root.path().join("history"),
+        &root.path().join("home"),
+        "pages",
+        context.clone(),
+        &admission.claim,
+    )
+    .unwrap();
+    let mut native = OwnedAgent::new();
+    let first_key = native.key("first-system-key");
+    let signer = history
+        .setup_system_signer(
+            &first_key,
+            &native.socket(),
+            KeyProtection::UnencryptedExplicit,
+            &admission.claim,
+        )
+        .unwrap();
+    for path in [first_key.join("identity"), first_key.join("identity.pub")] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        fs::metadata(&first_key).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let known = KnownSigner::selected("native-owner@example.invalid", signer.public_key()).unwrap();
+    let other = history
+        .setup_system_signer(
+            &native.key("other-system-key"),
+            &native.socket(),
+            KeyProtection::UnencryptedExplicit,
+            &admission.claim,
+        )
+        .unwrap();
+    let unrelated = KnownSigner::selected("unrelated@example.invalid", other.public_key()).unwrap();
+    let history = history
+        .with_signer(signer.clone())
+        .with_committer(
+            GitIdentity::new("Native Device Committer", "device@example.invalid").unwrap(),
+        )
+        .unwrap();
+    let request = Request {
+        operation_id: "actual-native-signed".into(),
+        base: None,
+        destination: Destination::Accepted,
+        changes: vec![Change {
+            path: "pages/a.md".into(),
+            text: Some("Actual signed native bytes\n".into()),
+        }],
+    };
+    let prepared = history.prepare(&request, &admission.claim).unwrap();
+    assert!(matches!(
+        history
+            .publish(&request.operation_id, &admission.claim)
+            .unwrap(),
+        State::Published(_)
+    ));
+    let oid = prepared.candidate.clone().unwrap();
+    let info = history.version(&oid, &admission.claim).unwrap();
+    assert_eq!(info.author.name, "Synthetic Owner");
+    assert_eq!(info.committer.name, "Native Device Committer");
+    assert_ne!(info.author.email, info.committer.email);
+    assert_eq!(
+        history
+            .verify_signature(&oid, &[], &admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::ValidUnknown
+    );
+    assert_eq!(
+        history
+            .verify_signature(&oid, &[unrelated], &admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::ValidUnknown
+    );
+    assert_eq!(
+        history
+            .verify_signature(&oid, std::slice::from_ref(&known), &admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::ValidKnown
+    );
+    // Independent real Git verifier proves the standard commit gpgsig encoding, not only our parser's interpretation.
+    let allowed = native.key("allowed-signers");
+    fs::write(
+        &allowed,
+        format!(
+            "native-owner@example.invalid namespaces=\"git\" {}",
+            signer.public_key()
+        ),
+    )
+    .unwrap();
+    git(
+        &root.path().join("history"),
+        &[
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={}", allowed.display()),
+            "verify-commit",
+            oid.as_str(),
+        ],
+    );
+    let actual = git(
+        &root.path().join("history"),
+        &["cat-file", "commit", oid.as_str()],
+    );
+    let corrupt = actual.replace("Omni text operation", "Tampered text operation") + "\n";
+    let mut child = Command::new("/usr/bin/git")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .arg("--git-dir")
+        .arg(root.path().join("history"))
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(corrupt.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let invalid = Oid::parse(std::str::from_utf8(&output.stdout).unwrap().trim()).unwrap();
+    git(
+        &root.path().join("history"),
+        &[
+            "update-ref",
+            "refs/heads/omni-proposals/invalid",
+            invalid.as_str(),
+            &"0".repeat(40),
+        ],
+    );
+    assert_eq!(
+        history
+            .verify_signature(&invalid, std::slice::from_ref(&known), &admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::Invalid
+    );
+    // Actual native locked provider refuses a new operation while preserving its actual candidate tree and old accepted head.
+    native.lock();
+    let mut blocked = request.clone();
+    blocked.operation_id = "locked-native-provider".into();
+    blocked.base = Some(oid.clone());
+    blocked.changes[0].text = Some("Retained locked-provider bytes".into());
+    assert_eq!(
+        history.prepare(&blocked, &admission.claim).unwrap_err(),
+        Error::SigningRequired
+    );
+    assert_eq!(
+        history
+            .read_candidate(&blocked.operation_id, "pages/a.md", &admission.claim)
+            .unwrap(),
+        "Retained locked-provider bytes"
+    );
+    assert_eq!(history.head(&admission.claim).unwrap(), Some(oid.clone()));
+    assert_eq!(
+        history
+            .version_text(&oid, "pages/a.md", &admission.claim)
+            .unwrap(),
+        "Actual signed native bytes\n"
+    );
+    // Agent absence does not prevent verification, inspection or completed-operation idempotency.
+    native.stop();
+    let reopened = History::open(
+        &root.path().join("history"),
+        &root.path().join("home"),
+        "pages",
+        context,
+        &admission.claim,
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.prepare(&request, &admission.claim).unwrap(),
+        prepared
+    );
+    assert!(
+        matches!(reopened.publish(&request.operation_id, &admission.claim).unwrap(), State::Published(p) if p == prepared)
+    );
+    assert_eq!(
+        reopened
+            .verify_signature(&oid, &[known], &admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::ValidKnown
+    );
+    blocked.operation_id = "missing-native-provider".into();
+    assert_eq!(
+        reopened
+            .with_signer(signer)
+            .prepare(&blocked, &admission.claim)
+            .unwrap_err(),
+        Error::SigningRequired
+    );
+    let unsigned = Fixture::new();
+    let unsigned_oid =
+        unsigned.commit("explicit-unsigned", None, "Explicit native unsigned choice");
+    assert_eq!(
+        unsigned
+            .history
+            .verify_signature(&unsigned_oid, &[], &unsigned.admission.claim)
+            .unwrap()
+            .state,
+        SignatureState::Unsigned
+    );
+}
+
+/// Actual native pack validation/object admission uses the held exact stream, not a replacement path or imported ref grant.
+#[test]
+fn held_exact_bundle_verifies_and_admits_inert_native_objects() {
+    use knowledge_core::data::ContentDigest;
+    use sha2::{Digest, Sha256};
+    use std::io::Seek;
+    let source = Fixture::new();
+    let version = source.commit("bundle-source", None, "Actual bundled text\n");
+    let path = source.root.path().join("selected.bundle");
+    git(
+        &source.repo(),
+        &[
+            "bundle",
+            "create",
+            path.to_str().unwrap(),
+            "refs/heads/omni-accepted",
+        ],
+    );
+    let bytes = fs::read(&path).unwrap();
+    let digest = ContentDigest::new(format!("{:x}", Sha256::digest(&bytes))).unwrap();
+    let mut file = fs::File::open(&path).unwrap();
+    file.seek(std::io::SeekFrom::End(0)).unwrap();
+    // A replaced visible path cannot redirect the actual held source supplied by M5's private verified-stream handoff.
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, "Not the held bundle").unwrap();
+    let destination = Fixture::new();
+    let before = git(&destination.repo(), &["count-objects", "-v"]);
+    let verified = destination
+        .history
+        .verify_bundle(&file, &digest, &destination.admission.claim)
+        .unwrap();
+    assert!(!verified.objects_admitted);
+    assert_eq!(verified.version, digest);
+    assert_eq!(verified.bytes, bytes.len() as u64);
+    assert_eq!(verified.refs.len(), 1);
+    assert_eq!(verified.refs[0].name, "refs/heads/omni-accepted");
+    assert_eq!(verified.refs[0].version, version);
+    assert_eq!(git(&destination.repo(), &["count-objects", "-v"]), before);
+    assert_eq!(file.stream_position().unwrap(), bytes.len() as u64);
+    let admitted = destination
+        .history
+        .admit_bundle(&file, &digest, &destination.admission.claim)
+        .unwrap();
+    assert!(admitted.objects_admitted);
+    assert_eq!(admitted.refs, verified.refs);
+    assert_eq!(
+        git(&destination.repo(), &["cat-file", "-t", version.as_str()]),
+        "commit"
+    );
+    assert_eq!(
+        destination
+            .history
+            .head(&destination.admission.claim)
+            .unwrap(),
+        None
+    );
+    assert!(
+        destination
+            .history
+            .proposals(None, 10, &destination.admission.claim)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(
+        destination
+            .history
+            .version(&version, &destination.admission.claim)
+            .unwrap_err(),
+        Error::ContextMismatch
+    );
+    assert_eq!(file.stream_position().unwrap(), bytes.len() as u64);
+}
+
+/// Byte-version mismatch, actual bad pack checksum, missing prerequisites and foreign refs refuse before main object/ref admission.
+#[test]
+fn bundle_version_pack_prerequisite_and_namespace_refusals_are_real() {
+    use knowledge_core::data::ContentDigest;
+    use knowledge_history::BundleError;
+    use sha2::{Digest, Sha256};
+    let source = Fixture::new();
+    let base = source.commit("bundle-base", None, "Base bundle bytes");
+    let path = source.root.path().join("complete.bundle");
+    git(
+        &source.repo(),
+        &[
+            "bundle",
+            "create",
+            path.to_str().unwrap(),
+            "refs/heads/omni-accepted",
+        ],
+    );
+    let digest = |bytes: &[u8]| ContentDigest::new(format!("{:x}", Sha256::digest(bytes))).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let destination = Fixture::new();
+    let before = git(&destination.repo(), &["count-objects", "-v"]);
+    assert_eq!(
+        destination
+            .history
+            .admit_bundle(
+                &fs::File::open(&path).unwrap(),
+                &digest(b"not the exact stream"),
+                &destination.admission.claim
+            )
+            .unwrap_err(),
+        BundleError::Changed
+    );
+    let mut damaged = bytes.clone();
+    let end = damaged.len() - 1;
+    damaged[end] ^= 1;
+    let damaged_path = source.root.path().join("bad-pack.bundle");
+    fs::write(&damaged_path, &damaged).unwrap();
+    assert_eq!(
+        destination
+            .history
+            .admit_bundle(
+                &fs::File::open(&damaged_path).unwrap(),
+                &digest(&damaged),
+                &destination.admission.claim
+            )
+            .unwrap_err(),
+        BundleError::Integrity
+    );
+    source.commit("bundle-next", Some(base.clone()), "Next bundle bytes");
+    let incremental = source.root.path().join("incremental.bundle");
+    git(
+        &source.repo(),
+        &[
+            "bundle",
+            "create",
+            incremental.to_str().unwrap(),
+            "refs/heads/omni-accepted",
+            &format!("^{}", base.as_str()),
+        ],
+    );
+    assert_eq!(
+        destination
+            .history
+            .admit_bundle(
+                &fs::File::open(&incremental).unwrap(),
+                &digest(&fs::read(&incremental).unwrap()),
+                &destination.admission.claim
+            )
+            .unwrap_err(),
+        BundleError::Integrity
+    );
+    git(
+        &source.repo(),
+        &[
+            "update-ref",
+            "refs/heads/unrelated-private",
+            base.as_str(),
+            &"0".repeat(40),
+        ],
+    );
+    let foreign = source.root.path().join("foreign.bundle");
+    git(
+        &source.repo(),
+        &[
+            "bundle",
+            "create",
+            foreign.to_str().unwrap(),
+            "refs/heads/unrelated-private",
+        ],
+    );
+    assert_eq!(
+        destination
+            .history
+            .admit_bundle(
+                &fs::File::open(&foreign).unwrap(),
+                &digest(&fs::read(&foreign).unwrap()),
+                &destination.admission.claim
+            )
+            .unwrap_err(),
+        BundleError::Integrity
+    );
+    assert_eq!(git(&destination.repo(), &["count-objects", "-v"]), before);
+    assert_eq!(
+        destination
+            .history
+            .head(&destination.admission.claim)
+            .unwrap(),
+        None
+    );
+}
+
+/// Real stable owned external bytes are observation evidence, never fabricated editor/agent authorship.
+#[test]
+fn external_observation_keeps_native_evidence_and_not_agent_authorship() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    let base = f.commit("before-observation", None, "Before external observation");
+    fs::create_dir(f.root.path().join("home/pages")).unwrap();
+    let path = f.root.path().join("home/pages/a.md");
+    fs::write(&path, "Actual external filesystem text\n").unwrap();
+    let before = fs::metadata(&path).unwrap();
+    let bytes = fs::read_to_string(&path).unwrap();
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(
+        (before.ino(), before.len(), before.mtime_nsec()),
+        (after.ino(), after.len(), after.mtime_nsec())
+    );
+    let id = format!(
+        "native-observation-{}-{}",
+        before.ino(),
+        before.ctime_nsec()
+    );
+    let request = f.request(
+        "observed-external",
+        Some(base),
+        &[("pages/a.md", Some(&bytes))],
+    );
+    let prepared = f
+        .history
+        .prepare_observation(&request, std::slice::from_ref(&id), &f.admission.claim)
+        .unwrap();
+    assert!(matches!(
+        f.history
+            .publish(&request.operation_id, &f.admission.claim)
+            .unwrap(),
+        State::Published(_)
+    ));
+    let info = f
+        .history
+        .version(prepared.candidate.as_ref().unwrap(), &f.admission.claim)
+        .unwrap();
+    assert_eq!(info.attribution.origin.as_deref(), Some("external_unknown"));
+    assert_eq!(
+        info.attribution.observation_ids.as_slice(),
+        std::slice::from_ref(&id)
+    );
+    assert!(info.attribution.agent.is_none());
+    assert_eq!(info.committer.name, "Synthetic Owner");
+    assert_eq!(
+        f.history
+            .prepare_observation(&request, &[id], &f.admission.claim)
+            .unwrap(),
+        prepared
+    );
+    assert_eq!(
+        f.history
+            .prepare_observation(
+                &request,
+                &["different-native-observation".into()],
+                &f.admission.claim
+            )
+            .unwrap_err(),
+        Error::OperationMismatch
+    );
+    assert_eq!(
+        f.reopen(true)
+            .prepare_observation(
+                &request,
+                &["native-agent-cannot-claim-editor".into()],
+                &f.admission.claim
+            )
+            .unwrap_err(),
+        Error::ContextMismatch
+    );
+}

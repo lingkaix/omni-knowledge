@@ -23,7 +23,6 @@ impl OwnedWriterLock {
         self.owner_pid == std::process::id()
     }
     /// Transfer the actual descriptor to the native unresolved owner, without unlocking it.
-    #[cfg(test)]
     pub(crate) fn into_file(mut self) -> File {
         self.file.take().expect("owned writer descriptor")
     }
