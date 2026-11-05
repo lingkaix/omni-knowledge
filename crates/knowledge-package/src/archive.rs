@@ -1,6 +1,6 @@
 //! Bounded ZIP framing. Declared sizes never grant allocation or output.
 use crate::manifest::forbidden;
-use crate::{Admit, Error, Method, Work};
+use crate::{Error, Method, Work, charge_fresh, note_written, preallocate};
 use crc32fast::Hasher;
 use flate2::{Decompress, FlushDecompress, Status};
 use sha2::{Digest, Sha256};
@@ -132,8 +132,7 @@ fn stream_stored(
     if member.compressed != member.uncompressed {
         return Err(Error::Disagreement);
     }
-    gate(work)?;
-    account(work, SCRATCH as u64, 0)?;
+    let _scratch = preallocate(work, SCRATCH as u64)?;
     let mut buf = [0u8; SCRATCH];
     let mut left = member.compressed;
     let mut pos = member.data_offset;
@@ -161,8 +160,7 @@ fn stream_deflate(
     crc: &mut Hasher,
     out: &mut Out<'_>,
 ) -> Result<(), Error> {
-    gate(work)?;
-    account(work, WINDOW + (SCRATCH as u64) * 2, 0)?;
+    let _scratch = preallocate(work, WINDOW + (SCRATCH as u64) * 2)?;
     let mut dec = Decompress::new(false);
     let mut input = [0u8; SCRATCH];
     let mut output = [0u8; SCRATCH];
@@ -219,14 +217,14 @@ fn deliver(work: &mut Work<'_>, out: &mut Out<'_>, chunk: &[u8]) -> Result<(), E
     match out {
         Out::Drop => Ok(()),
         Out::Keep(buffer) => {
-            account(work, chunk.len() as u64, 0)?;
+            charge_fresh(work, chunk.len() as u64, 0)?;
             buffer.extend_from_slice(chunk);
             Ok(())
         }
         Out::Disk(file) => {
             account(work, 0, chunk.len() as u64)?;
             file.write_all(chunk).map_err(|_| Error::Io)?;
-            work.account.written(chunk.len() as u64)?;
+            note_written(work, chunk.len() as u64)?;
             Ok(())
         }
     }
@@ -258,7 +256,7 @@ fn read_eocd(file: &mut File, len: u64, work: &mut Work<'_>) -> Result<Eocd, Err
         return Err(Error::Truncated);
     }
     let window = len.min(22 + 65_535);
-    account(work, window, 0)?;
+    let _scratch = preallocate(work, window)?;
     let mut buf = vec![0u8; usize::try_from(window).map_err(|_| Error::Hostile)?];
     read_exact_at(file, work, len - window, &mut buf)?;
     let mut found = None;
@@ -322,7 +320,7 @@ fn read_eocd(file: &mut File, len: u64, work: &mut Work<'_>) -> Result<Eocd, Err
 }
 
 fn read_zip64(file: &mut File, work: &mut Work<'_>, at: u64, eocd_pos: u64) -> Result<Eocd, Error> {
-    account(work, 56, 0)?;
+    let _scratch = preallocate(work, 56)?;
     let mut buf = [0u8; 56];
     read_exact_at(file, work, at, &mut buf)?;
     parse_zip64(&buf, 0, eocd_pos)
@@ -350,7 +348,7 @@ fn parse_zip64(buf: &[u8], at: usize, eocd_pos: u64) -> Result<Eocd, Error> {
 }
 
 fn read_central(file: &mut File, work: &mut Work<'_>, cursor: &mut u64) -> Result<Member, Error> {
-    account(work, 46, 0)?;
+    let _head_scratch = preallocate(work, 46)?;
     let mut head = [0u8; 46];
     read_exact_at(file, work, *cursor, &mut head)?;
     if u32_at(&head, 0)? != 0x02014b50 {
@@ -380,7 +378,8 @@ fn read_central(file: &mut File, work: &mut Work<'_>, cursor: &mut u64) -> Resul
     if name_len == 0 || name_len > work.bounds.quotas.max_path_bytes {
         return Err(Error::Hostile);
     }
-    account(work, (name_len + extra_len) as u64, 0)?;
+    charge_fresh(work, name_len as u64, 0)?;
+    let _extra_scratch = preallocate(work, extra_len as u64)?;
     let mut name = vec![0u8; name_len];
     let mut extra = vec![0u8; extra_len];
     read_exact_at(
@@ -398,7 +397,7 @@ fn read_central(file: &mut File, work: &mut Work<'_>, cursor: &mut u64) -> Resul
         &mut extra,
     )?;
     if comment_len > 0 {
-        account(work, comment_len as u64, 0)?;
+        let _comment_scratch = preallocate(work, comment_len as u64)?;
         let mut ignore = vec![0u8; comment_len];
         read_exact_at(
             file,
@@ -441,7 +440,7 @@ fn bind_local(
     member: &mut Member,
     cd_offset: u64,
 ) -> Result<(), Error> {
-    account(work, 30, 0)?;
+    let _head_scratch = preallocate(work, 30)?;
     let mut head = [0u8; 30];
     read_exact_at(file, work, member.local_offset, &mut head)?;
     if u32_at(&head, 0)? != 0x04034b50 {
@@ -460,7 +459,7 @@ fn bind_local(
     if name_len > work.bounds.quotas.max_path_bytes {
         return Err(Error::Hostile);
     }
-    account(work, (name_len + extra_len) as u64, 0)?;
+    let _name_scratch = preallocate(work, (name_len + extra_len) as u64)?;
     let mut name = vec![0u8; name_len];
     let mut extra = vec![0u8; extra_len];
     let name_at = member.local_offset.checked_add(30).ok_or(Error::Hostile)?;
@@ -665,13 +664,7 @@ fn read_exact_at(
 
 fn account(work: &mut Work<'_>, memory: u64, temporary: u64) -> Result<(), Error> {
     gate(work)?;
-    if memory > work.bounds.budget.max_memory_bytes || temporary > work.bounds.budget.max_bytes {
-        return Err(Error::TooLarge);
-    }
-    match work.account.grow(memory, temporary)? {
-        Admit::Ready => Ok(()),
-        Admit::Waiting => Err(Error::Waiting),
-    }
+    charge_fresh(work, memory, temporary)
 }
 
 fn gate(work: &Work<'_>) -> Result<(), Error> {

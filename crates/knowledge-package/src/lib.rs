@@ -5,16 +5,19 @@
 //! - [`capture`] writes a private archive, validates it, then hard-links it without replacement.
 //! - [`stage`] copies verified payloads into an admitted private directory and keeps the previous complete generation.
 //! - [`apply`] calls [`SafeApply`] and [`GitTransactions`]. It does not write the destination or run Git.
-//! - [`Expansion`] is the process admission seam (`knowledge_core::admission::Holding::grow` / `written`).
+//! - [`Work`] borrows one [`knowledge_core::admission::Holding`]. `grow` runs before a buffer or generated write, and `written` runs after the bytes are on the volume.
 //!
 //! Package identity and digests are data. They do not grant mounts, roots, or signer authority.
 //! EPUB publication stays with the processing owner. This crate does not activate a durable library.
+//! Index search stays with the retrieval kernel. Bundle verification stays with the history owner.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use archive::{Member, Out, hex, method_of, stream, write_zip};
+use knowledge_core::admission::{Account, Decision, Error as AdmissionError, Holding, Origin};
 use knowledge_core::backend::Budget;
 use knowledge_core::data::{ContentDigest, RelativePath};
+use knowledge_core::jobs::Reservation;
 use manifest::operation_id;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -29,27 +32,6 @@ mod manifest;
 
 /// Format identifier stored in `manifest.json`.
 pub const FORMAT: &str = "omni.knowledge-package";
-
-/// Admission result from the single process account.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Admit {
-    /// The account charged this request.
-    Ready,
-    /// Current availability is exhausted. Nothing was charged.
-    Waiting,
-}
-
-/// The only memory and generated-storage account this crate will call.
-///
-/// Forward `grow` to `knowledge_core::admission::Holding::grow` and `written` to `Holding::written`.
-/// Map `Decision::Waiting` to [`Admit::Waiting`] and whole-limit refusal to [`Error::TooLarge`].
-/// Do not finish the holding in this call. Finish it after returned buffers are dropped.
-pub trait Expansion {
-    /// Charge before an allocation or generated write.
-    fn grow(&mut self, memory_bytes: u64, temporary_bytes: u64) -> Result<Admit, Error>;
-    /// Reconcile bytes already written on the selected volume.
-    fn written(&mut self, bytes: u64) -> Result<(), Error>;
-}
 
 /// Storage no-clobber apply. `apply_text_change` is the storage owner operation.
 ///
@@ -74,6 +56,8 @@ pub trait SafeApply {
 
 /// History handoff. The Git owner verifies and imports an inert bundle.
 ///
+/// The fixed history seam is `History::prepare`, `publish`, `inspect`, and
+/// `prepare_confirmation` at `2c86db6`. That seam has no `git bundle verify`.
 /// This crate does not invoke Git, hooks, or network operations.
 pub trait GitTransactions {
     /// Record one staged bundle for a later history-owner admission.
@@ -203,12 +187,16 @@ pub struct Bounds {
     pub quotas: Quotas,
 }
 
-/// Borrowed account, deadline, and running actual counters.
+/// Borrowed holding, deadline, and running actual counters.
+///
+/// `holding` is a capability from [`knowledge_core::admission::Account::current`].
+/// Dropping it releases nothing. This crate never calls `finish`; the host finishes
+/// after returned buffers and staged files are dropped or settled.
 pub struct Work<'a> {
     /// Call ceilings.
     pub bounds: &'a Bounds,
-    /// Process admission seam.
-    pub account: &'a mut dyn Expansion,
+    /// Same-account capability. Growth is preallocation, not a second pool.
+    pub holding: &'a mut Holding,
     /// Cooperative cancellation flag.
     pub cancel: &'a AtomicBool,
     /// Deadline derived from `budget.max_millis`.
@@ -225,7 +213,7 @@ impl<'a> Work<'a> {
     /// Reject a zero ceiling and record the deadline.
     pub fn new(
         bounds: &'a Bounds,
-        account: &'a mut dyn Expansion,
+        holding: &'a mut Holding,
         cancel: &'a AtomicBool,
     ) -> Result<Self, Error> {
         let quotas = bounds.quotas;
@@ -248,13 +236,22 @@ impl<'a> Work<'a> {
             .ok_or(Error::Invalid)?;
         Ok(Self {
             bounds,
-            account,
+            holding,
             cancel,
             deadline,
             read_bytes: 0,
             expanded: 0,
             files: 0,
         })
+    }
+
+    /// Grow `holding` before the caller allocates or writes.
+    ///
+    /// Freed scratch stays charged until the host finishes the holding, so a dropped
+    /// buffer cannot release another caller's bytes. Waiting leaves the holding unchanged.
+    /// A need above the whole account is [`Error::TooLarge`].
+    pub fn charge(&mut self, memory_bytes: u64, temporary_bytes: u64) -> Result<(), Error> {
+        charge_fresh(self, memory_bytes, temporary_bytes)
     }
 }
 
@@ -789,7 +786,7 @@ pub fn capture(
     let finished = write_zip(file, &refs)?;
     finished.sync_all().map_err(|_| Error::Io)?;
     for part in &parts {
-        work.account.written(part.2.len() as u64)?;
+        note_written(work, part.2.len() as u64)?;
     }
     drop(parts);
     let mut check = File::open(&partial).map_err(|_| Error::Io)?;
@@ -1147,7 +1144,7 @@ fn method_for(role: Role) -> Result<Method, Error> {
 }
 
 fn read_source(reader: &mut dyn Read, work: &mut Work<'_>) -> Result<Vec<u8>, Error> {
-    account_memory(work, 8192)?;
+    let _scratch = preallocate(work, 8192)?;
     let mut bytes = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -1230,24 +1227,100 @@ fn blob_for(items: &[Digested], role: Role) -> Option<BlobRef> {
         })
 }
 
-fn account_memory(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
-    if bytes > work.bounds.budget.max_memory_bytes {
-        return Err(Error::TooLarge);
-    }
-    match work.account.grow(bytes, 0)? {
-        Admit::Ready => Ok(()),
-        Admit::Waiting => Err(Error::Waiting),
+/// Scratch reservation on the same account. Finish runs when this value drops, after the buffer.
+pub(crate) struct Scratch {
+    holding: Option<Holding>,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Some(mut holding) = self.holding.take() {
+            let _ = holding.finish();
+        }
     }
 }
 
-fn account_temporary(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
-    if bytes > work.bounds.budget.max_bytes {
+/// Reserve `bytes` before a buffer that dies before the call returns.
+///
+/// The returned capability is not the caller's retained holding. Finishing it
+/// does not release retained output or another job's charge.
+pub(crate) fn preallocate(work: &Work<'_>, bytes: u64) -> Result<Scratch, Error> {
+    if work.cancel.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
+    if Instant::now() >= work.deadline {
+        return Err(Error::Deadline);
+    }
+    if bytes > work.bounds.budget.max_memory_bytes {
         return Err(Error::TooLarge);
     }
-    match work.account.grow(0, bytes)? {
-        Admit::Ready => Ok(()),
-        Admit::Waiting => Err(Error::Waiting),
+    if bytes == 0 {
+        return Ok(Scratch { holding: None });
     }
+    let account = Account::current().map_err(admission_error)?;
+    match account
+        .reserve(
+            Reservation {
+                memory_bytes: bytes,
+                temporary_bytes: 0,
+            },
+            Origin::BeforeVerification,
+        )
+        .map_err(admission_error)?
+    {
+        Decision::Ready(holding) => Ok(Scratch {
+            holding: Some(holding),
+        }),
+        Decision::Waiting(_) => Err(Error::Waiting),
+    }
+}
+
+fn admission_error(error: AdmissionError) -> Error {
+    match error {
+        AdmissionError::TooLargeMemory | AdmissionError::TooLargeStorage => Error::TooLarge,
+        _ => Error::Indeterminate,
+    }
+}
+
+fn account_memory(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
+    charge_fresh(work, bytes, 0)
+}
+
+fn account_temporary(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
+    charge_fresh(work, 0, bytes)
+}
+
+pub(crate) fn charge_fresh(
+    work: &mut Work<'_>,
+    memory_bytes: u64,
+    temporary_bytes: u64,
+) -> Result<(), Error> {
+    if memory_bytes > work.bounds.budget.max_memory_bytes
+        || temporary_bytes > work.bounds.budget.max_bytes
+    {
+        return Err(Error::TooLarge);
+    }
+    if memory_bytes == 0 && temporary_bytes == 0 {
+        return Ok(());
+    }
+    match work.holding.grow(Reservation {
+        memory_bytes,
+        temporary_bytes,
+    }) {
+        Ok(Decision::Ready(())) => Ok(()),
+        Ok(Decision::Waiting(_)) => Err(Error::Waiting),
+        Err(error) => Err(admission_error(error)),
+    }
+}
+
+pub(crate) fn note_written(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    work.holding
+        .written(bytes)
+        .map(|_| ())
+        .map_err(|_| Error::Indeterminate)
 }
 
 fn prepare_dir(path: &Path) -> Result<(), Error> {

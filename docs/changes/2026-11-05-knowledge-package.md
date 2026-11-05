@@ -14,8 +14,18 @@ Payload expansion uses actual output counts and the `Expansion` seam. Declared s
 Capture links a validated private archive only when the destination is absent. Staging keeps an incomplete generation for inspection and does not delete unrelated private files.
 `apply` forwards core and original files to storage and an inert history bundle to the history owner.
 
-## Remaining Integration
+## Admission
 
-Link `Expansion` to `knowledge_core::admission::Holding::grow` and `written` when that module is in this workspace.
-Storage still performs `apply_text_change` and exclusive original create. History still verifies and imports bundles.
-Direct STORED index search, SSH signature trust, and foreign v1 publication remain unwired. EPUB stays with processing.
+`62228e5` is unchanged. `b4427e9` fetches frozen `d51cdde` without editing that commit's core text.
+`Work` now borrows `Holding`. Retained names and kept payloads call `grow` before allocation.
+Scratch buffers reserve another holding on `Account::current` and `finish` only after those buffers drop.
+`written` runs after a generated payload is on the private volume. This crate does not finish the caller's holding.
+
+## Owner boundaries
+
+`crates/knowledge-package/OWNER.md` is the public handoff.
+Storage `apply_text_change` is still the host `SafeApply` call. `knowledge-storage` is not a committed member of this workspace, so this crate does not link it and does not write destinations.
+History `2c86db6` is the only Git seam to consume. It has no bundle verifier. `admit_inert_bundle` stays inert. This crate does not run Git.
+STORED index query belongs to the retrieval kernel. `compatible: true` stays `Unsupported`.
+EPUB stays `knowledge_processing` `read_epub` / `export_epub`. A package snapshot has no EPUB function.
+SSH trust and foreign v1 publication stay refused rather than marked valid.

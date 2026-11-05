@@ -1,63 +1,76 @@
 use crc32fast::Hasher;
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
+use knowledge_core::admission::{Account, Configuration, Decision, Holding, Origin, Scheduling};
 use knowledge_core::backend::Budget;
 use knowledge_core::data::{ContentDigest, RelativePath};
+use knowledge_core::jobs::Reservation;
 use knowledge_package::{
-    Admit, ApplyOutcome, ApplyState, Availability, Bounds, Capture, DigestState, Error, Expansion,
-    ExternalRef, GitAdmit, GitTransactions, Input, Method, Preset, Quotas, Role, SafeApply,
-    V1HostContext, V1State, Window, Work, apply, capture, inspect, stage, v1_import_plan,
+    ApplyOutcome, ApplyState, Availability, Bounds, Capture, DigestState, Error, ExternalRef,
+    GitAdmit, GitTransactions, Input, Method, Preset, Quotas, Role, SafeApply, V1HostContext,
+    V1State, Window, Work, apply, capture, inspect, stage, v1_import_plan,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Mutex, MutexGuard, Once};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-struct Ledger {
-    mem_limit: u64,
-    mem: AtomicU64,
-    store_limit: u64,
-    promised: AtomicU64,
+struct Session {
+    _guard: MutexGuard<'static, ()>,
+    holding: Holding,
 }
 
-impl Ledger {
-    fn wide() -> Self {
-        Self {
-            mem_limit: 64 * 1024 * 1024,
-            mem: AtomicU64::new(0),
-            store_limit: 64 * 1024 * 1024,
-            promised: AtomicU64::new(0),
-        }
-    }
-    fn used(&self) -> u64 {
-        self.mem.load(Ordering::Relaxed)
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.holding.finish();
     }
 }
 
-impl Expansion for Ledger {
-    fn grow(&mut self, memory_bytes: u64, temporary_bytes: u64) -> Result<Admit, Error> {
-        if memory_bytes > self.mem_limit || temporary_bytes > self.store_limit {
-            return Err(Error::TooLarge);
-        }
-        let mem = self.mem.load(Ordering::Relaxed);
-        let promised = self.promised.load(Ordering::Relaxed);
-        if mem.saturating_add(memory_bytes) > self.mem_limit
-            || promised.saturating_add(temporary_bytes) > self.store_limit
-        {
-            return Ok(Admit::Waiting);
-        }
-        self.mem.fetch_add(memory_bytes, Ordering::Relaxed);
-        self.promised.fetch_add(temporary_bytes, Ordering::Relaxed);
-        Ok(Admit::Ready)
-    }
-    fn written(&mut self, bytes: u64) -> Result<(), Error> {
-        let promised = self.promised.load(Ordering::Relaxed);
-        if bytes > promised {
-            return Err(Error::Invalid);
-        }
-        self.promised.fetch_sub(bytes, Ordering::Relaxed);
-        Ok(())
+fn open_account() -> Session {
+    static START: Once = Once::new();
+    static GATE: Mutex<()> = Mutex::new(());
+    START.call_once(|| {
+        let path = std::env::temp_dir().join("pkg-m5-account");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir(&path).expect("account dir");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
+        let directory = File::open(&path).expect("account fd");
+        Account::start(
+            directory,
+            Configuration {
+                memory_bytes: Some(16 * 1024 * 1024),
+                storage_bytes: Some(256 * 1024 * 1024),
+            },
+            Scheduling {
+                max_pending: 8,
+                max_records: 256,
+                max_descriptor_bytes: 1 << 20,
+                per_mount: 4,
+            },
+        )
+        .expect("start account");
+    });
+    let guard = GATE.lock().unwrap_or_else(|error| error.into_inner());
+    let account = Account::current().expect("current account");
+    let holding = match account
+        .reserve(
+            Reservation {
+                memory_bytes: 1,
+                temporary_bytes: 1,
+            },
+            Origin::BeforeVerification,
+        )
+        .expect("reserve")
+    {
+        Decision::Ready(holding) => holding,
+        Decision::Waiting(_) => panic!("account waiting before the call"),
+    };
+    Session {
+        _guard: guard,
+        holding,
     }
 }
 
@@ -144,8 +157,14 @@ fn bounds(archive: u64) -> Bounds {
     }
 }
 
-fn work<'a>(bounds: &'a Bounds, ledger: &'a mut Ledger, cancel: &'a AtomicBool) -> Work<'a> {
-    Work::new(bounds, ledger, cancel).expect("work")
+fn work<'a>(bounds: &'a Bounds, holding: &'a mut Holding, cancel: &'a AtomicBool) -> Work<'a> {
+    Work::new(bounds, holding, cancel).expect("work")
+}
+
+fn run<T>(limits: &Bounds, cancel: &AtomicBool, body: impl FnOnce(&mut Work<'_>) -> T) -> T {
+    let mut session = open_account();
+    let mut job = work(limits, &mut session.holding, cancel);
+    body(&mut job)
 }
 
 fn rel(value: &str) -> RelativePath {
@@ -246,30 +265,30 @@ fn roundtrip_preserves_bytes_and_skips_history_index_and_conflicts() {
         destination: &dest,
     };
     let limits = bounds(8_000_000);
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let mut job = work(&limits, &mut ledger, &cancel);
-    let captured = capture(&mut request, &mut inputs, &mut job).expect("capture");
+    let captured = run(&limits, &cancel, |job| {
+        capture(&mut request, &mut inputs, job).expect("capture")
+    });
     assert!(captured.linked);
     let mut archive = File::open(&dest).unwrap();
-    let mut ledger = Ledger::wide();
-    let mut job = work(&limits, &mut ledger, &cancel);
-    let preview = inspect(&mut archive, &mut job, &[rel("pages/keep.md")]).expect("inspect");
+    let preview = run(&limits, &cancel, |job| {
+        inspect(&mut archive, job, &[rel("pages/keep.md")]).expect("inspect")
+    });
     assert_eq!(preview.conflicts, vec![rel("pages/keep.md")]);
     assert!(preview.installable);
     assert_eq!(preview.manifest.coverage.omitted, 2);
     assert!(preview.manifest.indexes.is_some());
     let mut archive = File::open(&dest).unwrap();
-    let mut ledger = Ledger::wide();
-    let mut job = work(&limits, &mut ledger, &cancel);
-    let staged = stage(
-        &mut archive,
-        &mut job,
-        &private,
-        "restore1",
-        &[rel("pages/keep.md")],
-    )
-    .expect("stage");
+    let staged = run(&limits, &cancel, |job| {
+        stage(
+            &mut archive,
+            job,
+            &private,
+            "restore1",
+            &[rel("pages/keep.md")],
+        )
+        .expect("stage")
+    });
     let mut home_apply = Home {
         root: home.clone(),
         calls: vec![],
@@ -328,10 +347,10 @@ fn destination_and_require_complete_do_not_clobber() {
         destination: &dest,
     };
     let limits = bounds(1_000_000);
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let mut job = work(&limits, &mut ledger, &cancel);
-    let error = capture(&mut request, &mut inputs, &mut job).expect_err("incomplete");
+    let error = run(&limits, &cancel, |job| {
+        capture(&mut request, &mut inputs, job).expect_err("incomplete")
+    });
     assert_eq!(error, Error::RequireComplete);
     assert_eq!(fs::read(&dest).unwrap(), b"keep");
 }
@@ -357,14 +376,10 @@ fn drift_and_forbidden_source_refuse() {
     let dest = root.join("out.zip");
     let mut request = base_capture(&private, &dest);
     let limits = bounds(1_000_000);
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let error = capture(
-        &mut request,
-        &mut inputs,
-        &mut work(&limits, &mut ledger, &cancel),
-    )
-    .expect_err("drift");
+    let error = run(&limits, &cancel, |job| {
+        capture(&mut request, &mut inputs, job).expect_err("drift")
+    });
     assert_eq!(error, Error::Drift);
     assert!(!dest.exists());
 }
@@ -440,49 +455,44 @@ fn declared_size_ratio_and_admission_do_not_allocate_the_lie() {
     let mut limits = bounds(1_000_000);
     limits.quotas.max_entry_expanded = 64;
     let huge = declared_zip(u32::MAX, b"hi");
-    let mut ledger = Ledger::wide();
-    let error = inspect_with(&huge, &limits, &mut ledger, false);
+    let (error, charged) = inspect_charge(&huge, &limits, false);
     assert_eq!(error, Err(Error::Quota));
-    assert!(ledger.used() < 1_000_000);
+    assert!(charged < 1_000_000);
     let bomb = deflate_bomb(40_000);
     let mut limits = bounds(1_000_000);
     limits.quotas.max_ratio = 4;
     limits.quotas.max_entry_expanded = 80_000;
     assert_eq!(inspect_raw(&bomb, &limits), Err(Error::Ratio));
-    let mut tiny = Ledger {
-        mem_limit: 8,
-        mem: AtomicU64::new(0),
-        store_limit: 1_000_000,
-        promised: AtomicU64::new(0),
-    };
-    let limits = bounds(1_000_000);
+    let mut limits = bounds(1_000_000);
+    limits.budget.max_memory_bytes = 8;
     assert_eq!(
-        inspect_with(
-            &classic(&[item(b"a.txt", b"hi")]),
-            &limits,
-            &mut tiny,
-            false
-        ),
+        inspect_raw(&classic(&[item(b"a.txt", b"hi")]), &limits),
         Err(Error::TooLarge)
     );
-    let mut waiting = Ledger::wide();
-    waiting.mem.store(waiting.mem_limit - 4, Ordering::Relaxed);
+    {
+        let mut session = open_account();
+        let policy = Account::current().expect("account").policy().memory_bytes;
+        let mut wide = bounds(1_000_000);
+        wide.budget.max_memory_bytes = policy.saturating_add(8);
+        let cancel = AtomicBool::new(false);
+        {
+            let mut job = work(&wide, &mut session.holding, &cancel);
+            assert_eq!(
+                job.charge(policy.saturating_add(1), 0),
+                Err(Error::TooLarge)
+            );
+        }
+        assert_eq!(
+            session.holding.remaining().expect("remaining").memory_bytes,
+            1
+        );
+    }
     assert_eq!(
-        inspect_with(
-            &classic(&[item(b"a.txt", b"hi")]),
-            &limits,
-            &mut waiting,
-            false
-        ),
+        inspect_while_memory_is_short(&classic(&[item(b"a.txt", b"hi")]), &bounds(1_000_000)),
         Err(Error::Waiting)
     );
     assert_eq!(
-        inspect_with(
-            &classic(&[item(b"a.txt", b"hi")]),
-            &limits,
-            &mut Ledger::wide(),
-            true
-        ),
+        inspect_charge(&classic(&[item(b"a.txt", b"hi")]), &bounds(1_000_000), true).0,
         Err(Error::Cancelled)
     );
 }
@@ -507,12 +517,9 @@ fn zip64_sparse_offset_reads_the_payload() {
     request.operation_id = "zip64src";
     let limits = bounds(1_000_000);
     let cancel = AtomicBool::new(false);
-    capture(
-        &mut request,
-        &mut inputs,
-        &mut work(&limits, &mut Ledger::wide(), &cancel),
-    )
-    .unwrap();
+    run(&limits, &cancel, |job| {
+        capture(&mut request, &mut inputs, job).unwrap()
+    });
     let mut plain_zip = zip::ZipArchive::new(File::open(&plain).unwrap()).unwrap();
     let mut manifest = String::new();
     plain_zip
@@ -527,13 +534,17 @@ fn zip64_sparse_offset_reads_the_payload() {
     let mut limits = bounds(len);
     limits.budget.max_bytes = len;
     let mut archive = File::open(&path).unwrap();
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let preview =
-        inspect(&mut archive, &mut work(&limits, &mut ledger, &cancel), &[]).expect("zip64");
+    let mut session = open_account();
+    let preview = inspect(
+        &mut archive,
+        &mut work(&limits, &mut session.holding, &cancel),
+        &[],
+    )
+    .expect("zip64");
     assert_eq!(preview.manifest.entries.len(), 1);
     assert_eq!(preview.manifest.entries[0].size_bytes, 2);
-    assert!(ledger.used() < 2_000_000);
+    assert!(session.holding.remaining().expect("remaining").memory_bytes < 2_000_000);
 }
 
 #[test]
@@ -546,16 +557,10 @@ fn interrupted_generation_is_not_replayed() {
     let bytes = classic(&[item(b"a.txt", b"hi")]);
     let mut file = File::open(write_bytes(&root.join("a.zip"), &bytes)).unwrap();
     let limits = bounds(1_000_000);
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let error = stage(
-        &mut file,
-        &mut work(&limits, &mut ledger, &cancel),
-        &private,
-        "op",
-        &[],
-    )
-    .expect_err("interrupted");
+    let error = run(&limits, &cancel, |job| {
+        stage(&mut file, job, &private, "op", &[]).expect_err("interrupted")
+    });
     assert_eq!(error, Error::Interrupted);
     assert_eq!(
         fs::read(private.join("op").join("partial.bin")).unwrap(),
@@ -573,9 +578,10 @@ fn foreign_v1_is_hashed_and_refused() {
     .unwrap();
     fs::write(root.join("page.md"), b"body\r\n").unwrap();
     let limits = bounds(1_000_000);
-    let mut ledger = Ledger::wide();
     let cancel = AtomicBool::new(false);
-    let plan = v1_import_plan(&root, None, &mut work(&limits, &mut ledger, &cancel)).expect("v1");
+    let plan = run(&limits, &cancel, |job| {
+        v1_import_plan(&root, None, job).expect("v1")
+    });
     assert_eq!(plan.state, V1State::CompatibilityRefused);
     assert!(!plan.host_context);
     assert_eq!(plan.files.len(), 1);
@@ -585,12 +591,9 @@ fn foreign_v1_is_hashed_and_refused() {
         revision: "r".into(),
         profile: "p".into(),
     };
-    let again = v1_import_plan(
-        &root,
-        Some(&host),
-        &mut work(&limits, &mut Ledger::wide(), &cancel),
-    )
-    .unwrap();
+    let again = run(&limits, &cancel, |job| {
+        v1_import_plan(&root, Some(&host), job).unwrap()
+    });
     assert_eq!(again.state, V1State::CompatibilityRefused);
     assert!(again.host_context);
 }
@@ -877,21 +880,54 @@ fn zip64_offset(offset: u64) -> Vec<u8> {
 }
 
 fn inspect_raw(bytes: &[u8], limits: &Bounds) -> Result<(), Error> {
-    let mut ledger = Ledger::wide();
-    inspect_with(bytes, limits, &mut ledger, false).map(|_| ())
+    inspect_charge(bytes, limits, false).0
 }
 
-fn inspect_with(
-    bytes: &[u8],
-    limits: &Bounds,
-    ledger: &mut Ledger,
-    cancel: bool,
-) -> Result<(), Error> {
+fn inspect_charge(bytes: &[u8], limits: &Bounds, cancel: bool) -> (Result<(), Error>, u64) {
     let root = dir("raw");
     let path = write_bytes(&root.join("a.zip"), bytes);
     let mut file = File::open(path).unwrap();
     let flag = AtomicBool::new(cancel);
-    inspect(&mut file, &mut work(limits, ledger, &flag), &[]).map(|_| ())
+    let mut session = open_account();
+    let result = inspect(
+        &mut file,
+        &mut work(limits, &mut session.holding, &flag),
+        &[],
+    )
+    .map(|_| ());
+    let charged = session.holding.remaining().expect("remaining").memory_bytes;
+    (result, charged)
+}
+
+fn inspect_while_memory_is_short(bytes: &[u8], limits: &Bounds) -> Result<(), Error> {
+    let root = dir("wait");
+    let path = write_bytes(&root.join("a.zip"), bytes);
+    let mut file = File::open(path).unwrap();
+    let mut session = open_account();
+    let account = Account::current().expect("account");
+    let available = account.status().expect("status").memory_available;
+    let mut blocker = match account
+        .reserve(
+            Reservation {
+                memory_bytes: available.saturating_sub(4),
+                temporary_bytes: 0,
+            },
+            Origin::BeforeVerification,
+        )
+        .expect("blocker")
+    {
+        Decision::Ready(holding) => holding,
+        Decision::Waiting(_) => panic!("blocker was not ready"),
+    };
+    let cancel = AtomicBool::new(false);
+    let result = inspect(
+        &mut file,
+        &mut work(limits, &mut session.holding, &cancel),
+        &[],
+    )
+    .map(|_| ());
+    blocker.finish().expect("finish blocker");
+    result
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> PathBuf {

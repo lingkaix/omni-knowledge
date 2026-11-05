@@ -11,7 +11,7 @@ The public functions below are the frozen integration surface for later CLI and 
 `stage` copies verified payloads into a new private generation. An existing `INCOMPLETE` generation is returned as interrupted and is not rewritten.
 `apply` calls `SafeApply::apply_text_change` or `install_new` and `GitTransactions::admit_inert_bundle`. It does not write the destination and it does not run Git.
 `v1_import_plan` hashes a foreign directory and returns `CompatibilityRefused`. Host context does not fabricate owner, revision, or review facts.
-`Expansion::grow` and `written` are the only memory and generated-storage admission calls. Map them to `knowledge_core::admission::Holding` when that type is linked. Do not finish the holding inside the call.
+`Work` borrows one `knowledge_core::admission::Holding` from `Account::current`. `Holding::grow` runs before each retained buffer or generated write. Scratch that dies inside the call uses a second holding on that same account and `finish`es when the buffer drops. The caller's holding is not finished here. See [OWNER.md](OWNER.md).
 
 Indexes, history bundles, and journals stay inside the private generation. Core and original paths are the only home candidates. Conflicts are not sent to storage.
 
@@ -28,7 +28,8 @@ This crate adds no corpus cap and no second reservation counter.
 | --- | --- | --- |
 | Owned framing reader | Reject traversal, links, encryption, overlap, and ZIP64 disagreement before copy. | The mature ZIP writer would still accept hostile input through a permissive extract path. |
 | Actual expand counter | Stop bombs when output exceeds the caller quota or ratio. | Declared sizes would choose the buffer. |
-| `Expansion` calls | Use the one process account for every buffer and generated write. | A private pool could admit work the account refused. |
+| `Holding::grow` / `written` | Charge the one process account before retained buffers and generated writes. | A private counter could admit work the account refused. |
+| Scratch `finish` | Release a dead inflate window without releasing retained names or output. | Every header would stay charged until the host finished the whole call. |
 | Private generation plus owner traits | Keep a previous complete generation and let storage and history perform the final write. | This crate would grow a second rollback and Git engine. |
 
 No registry, workflow engine, or destination writer is required for this slice.
