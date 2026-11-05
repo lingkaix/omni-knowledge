@@ -1226,7 +1226,9 @@ mod admitted {
         // not turn a path/marker into authority. Fresh native root/policy/source guards still own IO.
         // The outer tuple binds vectors/model; vector-only work reuses its unchanged lexical member.
         writer.0.update(b"omni-native-corpus-v2\0");
-        serde_json::to_writer(&mut writer, &(&snapshot.library_id, &snapshot.root))?;
+        // library_id is intentionally NOT a component: supported legacy upgrades can alter
+        // it while the previous complete generation MUST remain readable after a failed build.
+        serde_json::to_writer(&mut writer, &snapshot.root)?;
         serde_json::to_writer(&mut writer, &snapshot.records)?;
         writer.0.update(build_identity().as_bytes());
         Ok(native()?.cache.join(hex::encode(writer.0.finalize())))
