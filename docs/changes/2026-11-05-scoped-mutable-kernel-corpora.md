@@ -1,0 +1,11 @@
+# Scoped mutable kernel corpora
+
+Private forward repair; not full M4/native acceptance.
+
+The compatibility Root had keyed its external lexical corpus only by equal record content plus consuming build. That corpus contains the actual kernel's mutable writer LOCK/CURRENT, not just content-addressed immutable objects. Independently initialized homes with equal records could therefore contend for one writer; a real empty-home control holding the first actual writer FD reproduces `Kernel(conflict: scope writer already active)` on the second. This is the same failure class as public e811 hosted Linux, not proof that every hosted collision has been exhaustively explained.
+
+The adapter now namespaces the corpus using a versioned domain, snapshot library marker and original build-root DATA, before the unchanged record/build identity. Native current selected root, source, policy and exclusion guards still authorize IO; the path/marker is not a grant. A moved/copied complete snapshot keeps its original build-root bytes, so lookup of its immutable component remains portable. Separately rebuilt same-lineage homes get distinct mutable writer state. Vector-only work still reuses that snapshot's unchanged lexical member.
+
+The actual writer-FD control fails on pre-repair6bc and passes with the repair. Removing only the build-root component makes the same-lineage copied-home branch fail; restoring it passes. The initial purported-empty fixture still contained seeded sources and passed OLD; that nondeciding output is retained, followed by the deciding control with only explicitly created seed files removed. No original required assertion, lock, engine, protocol, or resource ceiling was relaxed. The fixture prepays its extra FD lifetime on the same account and drops the actual lock before its credit.
+
+This is not an alternative writer/queue engine or the final full-generation publication architecture. Same selected-home writer contention must still use the real foreground/visible queued lifecycle; whole lexical/vector tuple publication, provider execution, Root corpus streaming and native/full-product acceptance remain separate required work. Public e811 hosted RED remains RED until a new actual run qualifies its successor.

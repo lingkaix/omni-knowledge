@@ -56,6 +56,74 @@ fn native_generation(kb: &KnowledgeBase) -> PathBuf {
         .join(reference["generations"]["shard-0"].as_str().unwrap())
 }
 
+/// Independent actual libraries must not compete for one content-only mutable kernel pointer.
+#[test]
+fn independent_empty_libraries_never_share_the_mutable_kernel_writer() {
+    let (_a, first) = library(false);
+    let (_b, second) = library(false);
+    let (_c, mut copied) = library(false);
+    copied.config.library_id = first.config.library_id.clone();
+    fs::write(
+        copied.root.join(CONFIG_FILE),
+        serde_json::to_vec(&copied.config).unwrap(),
+    )
+    .unwrap();
+    for root in [&first.root, &second.root, &copied.root] {
+        for path in [
+            "index.md",
+            "log.md",
+            "AGENTS.md",
+            ".gitignore",
+            "raw/llm-wiki.source.txt",
+            "raw/open-knowledge-format.source.txt",
+            "raw/OKF-LICENSE.txt",
+            "wiki/index.md",
+            "wiki/sources/llm-wiki.md",
+            "wiki/sources/open-knowledge-format.md",
+        ] {
+            fs::remove_file(root.join(path)).unwrap();
+        }
+    }
+    first.index(&IndexOptions::default()).unwrap();
+    let work = match knowledge_retrieval::Work::reserve(
+        knowledge_core::jobs::Reservation {
+            memory_bytes: 65536,
+            temporary_bytes: 0,
+        },
+        knowledge_core::admission::Origin::BeforeVerification,
+    )
+    .unwrap()
+    {
+        knowledge_core::admission::Decision::Ready(work) => work,
+        _ => panic!("fixture lock admission"),
+    };
+    let generation = native_generation(&first);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(generation.parent().unwrap().join("LOCK"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    // Hold the ACTUAL first kernel's writer FD, not a boolean/mock 'busy' response.
+    // The second source tree/marker is independently selected, despite identical empty content.
+    let result = second.index(&IndexOptions::default());
+    let copied_result = copied.index(&IndexOptions::default());
+    drop(lock);
+    result.expect("an unrelated native library cannot inherit the first library's active writer");
+    copied_result.expect(
+        "a separately rebuilt same-lineage home cannot inherit another selected root's writer",
+    );
+    assert_ne!(
+        kernel_reference(&first)["corpus"],
+        kernel_reference(&second)["corpus"]
+    );
+    assert_ne!(
+        kernel_reference(&first)["corpus"],
+        kernel_reference(&copied)["corpus"]
+    );
+    drop(work);
+}
+
 /// Advances fixture metadata deterministically without sleeping for timestamp precision.
 fn touch_after(path: &Path, indexed_at: u64) {
     File::open(path)

@@ -1220,10 +1220,13 @@ mod admitted {
     /// Bind one complete legacy processing snapshot to one external real-kernel corpus.
     pub(super) fn corpus(snapshot: &Snapshot) -> Result<PathBuf> {
         let mut writer = HashWriter(Sha256::new());
-        // Portable content identity survives an explicit legacy-marker upgrade or folder move.
-        // Native library ownership remains independently checked by storage and verify-on-delivery.
-        // This is the lexical component identity. The outer freshly leased/validated snapshot
-        // still binds its vector/model tuple; vector-only work can reuse an unchanged lexical member.
+        // This kernel corpus has a MUTABLE writer/current pointer: equal content must not make
+        // independently initialized libraries (or separately rebuilt folder copies) share it.
+        // Original build-root data stays unchanged when a complete snapshot is moved; this does
+        // not turn a path/marker into authority. Fresh native root/policy/source guards still own IO.
+        // The outer tuple binds vectors/model; vector-only work reuses its unchanged lexical member.
+        writer.0.update(b"omni-native-corpus-v2\0");
+        serde_json::to_writer(&mut writer, &(&snapshot.library_id, &snapshot.root))?;
         serde_json::to_writer(&mut writer, &snapshot.records)?;
         writer.0.update(build_identity().as_bytes());
         Ok(native()?.cache.join(hex::encode(writer.0.finalize())))
@@ -1723,7 +1726,7 @@ pub struct VectorRecord {
 pub(crate) struct Snapshot {
     /// Manifest schema version.
     pub version: u32,
-    /// Original build path, used only to validate manifests without a stable library identity.
+    /// Original build path: legacy validation and derived mutable-cache namespace, never authority.
     pub root: PathBuf,
     /// Stable marker identity; whole-folder copies intentionally retain the same lineage.
     #[serde(default)]
