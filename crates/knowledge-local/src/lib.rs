@@ -433,6 +433,8 @@ fn copy_overlap(retained: &mut [u8], just_read: &[u8], position: u64, range_off:
     retained[dst..dst + len].copy_from_slice(&just_read[src..src + len]);
 }
 
+/// Enumerate current admitted entries with borrowed-name path admission before any owned path copy.
+/// Partial results retain accepted entries; frame/entry accounting covers every coexisting path spelling.
 fn walk<P: LocalReadPolicy>(
     mount: &LocalMount<P>,
     root: &File,
@@ -503,6 +505,17 @@ fn walk<P: LocalReadPolicy>(
                         progress(examined, bytes_read, started),
                     ));
                 };
+                // Even excluded/unsupported entries must not allocate their temporary path first.
+                if child_path_len(prefix, text)
+                    .and_then(|bytes| try_reserve(memory, bytes, budget.max_memory_bytes))
+                    .is_none()
+                {
+                    return Ok(partial(
+                        entries,
+                        EnumerationStop::BudgetExhausted,
+                        progress(examined, bytes_read, started),
+                    ));
+                }
                 let relative = child_path(prefix, text);
                 let Ok(path) = RelativePath::new(relative) else {
                     return Ok(partial(
@@ -609,14 +622,13 @@ fn walk<P: LocalReadPolicy>(
                             return stop_or_err(entries, examined, bytes_read, started, error);
                         }
                     };
-                    entries.push(ListedEntry {
-                        path: path.clone(),
-                        kind,
-                        stat,
-                    });
+                    // Two retained entry/snapshot paths plus this pre-reserved frame prefix.
+                    // Move the original into the entry: never create a fourth simultaneous spelling.
+                    let frame_prefix = path.as_str().to_owned();
+                    entries.push(ListedEntry { path, kind, stat });
                     stack.push(Frame {
                         iter: child_iter,
-                        prefix: path.as_str().to_string(),
+                        prefix: frame_prefix,
                         dir: child,
                     });
                 } else {
@@ -1008,6 +1020,16 @@ fn decimal_eq(text: &str, value: u64) -> bool {
     text.as_bytes() == &buf[cursor..]
 }
 
+/// Measure the next UTF-8 path from borrowed components before allocation; overflow refuses admission.
+fn child_path_len(prefix: &str, name: &str) -> Option<u64> {
+    prefix
+        .len()
+        .checked_add(name.len())?
+        .checked_add(usize::from(!prefix.is_empty()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+/// Construct an owned relative spelling only after child_path_len fits the current reservation.
 fn child_path(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
