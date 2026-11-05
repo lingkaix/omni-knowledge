@@ -1,5 +1,8 @@
 //! Local Git object/ref transactions; home file installation and authorization belong to callers.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+mod writer_lock;
+use writer_lock::OwnedWriterLock as WriterLock;
 
 mod read;
 pub use read::{
@@ -274,15 +277,6 @@ pub struct History {
     /// Trusted current attribution context.
     owner: OwnerContext,
 }
-/// Explicitly unlock the owned open-file description before close; unrelated concurrent fork/exec windows must not prolong it.
-struct WriterLock(File);
-impl Drop for WriterLock {
-    /// Closing alone can leave a transient fork-inherited descriptor holding the flock until its exec.
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
 /// Per-call exact deadline and finite retained output bound, from the existing admitted claim.
 struct Call {
     /// End of the entire public call, not a timeout restarted per subprocess.
@@ -776,7 +770,7 @@ impl History {
                 Error::Io
             }
         })?;
-        Ok(WriterLock(file))
+        Ok(WriterLock::new(file))
     }
 
     /// Resolve only the fixed accepted ref or validated immutable proposal namespace.
