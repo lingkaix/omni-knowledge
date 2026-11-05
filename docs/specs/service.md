@@ -18,7 +18,9 @@ IDs are opaque nonempty strings, not authority, paths, hashes, or caller-selecte
 `Digest` is lowercase hexadecimal SHA-256, exactly 64 characters.
 `U64` is a canonical unsigned decimal string, including `"0"`, with no leading zeroes, bounded by 18446744073709551615.
 This avoids JSON integer loss for large offsets, lengths, and sequence values.
-Other integers are JSON safe integers; counts, offsets, ranks, and limits cannot be negative.
+Other integers are JSON safe integers and use canonical integer-token spelling only; counts, offsets, ranks, and limits cannot be negative.
+Reject exponent notation (`1e2`), fractional spelling (`100.0`), and negative zero (`-0`) in integer fields with a typed error before effects.
+This integer-token rule does not reinterpret genuine non-integer numeric fields or the separately defined decimal-string types.
 Timestamps are UTC RFC 3339 strings and never ordering authority.
 `RelativePath` uses normalized `/` separators with no absolute root, empty segment, dot segment, NUL, or traversal.
 `RootRelativePath` is either a `RelativePath` or the empty string, which denotes the selected library/mount root for browsing only.
@@ -27,6 +29,8 @@ Non-UTF-8 filenames return `unsupported` with explicit coverage, not lossy alias
 Strings, arrays, query results, byte ranges, and frames are bounded; exceeding a limit returns `budget_exhausted`, not truncation disguised as completion.
 A control frame is at most 1 MiB; `read_range` returns at most 512 KiB of bytes per call, base64 encoded.
 Larger bodies use repeated bounded ranges or admitted local handles inside the service, never an unbounded media JSON frame.
+Status and MCP expose the effective process-wide memory and generated-storage budgets, including configuration overrides and visible waiting-for-memory work, under [storage's accounting policy](storage.md#effective-resource-accounting).
+Transport admission does not create a second memory pool or release charges belonging to live children, models, runtimes, or reader pins.
 Control-frame limits also bound text edits/import control data; oversized inline edits fail explicitly and are never silently truncated.
 
 ```typescript
