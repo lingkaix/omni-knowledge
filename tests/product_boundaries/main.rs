@@ -275,10 +275,39 @@ fn set_nonblocking(fd: i32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn start_ticks(pid: u32) -> Option<u64> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = text.rsplit_once(')')?.1;
     rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Independent native birth observation for the controller, not the product's RSS/collector.
+/// The field retains its legacy name: Linux ticks, Darwin checked start microseconds.
+#[cfg(target_os = "macos")]
+fn start_ticks(pid: u32) -> Option<u64> {
+    let native_pid = i32::try_from(pid).ok().filter(|p| *p > 1)?;
+    // SAFETY: exact public libproc ABI and fixed owned buffer; no pointer escapes this call.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let n = unsafe {
+        libc::proc_pidinfo(
+            native_pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            std::mem::size_of_val(&info) as i32,
+        )
+    };
+    if n as usize != std::mem::size_of_val(&info)
+        || info.pbi_pid != pid
+        || info.pbi_start_tvsec == 0
+        || info.pbi_start_tvusec >= 1_000_000
+    {
+        return None;
+    }
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)
 }
 
 fn same_process(pid: u32, ticks: Option<u64>) -> bool {

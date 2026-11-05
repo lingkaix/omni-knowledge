@@ -679,11 +679,36 @@ fn native_cursor_follows_inventory_and_restart_never_assumes_continuity() {
     // Real native work loss must lead to bounded inventory/known-descendant reconciliation, never cursor advancement.
     fs::write(f.root().join("pages/gap-old.md"), b"known descendant").unwrap();
     assert!(f.scan().complete);
-    let cursor_count = store
-        .replay_tracking(0, &f.preflight())
-        .unwrap()
-        .event_cursors
-        .len();
+    // Replay is deliberately paged under the unchanged envelope. The storm adds
+    // enough observations/checkpoints to exceed one page; a truncated first page
+    // cannot establish missing deletion or cursor facts. Fold one paid page at a time.
+    let replay_facts = || {
+        let mut offset = 0;
+        let mut cursors = 0;
+        let mut deleted = false;
+        let mut created = false;
+        loop {
+            let page = store.replay_tracking(offset, &f.preflight()).unwrap();
+            assert!(page.issue.is_none());
+            cursors += page.event_cursors.len();
+            deleted |= page.observations.iter().any(|o| {
+                o.stat.path.as_str() == "pages/gap-old.md" && o.change == ChangeKind::Deleted
+            });
+            created |= page.observations.iter().any(|o| {
+                o.stat.path.as_str() == "pages/storm-7.md" && o.change == ChangeKind::Created
+            });
+            if page.complete {
+                break;
+            }
+            assert!(
+                page.next_offset > offset,
+                "bounded native replay made no progress"
+            );
+            offset = page.next_offset;
+        }
+        (cursors, deleted, created)
+    };
+    let cursor_count = replay_facts().0;
     let mut limited = mount
         .watch(Budget {
             max_files: 2,
@@ -728,23 +753,53 @@ fn native_cursor_follows_inventory_and_restart_never_assumes_continuity() {
         )
         .unwrap();
     assert!(reconciled.complete);
-    let replay = store.replay_tracking(0, &f.preflight()).unwrap();
-    assert_eq!(replay.event_cursors.len(), cursor_count);
+    let (after_cursors, deleted, created) = replay_facts();
+    assert_eq!(after_cursors, cursor_count);
     assert!(
-        replay
-            .observations
-            .iter()
-            .any(|o| o.stat.path.as_str() == "pages/gap-old.md" && o.change == ChangeKind::Deleted),
-        "actual controlled native replay after loss: {:#?}",
-        replay.observations
+        deleted,
+        "known descendant deletion absent from COMPLETE replay"
     );
-    assert!(
-        replay
-            .observations
-            .iter()
-            .any(|o| o.stat.path.as_str() == "pages/storm-7.md" && o.change == ChangeKind::Created)
-    );
+    assert!(created, "actual storm source absent from COMPLETE replay");
     limited.close().unwrap();
+}
+
+/// A bounded first replay page is not the whole visible journal; no ceiling increase.
+#[test]
+fn bounded_native_replay_pages_reach_later_known_deletions() {
+    let f = Fixture::new();
+    fs::write(f.root().join("pages/old.md"), b"old").unwrap();
+    assert!(f.scan().complete);
+    for n in 0..20 {
+        fs::write(f.root().join(format!("pages/new-{n}.md")), b"new").unwrap();
+    }
+    fs::remove_file(f.root().join("pages/old.md")).unwrap();
+    assert!(f.scan().complete);
+    let store = f.store();
+    let first = store.replay_tracking(0, &f.preflight()).unwrap();
+    assert!(!first.complete);
+    assert!(
+        !first
+            .observations
+            .iter()
+            .any(|o| o.change == ChangeKind::Deleted)
+    );
+    let mut offset = first.next_offset;
+    drop(first);
+    let mut deleted = false;
+    loop {
+        let page = store.replay_tracking(offset, &f.preflight()).unwrap();
+        assert!(page.issue.is_none());
+        deleted |= page
+            .observations
+            .iter()
+            .any(|o| o.stat.path.as_str() == "pages/old.md" && o.change == ChangeKind::Deleted);
+        if page.complete {
+            break;
+        }
+        assert!(page.next_offset > offset);
+        offset = page.next_offset;
+    }
+    assert!(deleted);
 }
 
 /// Sequential native writers preserve source IDs from visible evidence, not equal content.
