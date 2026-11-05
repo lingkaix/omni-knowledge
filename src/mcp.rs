@@ -5,26 +5,27 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+/// Existing retained-product request ceiling, excluding LF or CRLF delimiters.
+const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
 /// Serves newline-delimited JSON-RPC on stdin/stdout; diagnostics never enter protocol stdout.
 /// Each request opens the selected library afresh so external edits are observed between calls.
+/// Oversized or invalid UTF-8 frames terminate the transport with fixed, input-free errors.
 pub fn serve(default_root: &Path) -> Result<()> {
     let input = io::stdin();
+    let mut input = input.lock();
     let mut output = io::stdout().lock();
-    for line in input.lock().lines() {
-        let line = line?;
-        if line.len() > 4 * 1024 * 1024 {
-            bail!("MCP request exceeds 4 MiB");
-        }
+    while let Some(line) = read_request(&mut input)? {
         if line.trim().is_empty() {
             continue;
         }
         let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_) => {
                 writeln!(
                     output,
                     "{}",
-                    json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":error.to_string()}})
+                    json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON-RPC request"}})
                 )?;
                 output.flush()?;
                 continue;
@@ -43,6 +44,49 @@ pub fn serve(default_root: &Path) -> Result<()> {
         output.flush()?;
     }
     Ok(())
+}
+
+/// Acquire one bounded byte frame before UTF-8/JSON parsing; None means empty EOF.
+/// Retain at most the request ceiling plus one possible CR; only LF can make that CR a delimiter.
+/// A valid final EOF frame is preserved, while oversized/invalid UTF-8 input returns fixed errors.
+/// Refuse an overrun without draining to a delimiter or dispatching any accepted prefix.
+/// Retry interrupted reads like the former line reader; propagate other native read failures.
+fn read_request(input: &mut impl BufRead) -> Result<Option<String>> {
+    let mut bytes = Vec::new();
+    let terminated = loop {
+        let available = match input.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result.context("Read MCP request")?,
+        };
+        if available.is_empty() {
+            break false;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let count = newline.unwrap_or(available.len());
+        if count > MAX_REQUEST_BYTES + 1 - bytes.len() {
+            bail!("MCP request exceeds 4 MiB");
+        }
+        bytes.extend_from_slice(&available[..count]);
+        if bytes.len() > MAX_REQUEST_BYTES && bytes.last() != Some(&b'\r') {
+            bail!("MCP request exceeds 4 MiB");
+        }
+        input.consume(count + usize::from(newline.is_some()));
+        if newline.is_some() {
+            break true;
+        }
+    };
+    if terminated && bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    if bytes.len() > MAX_REQUEST_BYTES {
+        bail!("MCP request exceeds 4 MiB");
+    }
+    if bytes.is_empty() && !terminated {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("MCP request is not UTF-8"))
 }
 
 /// Routes initialization, discovery, and supported local tools without implicit provider startup.
