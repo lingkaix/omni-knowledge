@@ -352,6 +352,25 @@ impl<'a> Work<'a> {
         Ok(work)
     }
 
+    /// Borrow only the initial verifier's portion of an ALREADY paid complete reader peak.
+    /// This restricts the existing local liveness counter; it creates no credit/pool and
+    /// cannot enlarge the actual holding. The remaining paid portion covers simultaneous
+    /// host range tables/windows while the decoded package metadata is still retained.
+    pub fn guarded_reader_capped(
+        bounds: &'a Bounds,
+        holding: &'a mut Holding,
+        cancel: &'a AtomicBool,
+        current: &'a dyn Fn() -> Result<(), Error>,
+        memory: u64,
+    ) -> Result<Self, Error> {
+        let mut work = Self::guarded_reader(bounds, holding, cancel, current)?;
+        if memory == 0 || work.prepaid_memory.is_none_or(|held| memory > held) {
+            return Err(Error::TooLarge);
+        }
+        work.prepaid_memory = Some(memory);
+        Ok(work)
+    }
+
     /// Grow `holding` before the caller allocates or writes.
     ///
     /// Retained allocations stay charged until the host finishes this holding.

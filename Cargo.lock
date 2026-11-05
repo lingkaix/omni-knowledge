@@ -4233,6 +4233,7 @@ version = "0.1.0"
 dependencies = [
  "knowledge-core",
  "knowledge-package",
+ "knowledge-search",
  "omni-service",
  "retrieval-kernel",
  "rustix 1.1.5",
