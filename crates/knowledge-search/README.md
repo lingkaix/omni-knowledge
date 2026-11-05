@@ -17,7 +17,11 @@ Root's production search wrappers use its existing current-generation planner an
 
 ## Disk vectors and remaining composition
 
-`VectorStore` writes little-endian f32 bytes and identity/row locations; eligible rows are chosen before row IO. Its nine original orchestration cases remain owned controls. At this checkpoint Root still uses its retained-v1 vector carrier; actual Root disk publication/reopen/pin/current-source qualification is the next implementation slice, not completed by this crate's existence. The original vector pin/storage implementation also needs native lifetime strengthening before activation.
+`VectorStore` writes little-endian f32 bytes and identity/row locations; eligible rows are chosen before row IO. Its nine original orchestration cases remain, with unchanged assertions. The caller explicitly makes its newly owned fixture root private; the engine no longer chmods unknown existing directories.
+
+The current IO/lifetime slice moves the one actual `Work` out of `AccountGrant` (all clones see it consumed), streams fixed-window float encoding/hash/write accounting instead of assembling a second whole segment, retains funding through affine query results and real independent flock pins, and preserves unknown generation files. A result owns its exact used FD and cost; `into_store` destroys those buffers/readers before reuse. Reopen hashes payloads in bounded windows; a query verifies each eligible row without reading ineligible row bytes. The same prepaid numerical allocator control observes OLD 38,479,318 versus NEW 5,645,652 bytes above live 32 MiB inputs against its unchanged 16 MiB assembly ceiling. This is not physical RSS or embedding quality.
+
+This is still NOT full M4 activation: build inputs and metadata remain resident, full model/provider/normalization identity and generic archive vector IO remain required, as do descriptor-qualified Root publication/recovery/retirement and actual native current-source/Claim/whole-tuple delivery. Root still uses its retained-v1 vector carrier. No second vector/lexical engine, model SDK replacement, native platform or final product claim is made.
 
 The [retrieval adapter](../knowledge-retrieval/README.md#generic-native-generations-and-stored-queries) now provides a compiled generic native-generation query and verified STORED Directory mechanism using the same mature kernel.
 Root caller activation, streamed generic publication, full-corpus streaming, funded vector lifetime strengthening and combined generation composition remain required.

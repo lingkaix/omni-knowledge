@@ -17,15 +17,15 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-pub use vectors::{ModelIdentity, VectorRow, VectorStore, import_stored_segment};
+pub use vectors::{ModelIdentity, VectorResult, VectorRow, VectorStore, import_stored_segment};
 
 /// A real non-forgeable Core lifetime. Clones retain the SAME promise, not independent spending credit.
 /// The caller provides the complete concurrent operation envelope before constructing inputs.
 #[derive(Clone)]
-pub struct AccountGrant(Arc<Mutex<Work>>);
+pub struct AccountGrant(Arc<Mutex<Option<Work>>>);
 impl AccountGrant {
     pub fn from_work(work: Work) -> Self {
-        Self(Arc::new(Mutex::new(work)))
+        Self(Arc::new(Mutex::new(Some(work))))
     }
     pub fn reserve(need: Reservation, origin: Origin<'_>) -> Result<Self, GrantError> {
         match Work::reserve(need, origin).map_err(|_| GrantError::Closed)? {
@@ -38,7 +38,16 @@ impl AccountGrant {
         body: impl FnOnce(&mut Work) -> Result<T, GrantError>,
     ) -> Result<T, GrantError> {
         let mut work = self.0.lock().map_err(|_| GrantError::Closed)?;
-        body(&mut work)
+        body(work.as_mut().ok_or(GrantError::Closed)?)
+    }
+    /// Move the one actual envelope into an affine long-lived reader. All clones
+    /// observe the same consumed state; none can spend the reader's credit again.
+    pub(crate) fn take(&self) -> Result<Work, GrantError> {
+        self.0
+            .lock()
+            .map_err(|_| GrantError::Closed)?
+            .take()
+            .ok_or(GrantError::Closed)
     }
     pub(crate) fn covers(&self, memory: u64, temporary: u64) -> Result<(), GrantError> {
         self.run(|work| {

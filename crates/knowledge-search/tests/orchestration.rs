@@ -180,6 +180,15 @@ fn fusion_breaks_ties_by_source_id() {
     assert_eq!(fused[1].0, "b");
 }
 
+/// The caller owns this newly created fixture and establishes the native private-root precondition.
+/// The engine must never repair/chmod an unknown existing directory on its behalf.
+fn vector_root() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    root
+}
+
 fn identity() -> ModelIdentity {
     ModelIdentity {
         model: "fixture".into(),
@@ -192,7 +201,7 @@ fn identity() -> ModelIdentity {
 
 #[test]
 fn vector_query_skips_ineligible_rows_before_reading_them() {
-    let root = tempfile::tempdir().unwrap();
+    let root = vector_root();
     let rows = vec![
         VectorRow {
             source_id: "kept".into(),
@@ -227,7 +236,7 @@ fn vector_query_skips_ineligible_rows_before_reading_them() {
 
 #[test]
 fn reopen_refuses_a_different_model_identity() {
-    let root = tempfile::tempdir().unwrap();
+    let root = vector_root();
     let rows = vec![VectorRow {
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
@@ -242,7 +251,7 @@ fn reopen_refuses_a_different_model_identity() {
 
 #[test]
 fn pin_keeps_the_previous_generation() {
-    let root = tempfile::tempdir().unwrap();
+    let root = vector_root();
     let rows = vec![VectorRow {
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
@@ -263,7 +272,7 @@ fn pin_keeps_the_previous_generation() {
 
 #[test]
 fn stored_segment_import_checks_bytes_without_reading_a_zip() {
-    let root = tempfile::tempdir().unwrap();
+    let root = vector_root();
     let rows = vec![VectorRow {
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
@@ -278,4 +287,73 @@ fn stored_segment_import_checks_bytes_without_reading_a_zip() {
         import_stored_segment(root.path(), &identity(), &rows, &segment, &grant(1024)).unwrap();
     let eligible = BTreeSet::from(["kept".into()]);
     assert_eq!(imported.query(&eligible, &[1.0, 0.0]).unwrap()[0].0, "kept");
+}
+
+#[test]
+fn independent_real_vector_pins_do_not_unpin_each_other() {
+    let root = vector_root();
+    let rows = vec![VectorRow {
+        source_id: "kept".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    let first = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let one = first.pin().unwrap();
+    let two = first.pin().unwrap();
+    let mut next = rows.clone();
+    next[0].vector = vec![0.0, 1.0];
+    let _second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
+    drop(one);
+    assert!(VectorStore::retire(root.path(), first.generation()).is_err());
+    drop(two);
+    assert!(VectorStore::retire(root.path(), first.generation()).is_ok());
+}
+
+#[test]
+fn vector_reader_consumes_shared_credit_and_reuses_only_after_result_destruction() {
+    let root = vector_root();
+    let untouched = root.path().join("not-created");
+    let rows = vec![VectorRow {
+        source_id: "kept".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    let paid = grant(1024);
+    let sibling = paid.clone();
+    let store = VectorStore::build(root.path(), &identity(), &rows, &paid, None).unwrap();
+    assert!(VectorStore::build(&untouched, &identity(), &rows, &sibling, None).is_err());
+    assert!(
+        !untouched.exists(),
+        "a clone cannot allocate or inspect a new native destination on spent credit"
+    );
+    let eligible = BTreeSet::from(["kept".into()]);
+    let result = store.query(&eligible, &[1.0, 0.0]).unwrap();
+    assert_eq!(result[0].0, "kept");
+    let store = result.into_store();
+    let result = store.query(&eligible, &[1.0, 0.0]).unwrap();
+    assert_eq!(result.len(), 1);
+}
+
+#[test]
+fn vector_retirement_preserves_unrecognized_generation_files() {
+    let root = vector_root();
+    let rows = vec![VectorRow {
+        source_id: "kept".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    let first = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let unknown = root
+        .path()
+        .join(first.generation())
+        .join("not-in-ownership-inventory");
+    fs::write(&unknown, b"retain me").unwrap();
+    let mut next = rows.clone();
+    next[0].vector = vec![0.0, 1.0];
+    let _second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
+    assert!(VectorStore::retire(root.path(), first.generation()).is_err());
+    assert_eq!(fs::read(&unknown).unwrap(), b"retain me");
 }
