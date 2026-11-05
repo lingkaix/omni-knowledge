@@ -28,4 +28,13 @@ The complete headless workspace gate remains the integrating lead's obligation, 
 
 Required signing currently preserves candidate tree/intent and refuses with `SigningRequired`; signed production, remote synchronization, existing-repository adoption, service wiring, and durable-authority activation are not claimed here.
 A milestone-end independent public-interface Git/durability review remains required before acceptance; the builder does not start or contact another agent.
+
+## M2-S2-01 Fix Forward
+
+The milestone review of `7956de4` found one material defect: an existing confirmed integration recipe bypassed proposal freshness on retry and its publication transaction did not verify the proposal ref.
+The repair retains the exact confirmed proposal ref/OID, rejects obsolete unpublished retries, and includes native proposal verification in the accepted/operation ref transaction.
+Candidate/recovery refs remain retained, and completed operation idempotency does not depend on later proposal freshness.
+Real intervening expected-old proposal CAS plus reopen, valid new confirmation, completed retry after another proposal advance, and a competing proposal ref lock cover the repair; the two new regressions failed against `7956de4` and pass after the scoped correction.
+The killed-process regression now selects its own real child mode instead of adding an ignored test entrypoint; its default body still performs prepare, exact child kill/wait, reopen, publish, and duplicate-operation assertions.
+Prior source/11-case gate evidence remains unchanged; repair raw logs are separate under `evidence/omni/m2-history-artifacts/m2-s2-01`.
 No local commit author attribution or generated/session trailer is added; product operation trailers are contract-required history facts, not contribution attribution.

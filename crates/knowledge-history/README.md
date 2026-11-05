@@ -23,6 +23,9 @@ No queue or independent admission pool is created here.
 `compare(base: Option<&Oid>, candidate: &Oid, &Claim) -> Result<Comparison, Error>` returns a complete bounded Git patch, its SHA-256 digest, and affected paths; overflow is an error, not a truncated confirmation.
 `read_text(commit: &Oid, path, &Claim) -> Result<String, Error>` reads bounded selected text from an immutable version.
 `prepare_confirmation(operation_id, &Confirmation, &Claim) -> Result<Prepared, Error>` requires owner context, the exact proposal/base/full-diff digest, and prepares a distinct two-parent integration operation.
+Its durable intent retains the confirmed proposal ref and exact commit; an unpublished retry rechecks that expectation and refuses an obsolete tuple without deleting the candidate.
+Publication verifies the proposal expectation inside the same native transaction as accepted-head and operation-ref CAS, not only in a preceding read.
+A completed operation remains idempotent after the proposal advances; a legacy unpublished integration without a retained proposal expectation fails closed.
 `Confirmation { proposal_id, base: Oid, candidate: Oid, diff_digest: String }` is supplied only after the service's real human-confirmation check; this Rust seam is trusted in-process, not a wire grant.
 
 `Oid` is validated lowercase SHA-1 (`Oid::parse`, `Oid::as_str`); IDs and paths are validated before effects.
