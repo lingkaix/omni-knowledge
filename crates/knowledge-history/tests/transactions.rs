@@ -1105,3 +1105,192 @@ fn finite_claim_capacity_and_deadline() {
     assert_eq!(f.history.head(&expired.claim), Err(Error::Deadline));
     assert_eq!(f.history.head(&f.admission.claim).unwrap(), None);
 }
+
+/// Actual host proposal pages, complete inspected tuples, and immutable history expose no unrelated branches or hash authority.
+#[test]
+fn qualified_proposal_pages_diff_and_history_are_actual_git_reads() {
+    let f = Fixture::new();
+    let first = f.commit("read-initial", None, "first");
+    let second = f.commit("read-second", Some(first.clone()), "second");
+    let agent = f.reopen(true);
+    for id in ["a", "b", "c"] {
+        let mut request = f.request(
+            &format!("read-{id}"),
+            Some(second.clone()),
+            &[("pages/a.md", Some(id))],
+        );
+        request.destination = Destination::Proposal {
+            proposal_id: id.into(),
+        };
+        agent.prepare(&request, &f.admission.claim).unwrap();
+        assert!(matches!(
+            agent
+                .publish(&request.operation_id, &f.admission.claim)
+                .unwrap(),
+            State::Published(_)
+        ));
+    }
+    git(
+        &f.repo(),
+        &[
+            "update-ref",
+            "refs/heads/unrelated-private-branch",
+            first.as_str(),
+        ],
+    );
+    let tree = git(
+        &f.repo(),
+        &["rev-parse", &format!("{}^{{tree}}", second.as_str())],
+    );
+    let orphan = Oid::parse(&git(
+        &f.repo(),
+        &[
+            "-c",
+            "user.name=Synthetic Detached Owner",
+            "-c",
+            "user.email=detached@example.invalid",
+            "commit-tree",
+            &tree,
+            "-m",
+            "unrelated detached root",
+        ],
+    ))
+    .unwrap();
+    git(
+        &f.repo(),
+        &[
+            "update-ref",
+            "refs/heads/unrelated-private-branch",
+            orphan.as_str(),
+            first.as_str(),
+        ],
+    );
+    assert_eq!(
+        f.history.version(&orphan, &f.admission.claim).unwrap_err(),
+        Error::ContextMismatch
+    );
+    assert_eq!(
+        f.history
+            .version_text(&orphan, "pages/a.md", &f.admission.claim)
+            .unwrap_err(),
+        Error::ContextMismatch
+    );
+    let before = git(&f.repo(), &["rev-list", "--all", "--count"]);
+    let page = f.history.proposals(None, 1, &f.admission.claim).unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].proposal_id, "a");
+    assert_eq!(page.entries[0].original_base, Some(second.clone()));
+    assert_eq!(
+        page.entries[0].commit.attribution.agent.as_deref(),
+        Some("validated-agent")
+    );
+    assert_eq!(page.next.as_deref(), Some("a"));
+    let next = f
+        .history
+        .proposals(page.next.as_deref(), 2, &f.admission.claim)
+        .unwrap();
+    assert_eq!(
+        next.entries
+            .iter()
+            .map(|p| p.proposal_id.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "c"]
+    );
+    assert!(next.next.is_none());
+    let diff = f.history.proposal_diff("a", &f.admission.claim).unwrap();
+    assert_eq!(diff.expected_base, Some(second.clone()));
+    assert_eq!(diff.proposal.candidate, page.entries[0].candidate);
+    assert_eq!(diff.comparison.affected_paths, ["pages/a.md"]);
+    assert_eq!(
+        diff.comparison,
+        f.history
+            .compare(Some(&second), &diff.proposal.candidate, &f.admission.claim)
+            .unwrap()
+    );
+    assert_eq!(
+        f.history
+            .version_text(&diff.proposal.candidate, "pages/a.md", &f.admission.claim)
+            .unwrap(),
+        "a"
+    );
+    let history = f.history.commits(None, 1, &f.admission.claim).unwrap();
+    assert_eq!(history.entries[0].version, second);
+    assert_eq!(
+        history.entries[0].attribution.operation_id.as_deref(),
+        Some("read-second")
+    );
+    assert_eq!(history.next, Some(first.clone()));
+    let older = f
+        .history
+        .commits(history.next.as_ref(), 2, &f.admission.claim)
+        .unwrap();
+    assert_eq!(older.entries[0].version, first);
+    assert!(older.next.is_none());
+    assert_eq!(
+        git(&f.repo(), &["rev-list", "--all", "--count"]),
+        before,
+        "reads create no commits"
+    );
+    assert_eq!(
+        f.history
+            .proposals(Some("../unrelated"), 1, &f.admission.claim)
+            .unwrap_err(),
+        Error::Invalid
+    );
+    assert_eq!(
+        f.history.commits(None, 0, &f.admission.claim).unwrap_err(),
+        Error::Capacity
+    );
+}
+
+/// Required-signing refusal keeps actual candidate bytes readable without creating an unsigned operation commit.
+#[test]
+fn signing_blocked_candidate_has_an_actual_bounded_read_side() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("home")).unwrap();
+    let admission = Admission::new();
+    let mut context = owner(false);
+    context.mode = Mode::SigningRequired;
+    let history = History::init(
+        &root.path().join("repo"),
+        &root.path().join("home"),
+        "pages",
+        context,
+        &admission.claim,
+    )
+    .unwrap();
+    let request = Request {
+        operation_id: "locked-read".into(),
+        base: None,
+        destination: Destination::Accepted,
+        changes: vec![Change {
+            path: "pages/a.md".into(),
+            text: Some("preserved signed-mode text".into()),
+        }],
+    };
+    assert_eq!(
+        history.prepare(&request, &admission.claim).unwrap_err(),
+        Error::SigningRequired
+    );
+    assert_eq!(
+        history
+            .read_candidate("locked-read", "pages/a.md", &admission.claim)
+            .unwrap(),
+        "preserved signed-mode text"
+    );
+    assert!(
+        history
+            .proposals(None, 10, &admission.claim)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert!(
+        history
+            .commits(None, 10, &admission.claim)
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(history.head(&admission.claim).unwrap(), None);
+}

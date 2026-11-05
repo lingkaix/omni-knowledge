@@ -1,6 +1,12 @@
 //! Local Git object/ref transactions; home file installation and authorization belong to callers.
 #![forbid(unsafe_code)]
 
+mod read;
+pub use read::{
+    CommitInfo, CommitPage, GitPerson, Proposal, ProposalDiff, ProposalPage, RecordedAttribution,
+    SignatureFormat,
+};
+
 use fs2::FileExt;
 use knowledge_core::jobs::Claim;
 use serde::{Deserialize, Serialize};
@@ -268,6 +274,15 @@ pub struct History {
     /// Trusted current attribution context.
     owner: OwnerContext,
 }
+/// Explicitly unlock the owned open-file description before close; unrelated concurrent fork/exec windows must not prolong it.
+struct WriterLock(File);
+impl Drop for WriterLock {
+    /// Closing alone can leave a transient fork-inherited descriptor holding the flock until its exec.
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// Per-call exact deadline and finite retained output bound, from the existing admitted claim.
 struct Call {
     /// End of the entire public call, not a timeout restarted per subprocess.
@@ -742,7 +757,7 @@ impl History {
     }
 
     /// Take only the owned cooperative lock; native Git CAS still handles outside ref writers.
-    fn lock(&self) -> Result<File, Error> {
+    fn lock(&self) -> Result<WriterLock, Error> {
         self.validate()?;
         let path = self.repo.join("omni-state/writer.lock");
         if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
@@ -761,7 +776,7 @@ impl History {
                 Error::Io
             }
         })?;
-        Ok(file)
+        Ok(WriterLock(file))
     }
 
     /// Resolve only the fixed accepted ref or validated immutable proposal namespace.

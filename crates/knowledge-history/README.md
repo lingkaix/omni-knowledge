@@ -34,6 +34,20 @@ A completed operation remains idempotent after the proposal advances; a legacy u
 `Error` distinguishes invalid input, operation mismatch, owner-context mismatch, signer required, capacity/deadline, busy, Git failure, I/O failure, and corrupt recovery facts.
 Errors never reflect submitted strings or Git stderr.
 
+## Additive Compiled Read Side
+
+The existing M1 prepare/install/publish signatures remain unchanged.
+`proposals(after: Option<&str>, limit: usize, &Claim) -> Result<ProposalPage, Error>` enumerates only the qualified direct app-proposal namespace, with bounded actual Git output and an exclusive continuation ID.
+The native formatter suppresses unrelated ref names/OIDs; a continuation requires Git's native `for-each-ref --start-after` support.
+`proposal_diff(proposal_id, &Claim) -> Result<ProposalDiff, Error>` returns the actual proposal, current expected accepted base, complete patch/digest/affected paths, and refuses observed tuple drift.
+`commits(start: Option<&Oid>, limit, &Claim) -> Result<CommitPage, Error>` pages actual accepted first-parent history and requalifies a supplied continuation against accepted ancestry.
+`version(&Oid, &Claim) -> Result<CommitInfo, Error>` and `version_text(&Oid, path, &Claim) -> Result<String, Error>` require actual accepted/proposal ancestry; an unrelated branch or orphan hash is not public read authority.
+M1 keeps the older trusted `read_text` method for its unpublished installable candidate.
+`read_candidate(operation_id, path, &Claim)` reads actual retained tree bytes while signing is blocked, without creating an unsigned commit.
+`CommitInfo` preserves actual author, committer, ordered parents, clocks, message, and recorded operation/agent/tool/session/origin facts; imported trailers remain attribution claims, not authentication.
+`SignatureFormat` reports presence only (`Unsigned`, `Ssh`, `Other`); it must not be mapped to a cryptographic valid-known/valid-unknown result.
+The required native signing/verification and remote/adoption/schedule completion remains an owner obligation, not a scope waiver or a claim from these read tests.
+
 ## Ordering And Recovery
 
 Prepare retains immutable intent before commit construction and pins the candidate under `refs/omni/prepared/<operation_id>` before returning.
