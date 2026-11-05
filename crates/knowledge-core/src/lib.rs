@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod admission;
 pub mod backend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod cache;
