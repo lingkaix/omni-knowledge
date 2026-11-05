@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/omni-service"]
+members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/omni-service", "crates/knowledge-daemon"]
 resolver = "3"
 
 [package]
@@ -29,6 +29,7 @@ required-features = ["gui"]
 
 [dependencies]
 anyhow = "1"
+knowledge-daemon = { path = "crates/knowledge-daemon" }
 ammonia = "4"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
