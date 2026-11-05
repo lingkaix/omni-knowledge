@@ -7,6 +7,7 @@ Evidence stays in temp/ci-evidence (or --evidence-dir) and contains no user data
 
 import argparse
 from collections import Counter
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ class GateError(Exception):
     """Report a failed prerequisite, command, or test-accounting assertion."""
 
 
-def run(command, evidence, label, timeout, own_group=True):
+def run(command, evidence, label, timeout, own_group=True, separate_stderr=False):
     """Run a bounded argument array; return output or raise GateError on FAIL/TIMEOUT.
 
     Normally own and settle a new process group. Nested bundle preparation keeps
@@ -30,9 +31,11 @@ def run(command, evidence, label, timeout, own_group=True):
     """
     print(f"RUN {label}: {' '.join(map(str, command))}", flush=True)
     log = evidence / f"{label}.log"
-    with log.open("w") as output:
+    stderr_log = evidence / f"{label}.stderr.log" if separate_stderr else None
+    with log.open("w") as output, ExitStack() as streams:
+        errors = streams.enter_context(stderr_log.open("w")) if stderr_log else subprocess.STDOUT
         process = subprocess.Popen(
-            command, stdout=output, stderr=subprocess.STDOUT, start_new_session=own_group
+            command, stdout=output, stderr=errors, start_new_session=own_group
         )
         try:
             try:
@@ -51,19 +54,28 @@ def run(command, evidence, label, timeout, own_group=True):
                 process.kill()
             process.wait()
     text = log.read_text(errors="replace")
-    (evidence / f"{label}.json").write_text(
-        json.dumps({"command": command, "status": status, "exit_code": code}) + "\n"
-    )
+    facts = {"command": command, "status": status, "exit_code": code}
+    if stderr_log:
+        facts["stderr_log"] = str(stderr_log)
+    (evidence / f"{label}.json").write_text(json.dumps(facts) + "\n")
     print(f"{status} {label} (exit {code}); {log}", flush=True)
     if status != "PASS":
         print(text[-12000:], flush=True)
+        if stderr_log:
+            print(stderr_log.read_text(errors="replace")[-12000:], flush=True)
         raise GateError(f"{status}: {label}")
     return text
 
 
+def canonical_test_name(name):
+    """Map rustdoc's compile-only outcome label to its exact inventory identity."""
+    compiled = re.fullmatch(r"(.+\.rs - \(line \d+\)) - compile", name)
+    return compiled.group(1) if compiled else name
+
+
 def listed_tests(text):
     """Return a multiset of libtest names, including repeated names across targets."""
-    return Counter(re.findall(r"^(.+): test$", text, re.MULTILINE))
+    return Counter(canonical_test_name(name) for name in re.findall(r"^(.+): test$", text, re.MULTILINE))
 
 
 def check_tests(inventory, ignored, output):
@@ -84,6 +96,7 @@ def check_tests(inventory, ignored, output):
     for name, outcome in re.findall(
         r"^test (.+) \.\.\. (ok|FAILED|ignored[^\n]*)$", output, re.MULTILINE
     ):
+        name = canonical_test_name(name)
         observed[name] += 1
         if outcome.startswith("ignored"):
             actual_ignored[name] += 1
@@ -146,7 +159,9 @@ def test_workspace(evidence, timeout, gui=False):
     if summary:
         with open(summary, "a") as stream:
             stream.write(f"\nFSEvents: **{status}**; {len(fsevents)} adapter cases inventoried.\n")
-    output = run(cargo + ["--", "--test-threads=2", "--format=pretty"], evidence, "tests", timeout)
+    # Preserve diagnostics separately: stderr need not end in a newline and
+    # must not prefix/corrupt the canonical libtest stdout records.
+    output = run(cargo + ["--", "--test-threads=2", "--format=pretty"], evidence, "tests", timeout, separate_stderr=True)
     check_tests(inventory, ignored, output)
     if platform.system() == "Darwin" and fsevents:
         status = "EXECUTED and accounted"
@@ -195,11 +210,27 @@ def self_test(evidence):
     inventory = Counter({"fixture": 1}) + ignored
     output = "test fixture ... ok\n" + "".join(f"test {name} ... ignored\n" for name in ignored)
     check_tests(inventory, ignored, output)
+    ignored_output = "".join(f"test {name} ... ignored\n" for name in ignored)
+    clean = run(
+        [sys.executable, "-c", "import os; os.write(2, b'diagnostic without newline'); print('test fixture ... ok')"],
+        evidence, "admit-separate-stderr", 5, separate_stderr=True,
+    )
+    check_tests(inventory, ignored, clean + ignored_output)
+    if (evidence / "admit-separate-stderr.stderr.log").read_text() != "diagnostic without newline":
+        raise GateError("FAIL: separate stderr diagnostic was lost")
+    doc = "crates/example/src/lib.rs - (line 66)"
+    doc_inventory = Counter({doc: 1}) + ignored
+    doc_output = f"test {doc} - compile ... ok\n" + ignored_output
+    check_tests(doc_inventory, ignored, doc_output)
     for selected, excluded, observed in [
         (Counter(), ignored, output),
         (inventory, ignored + Counter({"undeclared": 1}), output),
         (inventory, ignored, ""),
         (inventory, ignored, output.replace("... ok", "... FAILED")),
+        (inventory, ignored, "diagnostic without newline" + output),
+        (doc_inventory, ignored, doc_output + f"test {doc} ... ok\n"),
+        (doc_inventory, ignored, doc_output.replace("... ok", "... FAILED")),
+        (inventory, ignored, output.replace("fixture ...", "fixture - compile ...")),
     ]:
         try:
             check_tests(selected, excluded, observed)
