@@ -17,6 +17,7 @@ This map locates engineering owners and project guidance. It is a navigation aid
 | How do we write technical text? | [Technical writing](writing.md) |
 | How do we contribute and commit? | [Contributing](../CONTRIBUTING.md) |
 | How do we set up and run checks? | [Toolchain](toolchain.md) |
+| Is the headless delivery ready to use? | [First usable version](../first-usable-version.md) |
 
 Read only the owners needed for the task. Add a product contract or local guide when the project has that responsibility.
 
