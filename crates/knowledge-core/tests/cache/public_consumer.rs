@@ -129,6 +129,7 @@ fn inherited_owner(path: Option<String>) -> i32 {
         say("ERROR Pipe");
         return 1;
     }
+    let expected_parent = std::process::id() as i32;
     let pid = unsafe { fork() };
     if pid < 0 {
         unsafe {
@@ -139,7 +140,7 @@ fn inherited_owner(path: Option<String>) -> i32 {
         return 1;
     }
     if pid == 0 {
-        arm_parent_death_signal();
+        arm_parent_death_signal(expected_parent);
         unsafe {
             close(fds[1]);
             let mut byte = [0u8; 1];
@@ -200,6 +201,7 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         say("ERROR Pipe");
         return 1;
     }
+    let expected_parent = std::process::id() as i32;
     let pid = unsafe { fork() };
     if pid < 0 {
         unsafe {
@@ -210,7 +212,7 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         return 1;
     }
     if pid == 0 {
-        arm_parent_death_signal();
+        arm_parent_death_signal(expected_parent);
         if hold_ready {
             unsafe {
                 // Keep the write end open so the parent blocks until its deadline.
@@ -489,13 +491,116 @@ fn abandon(child: &mut ChildGuard, code: i32) -> i32 {
 
 /// Ask the kernel to kill this child if its parent dies.
 /// That signal does not reap a zombie and is not the cleanup result.
-fn arm_parent_death_signal() {
-    const PR_SET_PDEATHSIG: i32 = 1;
+/// The parent `ChildGuard` still collects this pid.
+fn arm_parent_death_signal(expected: i32) {
+    #[cfg(target_os = "linux")]
     unsafe {
+        const PR_SET_PDEATHSIG: i32 = 1;
         prctl(PR_SET_PDEATHSIG, SIGKILL as u64, 0, 0, 0);
-        if getppid() == 1 {
+        let parent = getppid();
+        if parent == 1 || parent != expected {
             _exit(1);
         }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if expected == 1 {
+            unsafe { _exit(1) };
+        }
+        arm_macos_parent_death(expected);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = expected;
+        compile_error!("cache consumer parent-death guard is unimplemented for this target");
+    }
+}
+
+/// Record `expected` before the race, then watch it from a C thread created
+/// only after fork. This process does not start a Rust thread before fork.
+#[cfg(target_os = "macos")]
+fn arm_macos_parent_death(expected: i32) {
+    unsafe {
+        let mut thread: libc::pthread_t = 0;
+        let started = libc::pthread_create(
+            &mut thread,
+            std::ptr::null(),
+            macos_parent_watch,
+            expected as isize as *mut c_void,
+        );
+        if started != 0 {
+            _exit(1);
+        }
+        let _ = libc::pthread_detach(thread);
+        if getppid() != expected {
+            _exit(1);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn macos_parent_watch(arg: *mut c_void) -> *mut c_void {
+    unsafe { macos_parent_watch_native(arg as isize as i32) }
+}
+
+/// Self-kill on parent death. `SIGKILL` is not `waitpid` and is not readiness.
+#[cfg(target_os = "macos")]
+unsafe fn macos_parent_watch_native(expected: i32) -> ! {
+    unsafe {
+        if getppid() != expected {
+            die_uncollected();
+        }
+        let queue = libc::kqueue();
+        if queue >= 0 {
+            let change = libc::kevent {
+                ident: expected as libc::uintptr_t,
+                filter: libc::EVFILT_PROC,
+                flags: libc::EV_ADD | libc::EV_ENABLE,
+                fflags: libc::NOTE_EXIT,
+                data: 0 as libc::intptr_t,
+                udata: std::ptr::null_mut(),
+            };
+            let armed = libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null());
+            if armed == 0 && getppid() == expected {
+                let mut event = libc::kevent {
+                    ident: 0,
+                    filter: 0,
+                    flags: 0,
+                    fflags: 0,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
+                };
+                loop {
+                    let ready =
+                        libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null());
+                    if getppid() != expected {
+                        die_uncollected();
+                    }
+                    if ready < 0 {
+                        break;
+                    }
+                }
+            }
+            close(queue);
+        }
+        let delay = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 50_000_000,
+        };
+        loop {
+            if getppid() != expected {
+                die_uncollected();
+            }
+            libc::nanosleep(&delay, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn die_uncollected() -> ! {
+    unsafe {
+        kill(libc::getpid(), SIGKILL);
+        _exit(1);
     }
 }
 
@@ -562,7 +667,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn errno() -> i32 {
-    unsafe { *__errno_location() }
+    io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 unsafe extern "C" {
@@ -576,7 +681,10 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn pause() -> i32;
     fn getppid() -> i32;
-    fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
     fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-    fn __errno_location() -> *mut i32;
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
 }

@@ -101,6 +101,12 @@ fn owner(agent: bool) -> OwnerContext {
         mode: Mode::UnsignedExplicit,
     }
 }
+/// Owned fixture root below the canonical native temporary directory.
+fn canonical_tempdir() -> tempfile::TempDir {
+    let parent = std::env::temp_dir().canonicalize().unwrap();
+    tempfile::Builder::new().tempdir_in(parent).unwrap()
+}
+
 /// Real local repository plus separate visible home and public reservation.
 struct Fixture {
     /// All owned state is removed only with this disposable root.
@@ -113,8 +119,7 @@ struct Fixture {
 impl Fixture {
     /// Initialize through public History::init, never handwrite owner state.
     fn new() -> Self {
-        let parent = std::env::temp_dir().canonicalize().unwrap();
-        let root = tempfile::Builder::new().tempdir_in(parent).unwrap();
+        let root = canonical_tempdir();
         fs::create_dir(root.path().join("home")).unwrap();
         let admission = Admission::new();
         let history = History::init(
@@ -758,7 +763,6 @@ fn interrupted_native_ref_commit_remains_indeterminate() {
 /// Hostile arguments never become revisions/options, and imported config/hooks/filters remain inert/refused.
 #[test]
 fn hostile_inputs_config_and_native_binding_refuse() {
-    let f = Fixture::new();
     for path in [
         "../escape",
         "/pages/x",
@@ -771,6 +775,9 @@ fn hostile_inputs_config_and_native_binding_refuse() {
         "pages/--output=x",
         "pages/a\\b",
     ] {
+        // Each independent rejected operation receives a live native claim;
+        // fixture setup for earlier operations must not consume its deadline.
+        let f = Fixture::new();
         assert_eq!(
             f.history
                 .prepare(
@@ -782,6 +789,7 @@ fn hostile_inputs_config_and_native_binding_refuse() {
         );
     }
     for id in ["--help", "a/b", "a..b", "a\nb", "a.lock", ""] {
+        let f = Fixture::new();
         assert_eq!(
             f.history
                 .prepare(
@@ -792,6 +800,7 @@ fn hostile_inputs_config_and_native_binding_refuse() {
             Error::Invalid
         );
     }
+    let f = Fixture::new();
     assert_eq!(Oid::parse("HEAD^{tree}"), Err(Error::Invalid));
     assert_eq!(Oid::parse(&"A".repeat(40)), Err(Error::Invalid));
     let mut bad_owner = owner(false);
@@ -844,7 +853,7 @@ fn hostile_inputs_config_and_native_binding_refuse() {
 /// A selected signed library retains its text tree/intent and never silently produces an unsigned commit.
 #[test]
 fn signing_required_is_not_unsigned_fallback() {
-    let root = tempfile::tempdir().unwrap();
+    let root = canonical_tempdir();
     fs::create_dir(root.path().join("home")).unwrap();
     let admission = Admission::new();
     let mut identity = owner(false);
@@ -919,7 +928,7 @@ fn killed_process_recovery_preserves_exact_operation() {
             std::thread::park();
         }
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = canonical_tempdir();
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
