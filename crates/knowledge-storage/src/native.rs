@@ -77,14 +77,6 @@ pub(crate) fn identity(f: &File) -> Result<(u64, u64), Error> {
     }
     Ok((m.dev(), m.ino()))
 }
-/// Observe an already opened regular file's native object identity without confusing it with a root.
-pub(crate) fn regular_identity(f: &File) -> Result<(u64, u64), Error> {
-    let m = f.metadata().map_err(|_| Error::Io)?;
-    if !m.is_file() {
-        return Err(Error::Unsupported);
-    }
-    Ok((m.dev(), m.ino()))
-}
 /// Determine actual descriptor ancestry without path-prefix guesses or following symlinks.
 pub(crate) fn within(child: &File, ancestor: &File) -> Result<bool, Error> {
     let target = identity(ancestor)?;
@@ -173,8 +165,22 @@ pub(crate) fn regular(parent: &File, name: &str) -> Result<Option<File>, Error> 
 }
 /// Create candidate/control bytes exclusively and synchronize the file and containing directory.
 pub(crate) fn create(parent: &File, name: &str, bytes: &[u8]) -> Result<(), Error> {
+    create_checked(parent, name, bytes, || Ok(()))
+}
+/// Stage bounded chunks while the actual owner observes stop/policy changes before each write.
+pub(crate) fn create_checked(
+    parent: &File,
+    name: &str,
+    bytes: &[u8],
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<(), Error> {
+    check()?;
     let mut f = create_file(parent, name)?;
-    f.write_all(bytes).map_err(|_| Error::Io)?;
+    for chunk in bytes.chunks(8192) {
+        check()?;
+        f.write_all(chunk).map_err(|_| Error::Io)?;
+    }
+    check()?;
     f.sync_all().map_err(|_| Error::Io)?;
     parent.sync_all().map_err(|_| Error::Io)
 }
@@ -223,18 +229,46 @@ pub(crate) fn control<T: serde::de::DeserializeOwned>(
     name: &str,
     max: u64,
 ) -> Result<T, Error> {
+    control_checked(parent, name, max, || Ok(()))
+}
+/// Decode bounded control bytes with the live executor checked before each parser buffer refill.
+pub(crate) fn control_checked<T: serde::de::DeserializeOwned>(
+    parent: &File,
+    name: &str,
+    max: u64,
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<T, Error> {
+    check()?;
     let mut f = regular(parent, name)?.ok_or(Error::Recovery)?;
     let before = f.metadata().map_err(|_| Error::Io)?;
     if before.len() > max {
         return Err(Error::Budget);
     }
-    let value =
-        serde_json::from_reader(std::io::BufReader::with_capacity(8192, (&mut f).take(max)))
-            .map_err(|_| Error::Recovery)?;
+    let reader = CheckedReader {
+        inner: (&mut f).take(max),
+        check: &check,
+    };
+    let result = serde_json::from_reader(std::io::BufReader::with_capacity(8192, reader));
+    check()?;
+    let value = result.map_err(|_| Error::Recovery)?;
     if stamp(&before) != stamp(&f.metadata().map_err(|_| Error::Io)?) {
         return Err(Error::Recovery);
     }
     Ok(value)
+}
+/// Borrow the actual reader and executor stop check without allocating a second read buffer.
+struct CheckedReader<R, F> {
+    /// Already bounded native reader.
+    inner: R,
+    /// Exact live executor check.
+    check: F,
+}
+impl<R: Read, F: Fn() -> Result<(), Error>> Read for CheckedReader<R, F> {
+    /// Stop before each controllable native read; the owner returns the original typed check error.
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        (self.check)().map_err(|_| std::io::Error::other("execution stopped"))?;
+        self.inner.read(bytes)
+    }
 }
 /// Synchronize a control record without intermediate JSON trees or truncation of previous evidence.
 pub(crate) fn control_new<T: serde::Serialize>(
@@ -250,6 +284,16 @@ pub(crate) fn control_new<T: serde::Serialize>(
 }
 /// Read exact bounded staged UTF-8 bytes, checking native version/EOF before they become Git input.
 pub(crate) fn text(parent: &File, name: &str, max: u64) -> Result<String, Error> {
+    text_checked(parent, name, max, || Ok(()))
+}
+/// Read only the pre-admitted aggregate body remainder with cancellation checks between chunks.
+pub(crate) fn text_checked(
+    parent: &File,
+    name: &str,
+    max: u64,
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<String, Error> {
+    check()?;
     let mut f = regular(parent, name)?.ok_or(Error::Recovery)?;
     let before = f.metadata().map_err(|_| Error::Io)?;
     if before.len() > max {
@@ -259,8 +303,12 @@ pub(crate) fn text(parent: &File, name: &str, max: u64) -> Result<String, Error>
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(len).map_err(|_| Error::Budget)?;
     bytes.resize(len, 0);
-    f.read_exact(&mut bytes).map_err(|_| Error::Recovery)?;
+    for chunk in bytes.chunks_mut(8192) {
+        check()?;
+        f.read_exact(chunk).map_err(|_| Error::Recovery)?;
+    }
     let mut extra = [0];
+    check()?;
     if f.read(&mut extra).map_err(|_| Error::Io)? != 0
         || stamp(&before) != stamp(&f.metadata().map_err(|_| Error::Io)?)
     {
@@ -269,11 +317,17 @@ pub(crate) fn text(parent: &File, name: &str, max: u64) -> Result<String, Error>
     String::from_utf8(bytes).map_err(|_| Error::Recovery)
 }
 /// Hash complete actual regular bytes through bounded scratch and before/after metadata checks.
-pub(crate) fn version(
+pub(crate) fn version(f: File, max: u64, deadline: std::time::Instant) -> Result<Version, Error> {
+    version_checked(f, max, deadline, || Ok(()))
+}
+/// Hash bounded chunks while the owning executor observes cancellation before every native read.
+pub(crate) fn version_checked(
     mut f: File,
     max: u64,
     deadline: std::time::Instant,
+    check: impl Fn() -> Result<(), Error>,
 ) -> Result<Version, Error> {
+    check()?;
     let before = f.metadata().map_err(|_| Error::Io)?;
     if !before.is_file() {
         return Err(Error::Unsupported);
@@ -285,6 +339,7 @@ pub(crate) fn version(
     let mut buf = [0u8; 8192];
     let mut bytes = 0u64;
     loop {
+        check()?;
         if std::time::Instant::now() >= deadline {
             return Err(Error::Budget);
         }
@@ -358,7 +413,53 @@ pub(crate) fn displace(
     parent.sync_all().map_err(|_| Error::Indeterminate)?;
     recovery.sync_all().map_err(|_| Error::Indeterminate)
 }
+/// Copy only this operation's candidate to an independent inode, then install without replacement.
+/// The caller pre-admits both copies and the bounded buffer; failed copies stay visible for recovery.
+/// Immutable new-N evidence is never linked to editable home bytes.
+pub(crate) fn install_evidence(
+    stage: &File,
+    name: &str,
+    parent: &File,
+    target: &str,
+    max: u64,
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<(), Error> {
+    check()?;
+    let mut source = regular(stage, name)?.ok_or(Error::Recovery)?;
+    let before = source.metadata().map_err(|_| Error::Io)?;
+    if before.len().checked_mul(2).is_none_or(|n| n > max) {
+        return Err(Error::Budget);
+    }
+    let copy_name = format!("copy-{name}");
+    let mut copy = create_file(stage, &copy_name)?;
+    let mut remaining = before.len();
+    let mut buffer = [0u8; 8192];
+    while remaining > 0 {
+        check()?;
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        let n = source.read(&mut buffer[..limit]).map_err(|_| Error::Io)?;
+        if n == 0 {
+            return Err(Error::Recovery);
+        }
+        check()?;
+        copy.write_all(&buffer[..n]).map_err(|_| Error::Io)?;
+        remaining -= n as u64;
+    }
+    let mut extra = [0];
+    check()?;
+    if source.read(&mut extra).map_err(|_| Error::Io)? != 0
+        || stamp(&before) != stamp(&source.metadata().map_err(|_| Error::Io)?)
+    {
+        return Err(Error::Recovery);
+    }
+    copy.sync_all().map_err(|_| Error::Io)?;
+    stage.sync_all().map_err(|_| Error::Io)?;
+    drop(copy);
+    check()?;
+    displace(stage, &copy_name, parent, target)
+}
 /// Install a staged inode atomically without replacing any competing destination.
+/// Bootstrap payloads have no historical text-save receipt; text operations use install_evidence.
 pub(crate) fn install(stage: &File, name: &str, parent: &File, target: &str) -> Result<(), Error> {
     rustix::fs::linkat(stage, name, parent, target, AtFlags::empty()).map_err(|e| {
         if e == rustix::io::Errno::EXIST {

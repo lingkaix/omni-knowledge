@@ -47,6 +47,10 @@ pub enum Error {
     Unsupported,
     /// Finite admitted work/scratch/deadline does not fit.
     Budget,
+    /// The exact running claim has a stop request; no settlement or rollback is implied.
+    Stopped(knowledge_core::jobs::Cancellation),
+    /// The execution claim/key/generation is no longer live.
+    Claim(knowledge_core::jobs::JobError),
     /// A writer already owns this home operation lane.
     Busy,
     /// Malformed/truncated/contradictory evidence is retained for inspection.
@@ -121,6 +125,23 @@ pub trait WritePolicy: Send + Sync {
     fn current(&self) -> Result<WriteContext, Error>;
 }
 /// Existing process claim and an explicit FS scratch portion, separate from unchanged work maxima.
+///
+/// M6/native consumers pass their actual owner, Git instance and live SAME-account claim:
+/// ```no_run
+/// use knowledge_core::jobs::{Claim, Key};
+/// use knowledge_history::History;
+/// use knowledge_storage::{Error, Inspection, Scope, Store, WritePolicy};
+/// fn publish_current<'a, P: WritePolicy>(
+///     store: &Store<P>, history: &History, operation: &str,
+///     claim: &'a Claim, key: Key<'a>, scratch_bytes: u64,
+/// ) -> Result<Inspection, Error> {
+///     if let Some(stop) = claim.stop_requested(key).map_err(Error::Claim)? {
+///         return Err(Error::Stopped(stop));
+///     }
+///     store.publish(history, operation, &Scope { claim, key, scratch_bytes })
+/// }
+/// ```
+/// A stop result retains recovery evidence and does not settle the worker or release its mount slot.
 pub struct Scope<'a> {
     /// Actual SAME-account unsettled execution; Git child collection borrows it too.
     pub claim: &'a Claim,
@@ -235,6 +256,13 @@ struct Work<'a> {
 impl<'a> Work<'a> {
     /// Split before any operation-controlled metadata/buffer allocation.
     fn new(scope: &Scope<'a>) -> Result<Self, Error> {
+        if let Some(stop) = scope
+            .claim
+            .stop_requested(scope.key)
+            .map_err(Error::Claim)?
+        {
+            return Err(Error::Stopped(stop));
+        }
         let budget = scope.claim.budget();
         if scope.scratch_bytes < 32768
             || scope.scratch_bytes > budget.max_memory_bytes
@@ -261,8 +289,12 @@ impl<'a> Work<'a> {
             memory: scope.scratch_bytes,
         })
     }
-    /// Enforce finite host time between native operations; not a preemptive syscall deadline.
+    /// Observe exact claim cancellation/supersession and deadline between controllable steps.
+    /// No check settles the worker, its mount slot or any outstanding resource owner.
     fn check(&self) -> Result<(), Error> {
+        if let Some(stop) = self.claim.stop_requested(self.key).map_err(Error::Claim)? {
+            return Err(Error::Stopped(stop));
+        }
         if Instant::now() >= self.deadline {
             Err(Error::Budget)
         } else {
@@ -271,7 +303,27 @@ impl<'a> Work<'a> {
     }
     /// Bound parser-owned control input by its declared schema expansion allowance before allocation.
     fn control_limit(&self) -> u64 {
-        self.bytes.min(self.memory.saturating_sub(16384) / 32)
+        self.bytes.min(self.memory.saturating_sub(32768) / 64)
+    }
+    /// Decode bounded control metadata without continuing parser reads after a stop request.
+    fn control<T: serde::de::DeserializeOwned>(&self, dir: &File, name: &str) -> Result<T, Error> {
+        native::control_checked(dir, name, self.control_limit(), || self.check())
+    }
+    /// Hash actual bytes with live-claim checks before each bounded native read.
+    fn version(&self, file: File) -> Result<Version, Error> {
+        native::version_checked(file, self.bytes, self.deadline, || self.check())
+    }
+    /// Observe a selected native file under the same live execution and fixed scratch plan.
+    fn observe(&self, root: &File, path: &str) -> Result<Option<Version>, Error> {
+        self.check()?;
+        let (parent, name) = match native::parent(root, path, false) {
+            Ok(p) => p,
+            Err(Error::Missing) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        native::regular(&parent, &name)?
+            .map(|f| self.version(f))
+            .transpose()
     }
 }
 impl Drop for Work<'_> {
@@ -360,6 +412,12 @@ impl<P: WritePolicy> Store<P> {
             recovery,
         })
     }
+    /// Recheck native approval and the exact claim immediately before lane bookkeeping effects.
+    fn checked_lane(&self, context: &WriteContext, work: &Work<'_>) -> Result<Lane, Error> {
+        self.live(context)?;
+        work.check()?;
+        self.lane()
+    }
     /// Open retained evidence without creating files during inspection.
     fn existing_lane(&self) -> Result<Lane, Error> {
         let journal = native::directory(&self.root, "journal")?;
@@ -388,7 +446,7 @@ impl<P: WritePolicy> Store<P> {
             return Err(Error::Budget);
         }
         self.selected(path, &c)?;
-        let v = native::observe(&self.root, path, work.bytes, work.deadline)?;
+        let v = work.observe(&self.root, path)?;
         self.live(&c)?;
         Ok(v)
     }
@@ -441,16 +499,15 @@ impl<P: WritePolicy> Store<P> {
         {
             return Err(Error::Budget);
         }
-        let mut changes = request.changes.iter().collect::<Vec<_>>();
-        changes.sort_by(|a, b| a.path.cmp(&b.path));
-        if changes.windows(2).any(|w| w[0].path == w[1].path) {
-            return Err(Error::Invalid);
-        }
-        let mut entries = Vec::new();
+        // Size the complete simultaneous metadata plan before any collect, sort, clone or serialization.
         let mut metadata = [
             request.operation_id.len(),
             self.writer.len(),
             self.library.len(),
+            match &request.destination {
+                Destination::Proposal { proposal_id } => proposal_id.len(),
+                _ => 0,
+            },
         ]
         .into_iter()
         .try_fold(4096u64, |n, len| {
@@ -461,11 +518,11 @@ impl<P: WritePolicy> Store<P> {
             return Err(Error::Budget);
         }
         let mut input_bytes = 0u64;
-        for change in &changes {
+        for change in &request.changes {
             if change.path.len() as u64 > work.control_limit() / 8 {
                 return Err(Error::Budget);
             }
-            self.selected(&change.path, &c)?;
+            work.check()?;
             let e = expected
                 .iter()
                 .find(|e| e.path == change.path)
@@ -487,12 +544,40 @@ impl<P: WritePolicy> Store<P> {
             if e.version.as_ref().is_some_and(|v| !digest_valid(&v.digest)) {
                 return Err(Error::Invalid);
             }
+        }
+        let vectors = (request.changes.len() as u64)
+            .checked_mul(
+                (std::mem::size_of::<&knowledge_history::Change>() + std::mem::size_of::<Entry>())
+                    as u64,
+            )
+            .ok_or(Error::Budget)?;
+        if metadata
+            .checked_mul(32)
+            .and_then(|n| n.checked_add(vectors))
+            .is_none_or(|n| n > work.memory.saturating_sub(16384))
+            || input_bytes.checked_mul(2).is_none_or(|n| n > work.bytes)
+        {
+            return Err(Error::Budget);
+        }
+        let mut changes = request.changes.iter().collect::<Vec<_>>();
+        changes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        if changes.windows(2).any(|w| w[0].path == w[1].path) {
+            return Err(Error::Invalid);
+        }
+        let mut entries = Vec::with_capacity(changes.len());
+        for change in &changes {
+            work.check()?;
+            self.selected(&change.path, &c)?;
+            let e = expected
+                .iter()
+                .find(|e| e.path == change.path)
+                .ok_or(Error::Invalid)?;
             entries.push(Entry {
                 expected: e.clone(),
                 digest: change.text.as_ref().map(|t| hash(t.as_bytes())),
             });
         }
-        let fingerprint = fingerprint(request, &entries)?;
+        let fingerprint = fingerprint(request, &entries, &changes)?;
         let intent = Intent {
             format_version: 1,
             operation_id: request.operation_id.clone(),
@@ -506,16 +591,23 @@ impl<P: WritePolicy> Store<P> {
             destination: request.destination.clone(),
             entries,
         };
-        let lane = self.lane()?;
+        self.admit_intent(&intent, &c, &work)?;
+        let lane = self.checked_lane(&c, &work)?;
         let op = hash(request.operation_id.as_bytes());
         match native::directory(&lane.recovery, &op) {
             Ok(dir) => {
-                let old: Intent = native::control(&dir, "intent.json", work.control_limit())?;
+                let old: Intent = work.control(&dir, "intent.json")?;
                 if old.fingerprint != intent.fingerprint || old.operation_id != intent.operation_id
                 {
                     return Err(Error::Conflict);
                 }
+                drop(old);
+                drop(intent);
+                drop(changes);
+                drop(dir);
                 drop(lane);
+                drop(op);
+                drop(c);
                 drop(work);
                 return self.inspect(history, &request.operation_id, scope);
             }
@@ -523,29 +615,35 @@ impl<P: WritePolicy> Store<P> {
             Err(e) => return Err(e),
         }
         for e in &intent.entries {
-            if native::observe(&self.root, &e.expected.path, work.bytes, work.deadline)?
-                != e.expected.version
-            {
+            if work.observe(&self.root, &e.expected.path)? != e.expected.version {
                 return Err(Error::Conflict);
             }
         }
-        self.live(&c)?;
+        self.admit_intent(&intent, &c, &work)?;
         let dir = native::new_child(&lane.recovery, &op)?.ok_or(Error::Conflict)?;
         let mut journal =
             journal::Journal::open(&lane.journal, &self.writer, work.control_limit())?;
+        self.admit_intent(&intent, &c, &work)?;
         let begin = journal.append(&intent.operation_id, &intent.fingerprint, None, "intent")?;
+        self.admit_intent(&intent, &c, &work)?;
         native::control_new(&dir, "intent.json", &intent)?;
+        self.admit_intent(&intent, &c, &work)?;
         native::control_new(&dir, "begin.json", &begin)?;
         self.live(&c)?;
         work.check()?;
         let prepared = history.prepare(request, scope.claim)?;
+        self.admit_intent(&intent, &c, &work)?;
         native::control_new(&dir, "prepared.json", &prepared)?;
         for (n, change) in changes.iter().enumerate() {
-            work.check()?;
+            self.admit_intent(&intent, &c, &work)?;
             if let Some(text) = &change.text {
-                native::create(&dir, &format!("new-{n}"), text.as_bytes())?;
+                native::create_checked(&dir, &format!("new-{n}"), text.as_bytes(), || {
+                    self.live(&c)?;
+                    work.check()
+                })?;
             }
         }
+        self.admit_intent(&intent, &c, &work)?;
         journal.append(
             &intent.operation_id,
             &intent.fingerprint,
@@ -572,15 +670,17 @@ impl<P: WritePolicy> Store<P> {
         let work = self.work(scope)?;
         work.check()?;
         let c = self.gate()?;
-        let lane = self.lane()?;
+        work.check()?;
+        let lane = self.existing_lane()?;
         let dir = native::directory(&lane.recovery, &hash(operation.as_bytes()))?;
-        let intent: Intent = native::control(&dir, "intent.json", work.control_limit())?;
+        let intent: Intent = work.control(&dir, "intent.json")?;
         self.intent(&intent, operation)?;
         self.begin(&lane, &dir, &intent, &work)?;
         if intent.proposal {
             return Err(Error::Context);
         }
-        let prepared = self.verify_prepared(history, &dir, &intent, scope, &work)?;
+        self.admit_intent(&intent, &c, &work)?;
+        let prepared = self.verify_prepared(history, &dir, &intent, scope, &work, &c)?;
         let mut journal =
             journal::Journal::open(&lane.journal, &self.writer, work.control_limit())?;
         for (n, entry) in intent.entries.iter().enumerate() {
@@ -588,12 +688,12 @@ impl<P: WritePolicy> Store<P> {
             self.live(&c)?;
             let path = &entry.expected.path;
             self.selected(path, &c)?;
-            let current = native::observe(&self.root, path, work.bytes, work.deadline)?;
+            let current = work.observe(&self.root, path)?;
             let old = native::regular(&dir, &format!("old-{n}"))?
-                .map(|f| native::version(f, work.bytes, work.deadline))
+                .map(|f| work.version(f))
                 .transpose()?;
             let staged = native::regular(&dir, &format!("new-{n}"))?
-                .map(|f| native::version(f, work.bytes, work.deadline))
+                .map(|f| work.version(f))
                 .transpose()?;
             if staged.as_ref().map(|v| &v.digest) != entry.digest.as_ref() {
                 return Err(Error::Recovery);
@@ -608,8 +708,9 @@ impl<P: WritePolicy> Store<P> {
                 return Err(Error::Recovery);
             }
             let already = match (&current, &staged, &entry.expected.version, &old) {
-                (Some(now), Some(new), Some(_), Some(_)) => same_displaced(now, new),
-                (Some(now), Some(new), None, None) => same_displaced(now, new),
+                (Some(now), Some(new), Some(_), Some(_)) | (Some(now), Some(new), None, None) => {
+                    now.length == new.length && now.digest == new.digest
+                }
                 (None, None, Some(_), Some(_)) | (None, None, None, None) => true,
                 _ => false,
             };
@@ -620,36 +721,59 @@ impl<P: WritePolicy> Store<P> {
             if !displaced && current != entry.expected.version {
                 return Err(Error::Conflict);
             }
+            self.admit_intent(&intent, &c, &work)?;
             let (parent, name) = native::parent(&self.root, path, true)?;
+            self.admit_intent(&intent, &c, &work)?;
             journal.append(
                 operation,
                 &intent.fingerprint,
                 prepared.candidate.as_ref().map(|o| o.as_str()),
                 "installing",
             )?;
+            // Re-resolve native boundaries and bytes after potentially long hashing/journal I/O.
+            let (current_parent, current_name) = native::parent(&self.root, path, false)?;
+            if native::identity(&current_parent)? != native::identity(&parent)?
+                || current_name != name
+            {
+                return Err(Error::Context);
+            }
+            if !displaced && work.observe(&self.root, path)? != entry.expected.version {
+                return Err(Error::Conflict);
+            }
+            self.admit_intent(&intent, &c, &work)?;
             if !displaced && let Some(expected) = &entry.expected.version {
                 native::displace(&parent, &name, &dir, &format!("old-{n}"))?;
-                let old = native::version(
-                    native::regular(&dir, &format!("old-{n}"))?.ok_or(Error::Recovery)?,
-                    work.bytes,
-                    work.deadline,
-                )?;
+                let old = work
+                    .version(native::regular(&dir, &format!("old-{n}"))?.ok_or(Error::Recovery)?)?;
                 if !same_displaced(expected, &old) {
                     return Err(Error::Conflict);
                 }
             }
             self.live(&c)?;
             if entry.digest.is_some() {
-                native::install(&dir, &format!("new-{n}"), &parent, &name)?;
+                native::install_evidence(
+                    &dir,
+                    &format!("new-{n}"),
+                    &parent,
+                    &name,
+                    work.bytes,
+                    || {
+                        self.live(&c)?;
+                        work.check()
+                    },
+                )?;
             }
         }
         self.live(&c)?;
         if !self.matches(&intent, &work)? {
             return Err(Error::Indeterminate);
         }
+        self.admit_intent(&intent, &c, &work)?;
         if native::regular(&dir, "installed")?.is_none() {
+            self.admit_intent(&intent, &c, &work)?;
             native::create(&dir, "installed", b"1\n")?;
         }
+        self.admit_intent(&intent, &c, &work)?;
         journal.append(
             operation,
             &intent.fingerprint,
@@ -674,19 +798,22 @@ impl<P: WritePolicy> Store<P> {
         let work = self.work(scope)?;
         work.check()?;
         let c = self.gate()?;
-        let lane = self.lane()?;
+        work.check()?;
+        let lane = self.existing_lane()?;
         let dir = native::directory(&lane.recovery, &hash(operation.as_bytes()))?;
-        let intent: Intent = native::control(&dir, "intent.json", work.control_limit())?;
+        let intent: Intent = work.control(&dir, "intent.json")?;
         self.intent(&intent, operation)?;
+        self.admit_intent(&intent, &c, &work)?;
         self.begin(&lane, &dir, &intent, &work)?;
-        let prepared = self.verify_prepared(history, &dir, &intent, scope, &work)?;
+        let prepared = self.verify_prepared(history, &dir, &intent, scope, &work, &c)?;
         if !intent.proposal
             && (native::regular(&dir, "installed")?.is_none() || !self.matches(&intent, &work)?)
         {
             return Err(Error::Conflict);
         }
-        self.live(&c)?;
+        self.admit_intent(&intent, &c, &work)?;
         let git = history.publish(operation, scope.claim)?;
+        self.admit_intent(&intent, &c, &work)?;
         let mut journal =
             journal::Journal::open(&lane.journal, &self.writer, work.control_limit())?;
         if !matches!(git, GitState::Published(_) | GitState::Unchanged(_)) {
@@ -699,6 +826,7 @@ impl<P: WritePolicy> Store<P> {
             });
         }
         if intent.proposal {
+            self.admit_intent(&intent, &c, &work)?;
             journal.append(
                 operation,
                 &intent.fingerprint,
@@ -716,7 +844,7 @@ impl<P: WritePolicy> Store<P> {
         if !self.matches(&intent, &work)? || history.head(scope.claim)? != prepared.candidate {
             return Err(Error::Indeterminate);
         }
-        self.live(&c)?;
+        self.admit_intent(&intent, &c, &work)?;
         let proof = journal.append(
             operation,
             &intent.fingerprint,
@@ -724,6 +852,7 @@ impl<P: WritePolicy> Store<P> {
             "saved_local",
         )?;
         if native::regular(&dir, "saved.json")?.is_none() {
+            self.admit_intent(&intent, &c, &work)?;
             native::control_new(&dir, "saved.json", &proof)?;
         }
         Ok(Inspection {
@@ -746,14 +875,14 @@ impl<P: WritePolicy> Store<P> {
         let c = self.gate()?;
         let lane = self.existing_lane()?;
         let dir = native::directory(&lane.recovery, &hash(operation.as_bytes()))?;
-        let intent: Intent = native::control(&dir, "intent.json", work.control_limit())?;
+        let intent: Intent = work.control(&dir, "intent.json")?;
         self.intent(&intent, operation)?;
         self.begin(&lane, &dir, &intent, &work)?;
         for e in &intent.entries {
             self.selected(&e.expected.path, &c)?;
         }
         let _request = self.restored_request(&dir, &intent, &work)?;
-        let prepared: Prepared = native::control(&dir, "prepared.json", work.control_limit())?;
+        let prepared: Prepared = work.control(&dir, "prepared.json")?;
         let git = history.inspect(operation, scope.claim)?;
         let actual = match &git {
             GitState::Prepared(p)
@@ -771,7 +900,7 @@ impl<P: WritePolicy> Store<P> {
             Err(e) => return Err(e),
         };
         let phase = if native::regular(&dir, "saved.json")?.is_some() {
-            let proof: journal::Proof = native::control(&dir, "saved.json", work.control_limit())?;
+            let proof: journal::Proof = work.control(&dir, "saved.json")?;
             let mut journal =
                 journal::Journal::read(&lane.journal, &proof.writer, work.control_limit())?;
             journal.verify(&proof, operation, &intent.fingerprint, "saved_local")?;
@@ -815,10 +944,13 @@ impl<P: WritePolicy> Store<P> {
         intent: &Intent,
         scope: &Scope<'_>,
         work: &Work<'_>,
+        context: &WriteContext,
     ) -> Result<Prepared, Error> {
-        let stored: Prepared = native::control(dir, "prepared.json", work.control_limit())?;
+        let stored: Prepared = work.control(dir, "prepared.json")?;
         let request = self.restored_request(dir, intent, work)?;
+        self.admit_intent(intent, context, work)?;
         let actual = history.prepare(&request, scope.claim)?;
+        self.admit_intent(intent, context, work)?;
         if actual != stored {
             return Err(Error::Recovery);
         }
@@ -836,8 +968,10 @@ impl<P: WritePolicy> Store<P> {
         intent: &Intent,
         work: &Work<'_>,
     ) -> Result<Request, Error> {
+        work.check()?;
         let mut total = 0u64;
         for (n, e) in intent.entries.iter().enumerate() {
+            work.check()?;
             if e.digest.is_some() {
                 let f = native::regular(dir, &format!("new-{n}"))?.ok_or(Error::Recovery)?;
                 total = total
@@ -845,13 +979,35 @@ impl<P: WritePolicy> Store<P> {
                     .ok_or(Error::Budget)?;
             }
         }
-        if total > work.bytes || total > work.memory.saturating_sub(32768) {
+        // Control/parser expansion uses at most half scratch; bodies and their containers use the rest.
+        let destination_bytes = match &intent.destination {
+            Destination::Proposal { proposal_id } => proposal_id.len() as u64,
+            Destination::Accepted => 0,
+        };
+        let containers = (intent.operation_id.len() as u64)
+            .checked_add(destination_bytes)
+            .and_then(|n| n.checked_add(std::mem::size_of::<Request>() as u64 + 128))
+            .and_then(|n| {
+                intent.entries.iter().try_fold(n, |n, e| {
+                    n.checked_add(e.expected.path.len() as u64)?
+                        .checked_add(std::mem::size_of::<knowledge_history::Change>() as u64)
+                })
+            })
+            .ok_or(Error::Budget)?;
+        if total.checked_mul(2).is_none_or(|n| n > work.bytes)
+            || total
+                .checked_add(containers)
+                .is_none_or(|n| n > work.memory.saturating_sub(32768) / 2)
+        {
             return Err(Error::Budget);
         }
-        let mut changes = Vec::new();
+        let mut changes = Vec::with_capacity(intent.entries.len());
+        let mut remaining = total;
         for (n, e) in intent.entries.iter().enumerate() {
+            work.check()?;
             let text = if let Some(digest) = &e.digest {
-                let t = native::text(dir, &format!("new-{n}"), work.bytes)?;
+                let t = native::text_checked(dir, &format!("new-{n}"), remaining, || work.check())?;
+                remaining = remaining.checked_sub(t.len() as u64).ok_or(Error::Budget)?;
                 if hash(t.as_bytes()) != *digest {
                     return Err(Error::Recovery);
                 }
@@ -870,7 +1026,7 @@ impl<P: WritePolicy> Store<P> {
             destination: intent.destination.clone(),
             changes,
         };
-        if fingerprint(&request, &intent.entries)? != intent.fingerprint {
+        if fingerprint(&request, &intent.entries, &request.changes)? != intent.fingerprint {
             return Err(Error::Recovery);
         }
         Ok(request)
@@ -883,9 +1039,8 @@ impl<P: WritePolicy> Store<P> {
                 return Ok(true);
             }
             if let Some(staged) = native::regular(dir, &format!("new-{n}"))?
-                && let Some(current) =
-                    native::observe(&self.root, &e.expected.path, work.bytes, work.deadline)?
-                && native::regular_identity(&staged)? == (current.device, current.inode)
+                && let Some(current) = work.observe(&self.root, &e.expected.path)?
+                && work.version(staged)?.digest == current.digest
             {
                 return Ok(true);
             }
@@ -900,7 +1055,7 @@ impl<P: WritePolicy> Store<P> {
         intent: &Intent,
         work: &Work<'_>,
     ) -> Result<(), Error> {
-        let proof: journal::Proof = native::control(dir, "begin.json", work.control_limit())?;
+        let proof: journal::Proof = work.control(dir, "begin.json")?;
         if proof.writer != intent.writer_id {
             return Err(Error::Recovery);
         }
@@ -924,11 +1079,26 @@ impl<P: WritePolicy> Store<P> {
         }
         Ok(())
     }
+    /// Re-admit every retained path before effects; immutable intent never grants current access.
+    fn admit_intent(
+        &self,
+        intent: &Intent,
+        context: &WriteContext,
+        work: &Work<'_>,
+    ) -> Result<(), Error> {
+        work.check()?;
+        self.live(context)?;
+        for entry in &intent.entries {
+            work.check()?;
+            self.selected(&entry.expected.path, context)?;
+        }
+        work.check()
+    }
     /// Compare CURRENT actual file digests, including explicit absence for selected deletions.
     fn matches(&self, intent: &Intent, work: &Work<'_>) -> Result<bool, Error> {
         for e in &intent.entries {
             work.check()?;
-            let v = native::observe(&self.root, &e.expected.path, work.bytes, work.deadline)?;
+            let v = work.observe(&self.root, &e.expected.path)?;
             if v.as_ref().map(|v| &v.digest) != e.digest.as_ref() {
                 return Ok(false);
             }
@@ -958,10 +1128,13 @@ fn digest_valid(s: &str) -> bool {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-/// Normalize metadata/delta ordering and hash borrowed complete intent, including filesystem witnesses.
-fn fingerprint(request: &Request, entries: &[Entry]) -> Result<String, Error> {
-    let mut changes = request.changes.iter().collect::<Vec<_>>();
-    changes.sort_by(|a, b| a.path.cmp(&b.path));
+/// Hash already normalized borrowed changes and witnesses without another vector or serialization tree.
+/// Prepare supplies its prepaid sorted references; restoration supplies changes in exact intent order.
+fn fingerprint(
+    request: &Request,
+    entries: &[Entry],
+    changes: &impl Serialize,
+) -> Result<String, Error> {
     let mut sink = HashWriter(Sha256::new());
     serde_json::to_writer(
         &mut sink,

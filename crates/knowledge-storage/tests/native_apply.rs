@@ -36,6 +36,49 @@ impl WritePolicy for Policy {
         })
     }
 }
+/// Native fixture policy that revokes at the actual durable installing boundary.
+struct InstallingPolicy<'a> {
+    /// Current fixture approval before the installing record exists.
+    context: WriteContext,
+    /// Actual fixture home, inspected rather than an invented phase counter.
+    home: std::path::PathBuf,
+    /// The exact running worker, whose cancellation does not settle its resources.
+    claim: &'a Claim,
+    /// Exact admitted key.
+    key: Key<'a>,
+    /// Select cancellation instead of exclusion revocation.
+    cancel: bool,
+}
+impl WritePolicy for InstallingPolicy<'_> {
+    /// Change current admission only after actual journal I/O and before displacement.
+    fn current(&self) -> Result<WriteContext, Error> {
+        let mut context = self.context.clone();
+        if fs::read_to_string(self.home.join("journal/writer-a.jsonl"))
+            .unwrap_or_default()
+            .contains("\"outcome\":\"installing\"")
+        {
+            if self.cancel {
+                self.claim
+                    .owner()
+                    .cancel(self.claim.job(), self.key)
+                    .unwrap();
+            } else {
+                context.revision += 1;
+                context.outside_scope.push("pages/a.md".into());
+            }
+        }
+        Ok(context)
+    }
+}
+/// Mutable actual native fixture policy, not portable metadata authority.
+#[derive(Clone)]
+struct MutablePolicy(Arc<Mutex<WriteContext>>);
+impl WritePolicy for MutablePolicy {
+    /// Read current fixture approval; changing this value revokes the previous selection.
+    fn current(&self) -> Result<WriteContext, Error> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
 /// Own the exact temporary home/repository and actual unsettled process claim through all children/I/O.
 struct Fixture {
     /// Lifetime fixture serialization guard, not production scheduling.
@@ -826,6 +869,15 @@ fn synchronous_loan_rejoins_only_original_live_generation() {
         .unwrap()
         .unwrap();
     let before = f.account.status().unwrap().reserved;
+    assert_eq!(old.stop_requested(key), Err(JobError::StaleClaim));
+    assert_eq!(new.stop_requested(key), Ok(None));
+    assert_eq!(
+        new.stop_requested(Key {
+            context: "other-native-context",
+            ..key
+        }),
+        Err(JobError::Context)
+    );
     assert!(matches!(
         f.account.rejoin_claim(&mut loan, &new, key),
         Err(AdmissionError::Stale)
@@ -840,4 +892,275 @@ fn synchronous_loan_rejoins_only_original_live_generation() {
         .unwrap();
     f.account.queue().retire(new.job(), key).unwrap();
     assert_eq!(f.account.status().unwrap().reserved.memory_bytes, baseline);
+}
+
+/// Publication re-admits retained accepted/proposal paths under current exclusions and text-root.
+#[test]
+fn publication_readmits_current_exclusions_and_text_root() {
+    for mode in 0..3 {
+        let f = Fixture::new();
+        let policy = MutablePolicy(Arc::new(Mutex::new(f.policy.current().unwrap())));
+        let store = Store::open(&f.home(), "lib", "writer-a", policy.clone()).unwrap();
+        let history = f.history();
+        let path = "pages/a.md";
+        let mut req = request("revoke-publish", None, &[(path, Some("approved\n"))]);
+        if mode == 1 {
+            req.destination = Destination::Proposal {
+                proposal_id: "proposal-revoke".into(),
+            };
+        }
+        let expected = [Expected {
+            path: path.into(),
+            version: None,
+        }];
+        store
+            .prepare(&history, &req, &expected, &f.scope())
+            .unwrap();
+        if mode != 1 {
+            store
+                .install(&history, &req.operation_id, &f.scope())
+                .unwrap();
+        }
+        let before = history.inspect(&req.operation_id, &f.claim).unwrap();
+        let journal = fs::read(f.home().join("journal/writer-a.jsonl")).unwrap();
+        {
+            let mut current = policy.0.lock().unwrap();
+            current.revision += 1;
+            match mode {
+                0 | 1 => current.outside_scope.push("pages".into()),
+                _ => current.text_root = "wiki".into(),
+            }
+        }
+        assert!(matches!(
+            store.publish(&history, &req.operation_id, &f.scope()),
+            Err(Error::Context)
+        ));
+        assert_eq!(
+            history.inspect(&req.operation_id, &f.claim).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(f.home().join("journal/writer-a.jsonl")).unwrap(),
+            journal
+        );
+    }
+}
+
+/// Raw selection is freshly gated; the text-only Git owner independently refuses raw history.
+#[test]
+fn raw_policy_revocation_and_text_history_prerequisite() {
+    let f = Fixture::new();
+    let policy = MutablePolicy(Arc::new(Mutex::new(f.policy.current().unwrap())));
+    policy.0.lock().unwrap().raw_original_writes = true;
+    let store = Store::open(&f.home(), "lib", "writer-a", policy.clone()).unwrap();
+    let history = f.history();
+    assert!(store.observe("raw/a.md", &f.scope()).unwrap().is_none());
+    let req = request("raw-not-text", None, &[("raw/a.md", Some("raw\n"))]);
+    let expected = [Expected {
+        path: "raw/a.md".into(),
+        version: None,
+    }];
+    assert!(matches!(
+        store.prepare(&history, &req, &expected, &f.scope()),
+        Err(Error::History(knowledge_history::Error::Invalid))
+    ));
+    policy.0.lock().unwrap().raw_original_writes = false;
+    assert!(matches!(
+        store.observe("raw/a.md", &f.scope()),
+        Err(Error::Context)
+    ));
+    assert!(!f.home().join("raw/a.md").exists());
+}
+
+/// A policy or stop change after journal/hash work is observed before moving any original.
+#[test]
+fn displacement_rechecks_policy_and_stop_after_installing_record() {
+    for cancel in [false, true] {
+        let f = Fixture::new();
+        let history = f.history();
+        fs::create_dir(f.home().join("pages")).unwrap();
+        fs::write(f.home().join("pages/a.md"), b"owned original\n").unwrap();
+        let expected = [Expected {
+            path: "pages/a.md".into(),
+            version: f.store().observe("pages/a.md", &f.scope()).unwrap(),
+        }];
+        let store = Store::open(
+            &f.home(),
+            "lib",
+            "writer-a",
+            InstallingPolicy {
+                context: f.policy.current().unwrap(),
+                home: f.home(),
+                claim: &f.claim,
+                key: f.key(),
+                cancel,
+            },
+        )
+        .unwrap();
+        let req = request(
+            "at-displacement",
+            None,
+            &[("pages/a.md", Some("replacement\n"))],
+        );
+        store
+            .prepare(&history, &req, &expected, &f.scope())
+            .unwrap();
+        let before = f.account.status().unwrap().reserved;
+        assert!(
+            store
+                .install(&history, &req.operation_id, &f.scope())
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(f.home().join("pages/a.md")).unwrap(),
+            b"owned original\n"
+        );
+        let op = format!("{:x}", Sha256::digest(req.operation_id.as_bytes()));
+        assert!(
+            !f.home()
+                .join("journal/recovery")
+                .join(op)
+                .join("old-0")
+                .exists()
+        );
+        assert_eq!(f.account.status().unwrap().reserved, before);
+    }
+}
+
+/// Refuse the complete metadata/copy work plan before creating native bookkeeping or returning a loan.
+#[test]
+fn complete_scratch_and_copy_plan_precedes_effects() {
+    let f = Fixture::new();
+    let history = f.history();
+    let store = f.store();
+    let req = Request {
+        operation_id: "preflight-metadata".into(),
+        base: None,
+        destination: Destination::Accepted,
+        changes: (0..128)
+            .map(|n| Change {
+                path: format!("pages/{n}.md"),
+                text: Some("x".into()),
+            })
+            .collect(),
+    };
+    let expected: Vec<_> = req
+        .changes
+        .iter()
+        .map(|c| Expected {
+            path: c.path.clone(),
+            version: None,
+        })
+        .collect();
+    let before = f.account.status().unwrap().reserved;
+    let scope = Scope {
+        scratch_bytes: 65536,
+        ..f.scope()
+    };
+    assert!(matches!(
+        store.prepare(&history, &req, &expected, &scope),
+        Err(Error::Budget)
+    ));
+    assert!(!f.home().join("journal").exists());
+    assert_eq!(f.account.status().unwrap().reserved, before);
+    let req = request(
+        "preflight-copies",
+        None,
+        &[("pages/large.md", Some(&"a".repeat(5 * M as usize)))],
+    );
+    let expected = [Expected {
+        path: "pages/large.md".into(),
+        version: None,
+    }];
+    assert!(matches!(
+        store.prepare(&history, &req, &expected, &f.scope()),
+        Err(Error::Budget)
+    ));
+    assert!(!f.home().join("journal").exists());
+    assert_eq!(f.account.status().unwrap().reserved, before);
+}
+
+/// In-place home editing must not mutate historical candidate and receipt evidence.
+#[test]
+fn saved_operation_survives_in_place_home_edit() {
+    let f = Fixture::new();
+    let store = f.store();
+    let history = f.history();
+    let req = request("immutable", None, &[("pages/a.md", Some("original\n"))]);
+    let expected = [Expected {
+        path: "pages/a.md".into(),
+        version: None,
+    }];
+    assert_eq!(
+        store
+            .apply(&history, &req, &expected, &f.scope())
+            .unwrap()
+            .phase,
+        Phase::SavedLocal
+    );
+    fs::write(f.home().join("pages/a.md"), b"external in-place edit\n").unwrap();
+    let inspected = store.inspect(&history, "immutable", &f.scope()).unwrap();
+    assert_eq!(inspected.phase, Phase::SavedLocal);
+    assert!(!inspected.current_matches);
+    assert_eq!(
+        fs::read(f.home().join("pages/a.md")).unwrap(),
+        b"external in-place edit\n"
+    );
+}
+
+/// Cancellation and supersession stop the next phase without settling a live worker.
+#[test]
+fn stopped_claim_cannot_start_prepare_install_or_publish() {
+    for phase in 0..3 {
+        for superseded in [false, true] {
+            let f = Fixture::new();
+            let store = f.store();
+            let history = f.history();
+            let req = request("stop", None, &[("pages/a.md", Some("new bytes\n"))]);
+            let expected = [Expected {
+                path: "pages/a.md".into(),
+                version: None,
+            }];
+            if phase > 0 {
+                store
+                    .prepare(&history, &req, &expected, &f.scope())
+                    .unwrap();
+            }
+            if phase > 1 {
+                store.install(&history, "stop", &f.scope()).unwrap();
+            }
+            if superseded {
+                let replacement = Key {
+                    version: &f.recipe,
+                    ..f.key()
+                };
+                f.account
+                    .queue()
+                    .supersede(f.claim.job(), f.key(), replacement)
+                    .unwrap();
+            } else {
+                f.account.queue().cancel(f.claim.job(), f.key()).unwrap();
+            }
+            let before = f.account.status().unwrap().reserved;
+            let old = fs::read(f.home().join("journal/writer-a.jsonl")).ok();
+            let result = match phase {
+                0 => store.prepare(&history, &req, &expected, &f.scope()),
+                1 => store.install(&history, "stop", &f.scope()),
+                _ => store.publish(&history, "stop", &f.scope()),
+            };
+            assert!(result.is_err(), "stopped phase {phase} continued");
+            assert_eq!(fs::read(f.home().join("journal/writer-a.jsonl")).ok(), old);
+            assert_eq!(f.account.status().unwrap().reserved, before);
+            assert!(matches!(
+                f.account
+                    .queue()
+                    .status(f.claim.job(), f.key())
+                    .unwrap()
+                    .state,
+                State::Unsettled {
+                    cancellation: Some(_)
+                }
+            ));
+        }
+    }
 }

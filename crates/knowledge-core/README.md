@@ -26,6 +26,8 @@ Decision::Waiting(Memory) means current contention, not an impossible job or an 
 `rejoin_claim` returns only a synchronous split loan to its exact original still-live owner/job/generation/key, without releasing aggregate charge.
 The synchronous owner must already have destroyed its temporary allocations and completed owned I/O; stale/foreign/pre-verification/ordinary-reserve holdings cannot be adopted as such a loan.
 A stale return conservatively keeps the holding charged, and a successful return makes the old holding stale.
+`Claim::stop_requested(expected_key)` checks its exact current queue/job/generation/full-key binding and observes cancellation, supersession, or deadline requests without releasing any charge.
+Stale or terminal claims fail; native executors check this seam before further controllable work instead of treating a still-owned reservation as permission to continue.
 Actual worker settlement releases only its remaining execution portion and its mount slot; live child/runtime/model/reader holdings stay charged independently.
 Holdings can be moved into the real resource owner and outlive execution; `grow` reserves before additional allocation, and `finish` requires actual resource settlement.
 Dropping or losing a holding releases nothing, because child/model/pin liveness is not inferred from a Rust capability disappearing.

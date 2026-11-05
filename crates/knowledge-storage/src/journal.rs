@@ -361,6 +361,47 @@ impl Journal {
         );
         self.verify(proof, &observation.scan, &digest, "observed")
     }
+    /// Validate the bounded immediate predecessor of a resumed byte cursor, including EOF.
+    /// Interior offsets, truncated predecessors and noncanonical stream sequences fail without repair.
+    fn predecessor(&mut self, offset: u64, max: u64) -> Result<Option<u64>, Error> {
+        if offset == 0 {
+            return Ok(None);
+        }
+        let length = offset.min(max.checked_add(1).ok_or(Error::Budget)?);
+        self.file
+            .seek(SeekFrom::Start(offset - length))
+            .map_err(|_| Error::Io)?;
+        let mut bytes = vec![0; usize::try_from(length).map_err(|_| Error::Budget)?];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|_| Error::Recovery)?;
+        if bytes.last() != Some(&b'\n') {
+            return Err(Error::Recovery);
+        }
+        let end = bytes.len() - 1;
+        let start = bytes[..end]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |n| n + 1);
+        if start == 0 && length != offset {
+            return Err(Error::Budget);
+        }
+        let record: Record =
+            serde_json::from_slice(&bytes[start..end]).map_err(|_| Error::Recovery)?;
+        let sequence = record
+            .sequence
+            .parse::<u64>()
+            .map_err(|_| Error::Recovery)?;
+        if record.format_version != 1
+            || record.writer_id != self.writer
+            || sequence == 0
+            || sequence.to_string() != record.sequence
+            || (offset - length + start as u64 == 0 && sequence != 1)
+        {
+            return Err(Error::Recovery);
+        }
+        Ok(Some(sequence))
+    }
     /// Read one exact bounded retained record; malformed bytes stop at their original offset.
     pub(crate) fn next_tracking(
         &mut self,
@@ -371,12 +412,16 @@ impl Journal {
         if offset > end {
             return Err(Error::Recovery);
         }
+        let restarting = self.replay.is_none() || self.replay_next != offset;
+        if restarting {
+            self.replay = None;
+            self.replay_sequence = self.predecessor(offset, max)?;
+        }
         if offset == end {
             return Ok(None);
         }
         let length = (end - offset).min(max);
-        if self.replay.is_none() || self.replay_next != offset {
-            self.replay_sequence = None;
+        if restarting {
             self.file
                 .seek(SeekFrom::Start(offset))
                 .map_err(|_| Error::Io)?;

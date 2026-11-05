@@ -511,3 +511,117 @@ fn actual_fsevents_native_delivery_and_resource_settlement() {
     drop(monitor);
     assert_eq!(f.account.status().unwrap().reserved.memory_bytes, before);
 }
+
+/// Sequential native writers preserve source IDs from visible evidence, not equal content.
+#[test]
+fn writer_transition_keeps_identity_and_separates_equal_bytes() {
+    let f = Fixture::new();
+    fs::write(f.root().join("pages/a.md"), b"same").unwrap();
+    fs::write(f.root().join("pages/b.md"), b"same").unwrap();
+    f.scan();
+    let first = f.store().replay_tracking(0, &f.preflight()).unwrap();
+    let a = first
+        .observations
+        .iter()
+        .find(|o| o.stat.path.as_str() == "pages/a.md")
+        .unwrap();
+    let b = first
+        .observations
+        .iter()
+        .find(|o| o.stat.path.as_str() == "pages/b.md")
+        .unwrap();
+    let next = Store::open(f.root(), "tracking-fixture", "writer-next", Owner).unwrap();
+    next.reconcile_local(
+        &f.mount(),
+        ReconcileOptions {
+            verify_bytes: true,
+            schedule: Schedule::Manual,
+        },
+        &f.preflight(),
+    )
+    .unwrap();
+    let replay = next.replay_tracking(0, &f.preflight()).unwrap();
+    assert_eq!(
+        replay
+            .observations
+            .iter()
+            .find(|o| o.stat.path.as_str() == "pages/a.md")
+            .unwrap()
+            .source_id,
+        a.source_id
+    );
+    assert_eq!(
+        replay
+            .observations
+            .iter()
+            .find(|o| o.stat.path.as_str() == "pages/b.md")
+            .unwrap()
+            .source_id,
+        b.source_id
+    );
+    assert_ne!(a.source_id, b.source_id);
+    fs::rename(f.root().join("pages/a.md"), f.root().join("pages/moved.md")).unwrap();
+    next.reconcile_local(
+        &f.mount(),
+        ReconcileOptions {
+            verify_bytes: true,
+            schedule: Schedule::Manual,
+        },
+        &f.preflight(),
+    )
+    .unwrap();
+    f.scan();
+    let replay = f.store().replay_tracking(0, &f.preflight()).unwrap();
+    let moved = replay
+        .observations
+        .iter()
+        .rev()
+        .find(|o| o.stat.path.as_str() == "pages/moved.md")
+        .unwrap();
+    assert_eq!(moved.source_id, a.source_id);
+    assert!(
+        !replay
+            .observations
+            .iter()
+            .any(|o| o.source_id == a.source_id && o.change == ChangeKind::Deleted)
+    );
+}
+
+/// A page boundary cannot hide a duplicate sequence or treat damaged EOF as complete.
+#[test]
+fn resumed_replay_validates_predecessor_at_page_boundary() {
+    let f = Fixture::new();
+    fs::write(f.root().join("pages/a.md"), b"a").unwrap();
+    f.scan();
+    let page = Preflight {
+        holding: &f.holding,
+        budget: Budget {
+            max_files: 1,
+            ..f.preflight().budget
+        },
+    };
+    let first = f.store().replay_tracking(0, &page).unwrap();
+    assert!(!first.complete && first.issue.is_none());
+    let file = f.root().join("journal/tracking-writer.jsonl");
+    let original = fs::read(&file).unwrap();
+    let start = first.next_offset as usize;
+    let end = start + original[start..].iter().position(|b| *b == b'\n').unwrap() + 1;
+    let previous_start = original[..start - 1]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |n| n + 1);
+    let previous: serde_json::Value =
+        serde_json::from_slice(&original[previous_start..start]).unwrap();
+    let mut next: serde_json::Value = serde_json::from_slice(&original[start..end]).unwrap();
+    next["sequence"] = previous["sequence"].clone();
+    let mut corrupt = original[..start].to_vec();
+    corrupt.extend(serde_json::to_vec(&next).unwrap());
+    corrupt.push(b'\n');
+    corrupt.extend(&original[end..]);
+    fs::write(&file, &corrupt).unwrap();
+    let resumed = f.store().replay_tracking(first.next_offset, &page).unwrap();
+    assert_eq!(resumed.issue, Some(Error::Recovery));
+    assert!(!resumed.complete);
+    assert_eq!(resumed.next_offset, first.next_offset);
+    assert_eq!(fs::read(file).unwrap(), corrupt);
+}

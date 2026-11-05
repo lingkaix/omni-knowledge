@@ -3,6 +3,7 @@
 This crate owns home bytes, visible writer observations and inspectable same-filesystem recovery under the [storage owner](../../docs/specs/storage.md).
 It consumes the existing process admission account and [local Git seam](../knowledge-history/README.md); it is neither authority nor another annotation/Git/resource engine.
 Native authorized context comes from the actual service owner, never a manifest declaration, wire boolean or recovery record.
+The [M1 native consumer freeze](m1-interface.md) gives compatible compiled calls and exact migration notes for the seven corrections of review subject `24f1d9f3535f3d932b8858883a0099bd2bd2a31d`.
 
 ## Durable Encodings And Safe Boundary
 
@@ -16,12 +17,14 @@ A truncated/malformed final record is preserved and reported; appending never si
 Its explicit version-1 encoding binds the operation, writer, normalized intent digest, selected root/policy revision, exact Git base/destination and each selected path's expected native version/new digest.
 `prepared.json` retains the actual Git owner's immutable preparation; `begin.json` and `saved.json` contain writer, offset, length and SHA-256 proofs of exact synchronized visible journal records.
 Inspection reconstructs the normalized candidate intent and compares actual Git facts; sidecar declarations alone cannot manufacture a save.
-Exclusive `new-N` files contain exact staged candidate bytes; exclusive `old-N` names retain displaced originals on the SAME home filesystem.
+Exclusive text-save `new-N` files contain exact staged candidate bytes independently from editable home inodes; exclusive `old-N` names retain displaced originals on the SAME home filesystem.
+Only the selected operation's candidate is copied to an independent install inode, then installed by no-replace rename; simultaneous copy costs are pre-admitted, and partial copies remain visible for inspection.
 Unknown recovery files and contradictory facts require inspection, never deletion or adoption.
 A successful save requires actual matching home bytes, actual Git publication and a synchronized visible final journal record; Git Published alone is not saved_local.
 
 Prepare records visible intent before effects, stages exact candidates exclusively and prepares the immutable Git operation.
-Install checks expected full SHA-256 plus native identity/stat, moves the selected old entry into a no-clobber recovery name, rechecks the displaced bytes and installs the candidate exclusively.
+Install checks expected full SHA-256 plus native identity/stat, rechecks live claim and current policy immediately before displacement, moves the selected old entry into a no-clobber recovery name, rechecks the displaced bytes and installs the candidate exclusively.
+Publication re-admits every intent path against current exclusions, selected text root and raw-write policy before Git/native effects, including proposals.
 A competing destination is never overwritten, and no automatic rollback can overwrite a later writer.
 An interrupted/conflicting operation retains original, competing and candidate versions with typed recovery facts.
 Inspect observes facts without replay; resume/install/publish are explicit operations under fresh current admission.
@@ -37,6 +40,8 @@ Unknown authored manifest/frontmatter extensions are not reserialized by the byt
 
 Text operations borrow the existing jobs Claim and a matching Key from the SAME process Account.
 An explicit scratch reservation is split from that claim before allocation and can rejoin only that exact still-live claim generation without releasing aggregate charge; caller-owned input/result and Git child/index/object costs remain covered by the parent's admitted costs.
+Complete metadata costs are checked before collection, sorting or cloning, and duplicate inspection destroys the outer temporary buffers before returning the loan.
+The exact claim generation/key is checked for cancellation and supersession between controlled reads and effects, without settling unfinished resources.
 Initialization/import use Preflight with an actual BeforeVerification holding and finite Core Budget, without inventing a verified original or a source job key.
 The caller retains that holding through owned template/source/result lifetimes.
 Storage work ceilings, monotonic deadlines and native buffers are checked; holding drop never stands for child termination.
@@ -75,8 +80,10 @@ Checkpoint fingerprints and declared scopes are correlation evidence, not approv
 M6 owns when caller-driven checks run; no background scheduler or event-replay claim is invented.
 
 The external selected-volume projection is disposable and qualified by root, mount/backend and writer.
+Reconciliation rebuilds relevant identity evidence from all visible writer streams, preserves unchanged asset IDs across sequential writers, and refuses contradictory mappings without comparing cross-writer sequences.
 Every reused projection frame binds an exact actual visible journal proof; rebuild replays bounded lines sequentially without retaining whole inventory in RAM.
 Eviction does not lose source identities or annotation authority; replay reports exact byte cursors, bounded progress and malformed tails without truncation.
+Resumed replay validates the bounded predecessor and writer-local sequence, including at EOF, before reporting progress or completion.
 Large histories require explicit sufficient replay/work budgets; budget refusal is not a corpus-size prohibition or empty success.
 Generated projection bytes reserve and reconcile through the same Account before publication.
 Generated state must be outside both the home and selected source tree; actual descriptor ancestry is checked.
@@ -84,6 +91,7 @@ Generated state must be outside both the home and selected source tree; actual d
 ## Retained Root Adapter And Migration
 
 Root storage.rs now routes JSON writes through native expected-version/no-clobber installation, and resident snapshots retain same-account memory through the last Arc reader.
+Cold manifest decoding caps actual held-FD consumption at its pre-admitted encoded extent before parsing, even when an in-place writer grows the file.
 Actual index builds reserve complete working memory and generated-volume promises before construction, and reconcile completed output bytes.
 Enclosing builds lend their actual holding to JSON writes rather than double-charge the same generated output.
 Authored metadata recovery remains visible; derived index JSON recovery is outside the home on the selected same native volume.

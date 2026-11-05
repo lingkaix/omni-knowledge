@@ -8,6 +8,9 @@ use knowledge_core::{
     backend::*,
 };
 use knowledge_local::{LocalMount, LocalReadPolicy};
+#[path = "inventory.rs"]
+mod inventory;
+use inventory::Inventory;
 /// Observed identity disposition, never a content-hash association or permission grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +152,8 @@ struct Projection {
     root: (u64, u64),
     /// Exact selected qualifier, including mount/backend separation.
     backend: BackendIdentity,
+    /// Independent stream identity; offsets are never compared between writers.
+    writer: String,
 }
 impl Projection {
     /// Namespace by actual root/library/writer, not global body digest.
@@ -164,6 +169,7 @@ impl Projection {
             dir: native::private_child(&parent, &key)?,
             root,
             backend: backend.clone(),
+            writer: writer.to_owned(),
         })
     }
     /// Locate highest writer-local byte-offset frame without loading a whole corpus/history.
@@ -183,18 +189,13 @@ impl Projection {
         Ok(Some(cached))
     }
     /// Lookup actual qualified path state; cached data is revalidated against its visible journal anchor.
-    fn path(
-        &self,
-        path: &str,
-        b: &Bounds,
-        journal: &mut journal::Journal,
-    ) -> Result<Option<Cached>, Error> {
+    fn path(&self, path: &str, b: &Bounds, journal_dir: &File) -> Result<Option<Cached>, Error> {
         let v = self.latest(&format!("p-{}", hash(path.as_bytes())), b)?;
         if let Some(c) = &v {
             if c.observation.stat.path.as_str() != path {
                 return Err(Error::Recovery);
             }
-            journal.verify_tracking(&c.proof, &c.observation)?;
+            self.verify(c, b, journal_dir)?;
         }
         Ok(v)
     }
@@ -203,16 +204,24 @@ impl Projection {
         &self,
         stat: &StatSnapshot,
         b: &Bounds,
-        journal: &mut journal::Journal,
+        journal_dir: &File,
     ) -> Result<Option<Cached>, Error> {
         let Some(k) = identity_key(stat)? else {
             return Ok(None);
         };
         let v = self.latest(&k, b)?;
         if let Some(c) = &v {
-            journal.verify_tracking(&c.proof, &c.observation)?;
+            self.verify(c, b, journal_dir)?;
         }
         Ok(v)
+    }
+    /// Verify a writer-qualified visible anchor rather than a foreign stream offset.
+    fn verify(&self, cached: &Cached, b: &Bounds, dir: &File) -> Result<(), Error> {
+        if cached.proof.writer != self.writer {
+            return Err(Error::Recovery);
+        }
+        journal::Journal::read(dir, &self.writer, b.control())?
+            .verify_tracking(&cached.proof, &cached.observation)
     }
     /// Publish immutable generated metadata with actual same-volume promises/write reconciliation.
     fn save(&self, c: &Cached, b: &Bounds) -> Result<(), Error> {
@@ -406,37 +415,7 @@ impl<P: WritePolicy> Store<P> {
         {
             return Err(Error::Context);
         }
-        let projection = Projection::open(root, &backend, &self.writer)?;
-        // Rebuild from actual visible bytes, never trust a disposable cache cursor to prove history coverage.
-        let mut cursor = 0;
-        let mut replay_bytes = 0u64;
-        loop {
-            b.check()?;
-            match journal.next_tracking(cursor, b.control())? {
-                None => break,
-                Some((next, item)) => {
-                    replay_bytes = replay_bytes
-                        .checked_add(next - cursor)
-                        .ok_or(Error::Budget)?;
-                    if replay_bytes > b.bytes {
-                        return Err(Error::Budget);
-                    }
-                    if let Some(journal::ReplayItem::Source(observation, proof)) = item
-                        && observation.root == root
-                        && observation.stat.backend == backend
-                    {
-                        projection.save(
-                            &Cached {
-                                observation: *observation,
-                                proof,
-                            },
-                            &b,
-                        )?;
-                    }
-                    cursor = next;
-                }
-            }
-        }
+        let inventory = Inventory::rebuild(root, &backend, &self.writer, &lane.journal, &b)?;
         let scan = uuid::Uuid::new_v4().to_string();
         journal.append(&scan, &hash(scan.as_bytes()), None, "reconcile_started")?;
         let mut result = Reconciled {
@@ -466,14 +445,16 @@ impl<P: WritePolicy> Store<P> {
                 if stat.backend != backend || stat.backend.library_id != self.library {
                     return Err(Error::Context);
                 }
-                let old = projection.path(stat.path.as_str(), &b, &mut journal)?;
-                let identity = projection.identity(&stat, &b, &mut journal)?;
+                let old = inventory.path(&stat, &b)?;
+                let identity = inventory.identity(&stat, &b)?;
                 let matched = old.as_ref().filter(|v| {
-                    identity_key(&v.observation.stat).ok().flatten().is_some()
+                    v.observation.change != ChangeKind::Deleted
+                        && identity_key(&v.observation.stat).ok().flatten().is_some()
                         && identity_key(&v.observation.stat).ok() == identity_key(&stat).ok()
                 });
                 let moved = identity.as_ref().filter(|v| {
                     !v.observation.identity_ambiguous
+                        && v.observation.change != ChangeKind::Deleted
                         && v.observation.stat.path != stat.path
                         && mount.link_count(&stat.path, budget, preflight.holding).ok() == Some(1)
                         && mount
@@ -555,7 +536,7 @@ impl<P: WritePolicy> Store<P> {
                     availability: entry.stat.availability,
                 };
                 let proof = journal.append_tracking(&scan, &observation)?;
-                projection.save(&Cached { observation, proof }, &b)?;
+                inventory.save(&Cached { observation, proof }, &b)?;
                 result.observed += 1;
                 Ok(())
             })();
@@ -584,52 +565,58 @@ impl<P: WritePolicy> Store<P> {
         }
         if result.complete {
             // Inspect every known qualified path; neither partial coverage nor scope denial can infer deletion.
-            let fd = rustix::fs::openat(
-                &projection.dir,
-                ".",
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .map_err(|_| Error::Io)?;
-            for e in rustix::fs::Dir::read_from(fd).map_err(|_| Error::Io)? {
-                b.check()?;
-                let e = e.map_err(|_| Error::Io)?;
-                let key = e.file_name().to_str().map_err(|_| Error::Recovery)?;
-                if !key.starts_with("p-") {
-                    continue;
-                }
-                let Some(old) = projection.latest(key, &b)? else {
-                    continue;
-                };
-                if old.observation.scan == scan || old.observation.change == ChangeKind::Deleted {
-                    continue;
-                }
-                if projection
-                    .identity(&old.observation.stat, &b, &mut journal)?
-                    .is_some_and(|v| {
-                        v.observation.scan == scan
-                            && v.observation.source_id == old.observation.source_id
-                            && v.observation.stat.path != old.observation.stat.path
-                    })
-                {
-                    continue;
-                }
-                let current = match mount.stat(&old.observation.stat.path, budget) {
-                    Ok(s) => s,
-                    Err(BackendError::Unavailable(Unavailable::Denied)) => continue,
-                    Err(e) => return Err(Error::Backend(e)),
-                };
-                if current.availability == Availability::Unavailable(Unavailable::Deleted) {
-                    let mut observation = old.observation;
-                    observation.scan = scan.clone();
-                    observation.version = None;
-                    observation.verification = Verification::Pending;
-                    observation.change = ChangeKind::Deleted;
-                    observation.availability = Availability::Unavailable(Unavailable::Deleted);
-                    let proof = journal.append_tracking(&scan, &observation)?;
-                    projection.save(&Cached { observation, proof }, &b)?;
+            for projection in &inventory.projections {
+                let fd = rustix::fs::openat(
+                    &projection.dir,
+                    ".",
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|_| Error::Io)?;
+                for e in rustix::fs::Dir::read_from(fd).map_err(|_| Error::Io)? {
+                    b.check()?;
+                    let e = e.map_err(|_| Error::Io)?;
+                    let key = e.file_name().to_str().map_err(|_| Error::Recovery)?;
+                    if !key.starts_with("p-") {
+                        continue;
+                    }
+                    let Some(frame) = projection.latest(key, &b)? else {
+                        continue;
+                    };
+                    let Some(old) = inventory.path(&frame.observation.stat, &b)? else {
+                        continue;
+                    };
+                    if old.observation.scan == scan || old.observation.change == ChangeKind::Deleted
+                    {
+                        continue;
+                    }
+                    if inventory
+                        .identity(&old.observation.stat, &b)?
+                        .is_some_and(|v| {
+                            v.observation.scan == scan
+                                && v.observation.source_id == old.observation.source_id
+                                && v.observation.stat.path != old.observation.stat.path
+                        })
+                    {
+                        continue;
+                    }
+                    let current = match mount.stat(&old.observation.stat.path, budget) {
+                        Ok(s) => s,
+                        Err(BackendError::Unavailable(Unavailable::Denied)) => continue,
+                        Err(e) => return Err(Error::Backend(e)),
+                    };
+                    if current.availability == Availability::Unavailable(Unavailable::Deleted) {
+                        let mut observation = old.observation;
+                        observation.scan = scan.clone();
+                        observation.version = None;
+                        observation.verification = Verification::Pending;
+                        observation.change = ChangeKind::Deleted;
+                        observation.availability = Availability::Unavailable(Unavailable::Deleted);
+                        let proof = journal.append_tracking(&scan, &observation)?;
+                        inventory.save(&Cached { observation, proof }, &b)?;
+                    }
                 }
             }
             self.live(&c)?;

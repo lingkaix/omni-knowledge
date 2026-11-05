@@ -5,7 +5,7 @@ use fs2::FileExt;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
@@ -704,12 +704,18 @@ fn validate_snapshot(snapshot: &Snapshot, root: &Path, config: &Config) -> Resul
     Ok(())
 }
 
+/// Bound actual encoded consumption before Serde can allocate, even if the held file grows.
+/// The caller retains decoded capacity admission through the resulting value's final lifetime.
+fn decode_extent<T: DeserializeOwned>(reader: impl Read, encoded: u64) -> Result<T> {
+    Ok(serde_json::from_reader(BufReader::with_capacity(
+        JSON_BUFFER_BYTES,
+        reader.take(encoded),
+    ))?)
+}
+
 /// Decode a cold manifest and reject replacement or in-place mutation observed during its read.
 fn decode_snapshot(source: &mut SnapshotSource) -> Result<Snapshot> {
-    let snapshot: Snapshot = serde_json::from_reader(BufReader::with_capacity(
-        JSON_BUFFER_BYTES,
-        &mut source.manifest,
-    ))?;
+    let snapshot: Snapshot = decode_extent(&mut source.manifest, source.key.manifest.length)?;
     validate_snapshot(&snapshot, &source.key.root, &source.key.config)?;
     let relative = source
         .directory
@@ -872,6 +878,44 @@ pub(crate) fn seed_files(name: &str) -> Vec<(String, String)> {
 mod cache_tests {
     use super::*;
     use crate::IndexOptions;
+
+    /// Actual in-place FD growth cannot feed the parser beyond the pre-admitted encoded extent.
+    #[test]
+    fn growing_file_decode_is_bounded_before_parser_allocation() {
+        use std::io::{Seek, Write};
+        struct GrowingFile {
+            /// Held original descriptor, not a pathname reopened by the parser.
+            reader: File,
+            /// Independent actual native writer that grows the same inode on first consumption.
+            writer: Option<File>,
+        }
+        impl Read for GrowingFile {
+            /// Grow the real file immediately before its first read; preserve ordinary native reads.
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if let Some(mut writer) = self.writer.take() {
+                    writer.write_all(&vec![b'x'; 1024 * 1024])?;
+                    writer.sync_all()?;
+                }
+                self.reader.read(buffer)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.json");
+        fs::write(&path, b"[\"bounded\"").unwrap();
+        let reader = File::open(&path).unwrap();
+        let encoded = reader.metadata().unwrap().len();
+        let _memory = snapshot_memory(encoded).unwrap();
+        let mut growing = GrowingFile {
+            reader,
+            writer: Some(fs::OpenOptions::new().append(true).open(path).unwrap()),
+        };
+        assert!(decode_extent::<Vec<String>>(&mut growing, encoded).is_err());
+        assert_eq!(growing.reader.stream_position().unwrap(), encoded);
+        assert_eq!(
+            growing.reader.metadata().unwrap().len(),
+            encoded + 1024 * 1024
+        );
+    }
 
     /// Repeated loads reuse validated allocations while each query independently owns and releases its lease.
     #[test]
