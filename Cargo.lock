@@ -4137,6 +4137,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-history"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "knowledge-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "knowledge-local"
 version = "0.1.0"
 dependencies = [

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/omni-service"]
+members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/omni-service", "crates/knowledge-history"]
 resolver = "3"
 
 [package]
