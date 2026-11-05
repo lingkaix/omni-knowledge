@@ -69,10 +69,92 @@ struct RowMeta {
     sha256: String,
 }
 
+/// Native descriptor identity only; the enclosing native caller must additionally
+/// retain its actual current source/policy/Claim and generated-cache write intent.
+struct NativeReader {
+    root: File,
+    directory: File,
+    segment: File,
+    pin: File,
+    segment_bytes: u64,
+}
+impl NativeReader {
+    fn open(root: &Path, generation: &str, created: Option<File>) -> Result<Self, VectorError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+            )
+            .open(root)
+            .map_err(io)?;
+        let directory = Self::component(&root, generation, true)?;
+        let pin = Self::component(&directory, "READERS", false)?;
+        fs2::FileExt::try_lock_shared(&pin).map_err(|_| VectorError::Pinned)?;
+        let segment = match created {
+            Some(file) => file,
+            None => Self::component(&directory, "segment.bin", false)?,
+        };
+        if !segment.metadata().map_err(io)?.is_file() {
+            return Err(VectorError::Identity("nonregular vector segment".into()));
+        }
+        let segment_bytes = segment.metadata().map_err(io)?.len();
+        let reader = Self {
+            root,
+            directory,
+            segment,
+            pin,
+            segment_bytes,
+        };
+        reader.check(generation)?;
+        Ok(reader)
+    }
+    fn component(parent: &File, name: &str, directory: bool) -> Result<File, VectorError> {
+        let mut flags =
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW;
+        if directory {
+            flags |= rustix::fs::OFlags::DIRECTORY;
+        }
+        rustix::fs::openat(parent, name, flags, rustix::fs::Mode::empty())
+            .map(File::from)
+            .map_err(|e| io(e.into()))
+    }
+    fn open_component(&self, name: &str) -> Result<File, VectorError> {
+        Self::component(&self.directory, name, false)
+    }
+    fn check(&self, generation: &str) -> Result<(), VectorError> {
+        Self::entry(&self.root, generation, &self.directory)?;
+        Self::entry(&self.directory, "READERS", &self.pin)?;
+        Self::entry(&self.directory, "segment.bin", &self.segment)?;
+        if self.segment.metadata().map_err(io)?.len() != self.segment_bytes {
+            return Err(VectorError::Identity("vector segment length drift".into()));
+        }
+        Ok(())
+    }
+    fn entry(parent: &File, name: &str, held: &File) -> Result<(), VectorError> {
+        use std::os::unix::fs::MetadataExt;
+        let expected = held.metadata().map_err(io)?;
+        let actual = rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| io(e.into()))?;
+        #[cfg(target_os = "macos")]
+        let same_device = expected.dev() as u32 == actual.st_dev as u32;
+        #[cfg(not(target_os = "macos"))]
+        let same_device = expected.dev() == actual.st_dev;
+        if !same_device || expected.ino() != actual.st_ino {
+            return Err(VectorError::Identity(
+                "admitted vector descriptor namespace drift".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct VectorStore {
-    root: PathBuf,
+    _root: PathBuf,
     generation: String,
     manifest: Manifest,
+    /// Exact used native descriptors and real reader pin, never a hash-then-reopen pathname.
+    native: NativeReader,
     /// Actual affine envelope; the original grant and all its clones are consumed.
     _work: std::sync::Arc<Work>,
 }
@@ -139,7 +221,16 @@ impl VectorStore {
                 .as_nanos()
         ));
         fs::create_dir(&stage).map_err(io)?;
-        let mut segment = File::create(stage.join("segment.bin")).map_err(io)?;
+        let mut segment = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(stage.join("segment.bin"))
+                .map_err(io)?
+        };
         let mut segment_hash = Sha256::new();
         let mut segment_bytes = 0u64;
         let mut meta = Vec::new();
@@ -178,7 +269,6 @@ impl VectorStore {
             });
         }
         segment.sync_all().map_err(io)?;
-        drop(segment);
         let manifest = Manifest {
             identity: identity.clone(),
             rows: meta,
@@ -196,7 +286,15 @@ impl VectorStore {
         metadata_file.sync_all().map_err(io)?;
         drop(metadata_file);
         drop(metadata);
+        let marker = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(stage.join("READERS"))
+            .map_err(io)?;
+        marker.sync_all().map_err(io)?;
+        drop(marker);
         fs::rename(&stage, &directory).map_err(io)?;
+        let native = NativeReader::open(root, &generation, Some(segment))?;
         let current = root.join("CURRENT");
         let temporary = root.join("CURRENT.next");
         let mut pointer = File::create(&temporary).map_err(io)?;
@@ -205,9 +303,10 @@ impl VectorStore {
         drop(pointer);
         fs::rename(&temporary, &current).map_err(io)?;
         Ok(Self {
-            root: root.to_path_buf(),
+            _root: root.to_path_buf(),
             generation,
             manifest,
+            native,
             _work: std::sync::Arc::new(work),
         })
     }
@@ -245,11 +344,9 @@ impl VectorStore {
         if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(VectorError::Identity("invalid generation reference".into()));
         }
-        let directory = root.join(&generation);
-        let reader = open_lock(&directory.join("READERS"))?;
-        fs2::FileExt::try_lock_shared(&reader).map_err(|_| VectorError::Pinned)?;
+        let native = NativeReader::open(root, &generation, None)?;
         drop(scope);
-        let file = File::open(directory.join("manifest.json")).map_err(io)?;
+        let file = native.open_component("manifest.json")?;
         if file.metadata().map_err(io)?.len() > cap {
             return Err(VectorError::Grant(GrantError::TooSmall));
         }
@@ -269,7 +366,7 @@ impl VectorStore {
         if &manifest.identity != identity {
             return Err(VectorError::Identity("model identity mismatch".into()));
         }
-        let mut file = File::open(directory.join("segment.bin")).map_err(io)?;
+        let mut file = native.segment.try_clone().map_err(io)?;
         let mut hash = Sha256::new();
         let mut bytes = [0u8; 8192];
         let mut total = 0u64;
@@ -291,10 +388,12 @@ impl VectorStore {
         {
             return Err(VectorError::Identity("segment hash mismatch".into()));
         }
+        native.check(&generation)?;
         Ok(Self {
-            root: root.to_path_buf(),
+            _root: root.to_path_buf(),
             generation,
             manifest,
+            native,
             _work: std::sync::Arc::new(work),
         })
     }
@@ -377,17 +476,18 @@ impl VectorStore {
         if self._work.remaining().map_err(invalid)?.memory_bytes < need {
             return Err(VectorError::Grant(GrantError::TooSmall));
         }
-        let pin = self.pin()?;
-        let mut file =
-            File::open(self.root.join(&self.generation).join("segment.bin")).map_err(io)?;
+        self.native.check(&self.generation)?;
+        let mut file = self.native.segment.try_clone().map_err(io)?;
         let mut ranked = Vec::new();
         for row in &self.manifest.rows {
             if !eligible.contains(&row.source_id) {
                 continue;
             }
+            self.native.check(&self.generation)?;
             file.seek(SeekFrom::Start(row.offset)).map_err(io)?;
             let mut bytes = vec![0; row_bytes];
             file.read_exact(&mut bytes).map_err(io)?;
+            self.native.check(&self.generation)?;
             if sha256(&bytes) != row.sha256 {
                 return Err(VectorError::Identity("eligible row hash mismatch".into()));
             }
@@ -408,18 +508,28 @@ impl VectorStore {
         Ok(VectorResult {
             ranked,
             file,
-            pin,
             store: self,
         })
     }
 
     pub fn pin(&self) -> Result<Pin, VectorError> {
-        let _scope = scope_lock(&self.root, false)?;
-        let file = open_lock(&self.root.join(&self.generation).join("READERS"))?;
+        let work = AccountGrant::reserve(
+            knowledge_core::jobs::Reservation {
+                memory_bytes: 64 * 1024,
+                temporary_bytes: 0,
+            },
+            knowledge_core::admission::Origin::BeforeVerification,
+        )
+        .map_err(VectorError::Grant)?
+        .take()
+        .map_err(VectorError::Grant)?;
+        self.native.check(&self.generation)?;
+        let file = self.native.open_component("READERS")?;
         fs2::FileExt::try_lock_shared(&file).map_err(|_| VectorError::Pinned)?;
+        self.native.check(&self.generation)?;
         Ok(Pin {
             _file: file,
-            _work: self._work.clone(),
+            _work: work,
         })
     }
 
@@ -494,7 +604,6 @@ impl VectorStore {
 pub struct VectorResult {
     ranked: Vec<(String, f32)>,
     file: File,
-    pin: Pin,
     store: VectorStore,
 }
 impl std::ops::Deref for VectorResult {
@@ -508,19 +617,17 @@ impl VectorResult {
         let Self {
             ranked,
             file,
-            pin,
             store,
         } = self;
         drop(ranked);
         drop(file);
-        drop(pin);
         store
     }
 }
 
 pub struct Pin {
     _file: File,
-    _work: std::sync::Arc<Work>,
+    _work: Work,
 }
 
 fn open_lock(path: &Path) -> Result<File, VectorError> {

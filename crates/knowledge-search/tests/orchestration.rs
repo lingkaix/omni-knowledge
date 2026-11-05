@@ -284,6 +284,55 @@ fn declared_l2_contract_rejects_bad_rows_and_queries_without_changing_current() 
 }
 
 #[test]
+fn actual_open_reader_keeps_its_generation_pinned_without_a_manual_marker() {
+    let root = vector_root();
+    let rows = vec![VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    let first = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let generation = first.generation().to_owned();
+    let mut next = rows.clone();
+    next[0].vector = vec![0.0, 1.0];
+    let second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
+    assert!(
+        VectorStore::retire(root.path(), &generation).is_err(),
+        "actual open reader was not pinned"
+    );
+    drop(first);
+    assert!(VectorStore::retire(root.path(), &generation).is_ok());
+    assert!(root.path().join(second.generation()).is_dir());
+}
+
+#[test]
+fn identical_bytes_in_a_replaced_segment_are_not_the_admitted_file() {
+    let root = vector_root();
+    let rows = vec![VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    let built = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let generation = built.generation().to_owned();
+    drop(built);
+    let admitted = VectorStore::open(root.path(), &identity()).unwrap();
+    let directory = root.path().join(generation);
+    let segment = directory.join("segment.bin");
+    let old = directory.join("owned-original-segment.bin");
+    fs::rename(&segment, &old).unwrap();
+    fs::copy(&old, &segment).unwrap();
+    assert!(
+        admitted
+            .query(&BTreeSet::from(["source".into()]), &[1.0, 0.0])
+            .is_err(),
+        "hashing an FD must not authorize reopening identical bytes from another inode"
+    );
+}
+
+#[test]
 fn vector_query_skips_ineligible_rows_before_reading_them() {
     let root = vector_root();
     let rows = vec![
@@ -350,7 +399,10 @@ fn pin_keeps_the_previous_generation() {
     next[0].vector = vec![0.0, 1.0];
     let second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
     assert_ne!(first.generation(), second.generation());
-    assert!(VectorStore::retire(root.path(), first.generation()).is_ok());
+    let generation = first.generation().to_owned();
+    // An opened store is now an actual FD reader, not just cached metadata.
+    drop(first);
+    assert!(VectorStore::retire(root.path(), &generation).is_ok());
     assert!(root.path().join(second.generation()).is_dir());
 }
 
@@ -385,13 +437,15 @@ fn independent_real_vector_pins_do_not_unpin_each_other() {
     let first = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
     let one = first.pin().unwrap();
     let two = first.pin().unwrap();
+    let generation = first.generation().to_owned();
+    drop(first);
     let mut next = rows.clone();
     next[0].vector = vec![0.0, 1.0];
     let _second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
     drop(one);
-    assert!(VectorStore::retire(root.path(), first.generation()).is_err());
+    assert!(VectorStore::retire(root.path(), &generation).is_err());
     drop(two);
-    assert!(VectorStore::retire(root.path(), first.generation()).is_ok());
+    assert!(VectorStore::retire(root.path(), &generation).is_ok());
 }
 
 #[test]
@@ -438,6 +492,8 @@ fn vector_retirement_preserves_unrecognized_generation_files() {
     let mut next = rows.clone();
     next[0].vector = vec![0.0, 1.0];
     let _second = VectorStore::build(root.path(), &identity(), &next, &grant(1024), None).unwrap();
-    assert!(VectorStore::retire(root.path(), first.generation()).is_err());
+    let generation = first.generation().to_owned();
+    drop(first); // Exercise unknown-file refusal, not the independent reader-pin refusal.
+    assert!(VectorStore::retire(root.path(), &generation).is_err());
     assert_eq!(fs::read(&unknown).unwrap(), b"retain me");
 }
