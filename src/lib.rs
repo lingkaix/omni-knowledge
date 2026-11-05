@@ -1191,6 +1191,7 @@ mod admitted {
     pub(super) fn processor_identity() -> String {
         let mut hash = Sha256::new();
         for source in [
+            include_bytes!("../crates/knowledge-processing/src/embedding.rs").as_slice(),
             include_bytes!("../crates/knowledge-processing/src/extract.rs").as_slice(),
             include_bytes!("../crates/knowledge-processing/src/media.rs").as_slice(),
             include_bytes!("../crates/knowledge-processing/src/epub.rs").as_slice(),

@@ -1,7 +1,8 @@
 # Knowledge Processing
 
-The mature extraction, EPUB, media, preview, ASR, and runtime behavior lives here.
-Root `extract`, `media`, `epub`, and `runtime` remain re-export shims.
+The mature extraction, EPUB, media, preview, ASR, embedding-HTTP adapter, and runtime behavior lives here.
+Root `extract`, `media`, `epub`, `embedding`, and `runtime` remain re-export shims.
+The unchanged mature `embedding::EmbeddingClient` is a compatibility/protocol DATA adapter, not an admitted native model/receiver/source capability. Loopback, config strings and reported package identities alone grant nothing; its legacy path media helpers are not the native held-FD composition. Moving it adds only existing dependency edges (zero package identity/checksum changes), not another provider/processor engine. Actual native funded model/source binding and cancellation remain required.
 [Processing](../../docs/specs/processing.md) owns formats and clocks; [storage](../../docs/specs/storage.md#effective-resource-accounting) owns resource accounting.
 There is no second queue, resource pool, fabricated content digest, disabled processor, or metadata-only substitute for an admission failure.
 
