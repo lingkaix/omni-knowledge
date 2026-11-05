@@ -8,7 +8,15 @@ mod stored;
 /// Package-owned verification ceilings for native callers, not admission or permission grants.
 pub use knowledge_package::{Bounds as ArchiveBounds, Quotas as ArchiveQuotas};
 pub use retrieval_kernel::{ByteDirectory, SourceGeneration, consumer_machinery};
-pub use stored::{ArchiveSource, StoredGeneration, StoredIdentity, StoredPlan, StoredResult};
+pub use stored::{
+    ArchiveSource, StoredDirectory, StoredDirectoryPlan, StoredGeneration, StoredIdentity,
+    StoredPlan, StoredResult,
+};
+/// The ONE kernel's IO traits/owned range bytes for bounded non-lexical component consumers.
+pub use tantivy::{
+    HasLen as ByteLength,
+    directory::{FileHandle as ByteHandle, OwnedBytes as SourceBytes},
+};
 
 use knowledge_core::admission::{Account, Decision, Holding, Origin};
 use knowledge_core::jobs::Reservation;

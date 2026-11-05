@@ -1,5 +1,7 @@
 //! Funded native readers over verified package ranges, without unpacking or a second engine.
+mod directory;
 use crate::{Control, Error, KernelAdapter, Query, SearchResult, Work};
+pub use directory::{StoredDirectory, StoredDirectoryPlan};
 use knowledge_package::{Bounds, FrozenArchive, IndexRequirements, Method};
 use retrieval_kernel::{ByteDirectory, SourceGeneration};
 use std::collections::BTreeMap;
@@ -210,6 +212,7 @@ impl StoredGeneration {
             version,
             ranges,
             control: control.clone(),
+            read_limit: None,
             _work: Mutex::new(work),
         });
         let components = Arc::new(ArchiveDirectory {
@@ -308,6 +311,7 @@ struct Backing {
     version: Version,
     ranges: BTreeMap<String, AdmittedRange>,
     control: Control,
+    read_limit: Option<u64>,
     _work: Mutex<Work>,
 }
 impl Backing {
@@ -384,7 +388,13 @@ impl FileHandle for RangeHandle {
     /// Allocate only after the whole concurrent reader envelope is prepaid, checking every refill.
     fn read_bytes(&self, range: Range<usize>) -> io::Result<OwnedBytes> {
         self.backing.check()?;
-        if range.end < range.start || range.end > self.len() {
+        if range.end < range.start
+            || range.end > self.len()
+            || self
+                .backing
+                .read_limit
+                .is_some_and(|limit| range.len() as u64 > limit)
+        {
             return Err(io::Error::other("read outside admitted range"));
         }
         let absolute = self

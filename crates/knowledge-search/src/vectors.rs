@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 mod rows;
 pub use rows::VectorBuildPlan;
-use rows::{JsonBuffer, Output, hash_file, read_row};
+use rows::{Component, JsonBuffer, Output, hash_file, read_row};
 
 /// Exact baseline metric. Unknown metrics cannot silently reuse cosine data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,17 +195,116 @@ impl NativeStamp {
     }
 }
 
+enum Source {
+    Native(NativeReader),
+    Directory(std::sync::Arc<dyn knowledge_retrieval::ByteDirectory>),
+}
+impl Source {
+    fn check(&self, generation: &str) -> Result<(), VectorError> {
+        match self {
+            Self::Native(reader) => reader.check(generation),
+            Self::Directory(directory) => directory
+                .check()
+                .map_err(|_| invalid("admitted vector source refused")),
+        }
+    }
+}
 pub struct VectorStore {
     _root: PathBuf,
     generation: String,
     manifest: Manifest,
     /// Exact used native descriptors and real reader pin, never a hash-then-reopen pathname.
-    native: NativeReader,
+    metadata: Component,
+    segment: Component,
+    native: Source,
     /// Actual affine envelope; the original grant and all its clones are consumed.
     _work: std::sync::Arc<Work>,
 }
 
 impl VectorStore {
+    fn from_native(
+        root: &Path,
+        generation: String,
+        manifest: Manifest,
+        native: NativeReader,
+        work: Work,
+    ) -> Result<Self, VectorError> {
+        let metadata = Component::Native(native.metadata.try_clone().map_err(io)?);
+        let segment = Component::Native(native.segment.try_clone().map_err(io)?);
+        Ok(Self {
+            _root: root.to_path_buf(),
+            generation,
+            manifest,
+            metadata,
+            segment,
+            native: Source::Native(native),
+            _work: std::sync::Arc::new(work),
+        })
+    }
+    /// Open actual admitted generic components. The directory must retain its real source,
+    /// source-policy/Claim checks, descriptors and own cost; it is not a path/digest authority.
+    /// The exact selected vector subgeneration and complete current model space are mandatory.
+    pub fn open_directory(
+        directory: std::sync::Arc<dyn knowledge_retrieval::ByteDirectory>,
+        generation: &str,
+        identity: &ModelIdentity,
+        grant: &AccountGrant,
+    ) -> Result<Self, VectorError> {
+        validate_identity(identity)?;
+        grant.covers(64 * 1024, 0).map_err(VectorError::Grant)?;
+        let work = grant.take().map_err(VectorError::Grant)?;
+        if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid("invalid selected generation"));
+        }
+        let source = Source::Directory(directory.clone());
+        source.check(generation)?;
+        let header = Component::Directory(
+            directory
+                .open("manifest.json")
+                .map_err(|_| invalid("missing admitted vector manifest"))?,
+        );
+        let length = header.len().map_err(io)?;
+        if length > work.remaining().map_err(invalid)?.memory_bytes / 8 {
+            return Err(VectorError::Grant(GrantError::TooSmall));
+        }
+        let mut bytes = vec![0; usize::try_from(length).map_err(invalid)?];
+        header.read_exact_at(&mut bytes, 0).map_err(io)?;
+        source.check(generation)?;
+        if sha256(&bytes) != generation {
+            return Err(invalid("selected vector generation hash mismatch"));
+        }
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
+        check_manifest(&manifest, identity, &work)?;
+        let metadata = Component::Directory(
+            directory
+                .open("rows.bin")
+                .map_err(|_| invalid("missing admitted row table"))?,
+        );
+        let segment = Component::Directory(
+            directory
+                .open("segment.bin")
+                .map_err(|_| invalid("missing admitted float segment"))?,
+        );
+        if hash_file(&metadata, manifest.metadata_bytes, || {
+            source.check(generation)
+        })? != manifest.metadata_sha256
+            || hash_file(&segment, manifest.segment_bytes, || {
+                source.check(generation)
+            })? != manifest.segment_sha256
+        {
+            return Err(invalid("admitted vector component hash mismatch"));
+        }
+        source.check(generation)?;
+        Ok(Self {
+            _root: PathBuf::new(),
+            generation: generation.to_owned(),
+            manifest,
+            metadata,
+            segment,
+            native: source,
+            _work: std::sync::Arc::new(work),
+        })
+    }
     /// Compatibility input slice; native producers use the owned, bounded stream below.
     /// The caller retains separate input-buffer funding if it keeps the borrowed slice.
     pub fn build(
@@ -379,13 +478,7 @@ impl VectorStore {
         drop(pointer);
         native.check(&generation)?;
         fs::rename(&temporary, root.join("CURRENT")).map_err(io)?;
-        Ok(Self {
-            _root: root.to_path_buf(),
-            generation,
-            manifest,
-            native,
-            _work: std::sync::Arc::new(work),
-        })
+        Self::from_native(root, generation, manifest, native, work)
     }
 
     /// Open the current generation only when its model identity matches.
@@ -440,41 +533,22 @@ impl VectorStore {
             ));
         }
         let manifest: Manifest = serde_json::from_slice(&metadata).map_err(invalid)?;
-        if &manifest.identity != identity {
-            return Err(VectorError::Identity("model identity mismatch".into()));
-        }
-        if manifest.format_version != 2
-            || manifest.segment_bytes
-                != manifest
-                    .rows
-                    .checked_mul(identity.dimension as u64)
-                    .and_then(|n| n.checked_mul(4))
-                    .ok_or_else(|| invalid("manifest segment length overflow"))?
-            || (manifest.rows == 0 && (manifest.metadata_bytes != 0 || manifest.max_row_bytes != 0))
-            || (manifest.rows != 0 && manifest.max_row_bytes == 0)
-        {
-            return Err(invalid("incompatible paged vector manifest"));
-        }
-        if reader_need(&manifest, 0)? > work.remaining().map_err(invalid)?.memory_bytes {
-            return Err(VectorError::Grant(GrantError::TooSmall));
-        }
-        if hash_file(&native.segment, manifest.segment_bytes, || {
-            native.check(&generation)
-        })? != manifest.segment_sha256
-            || hash_file(&native.metadata, manifest.metadata_bytes, || {
-                native.check(&generation)
-            })? != manifest.metadata_sha256
+        check_manifest(&manifest, identity, &work)?;
+        if hash_file(
+            &Component::Native(native.segment.try_clone().map_err(io)?),
+            manifest.segment_bytes,
+            || native.check(&generation),
+        )? != manifest.segment_sha256
+            || hash_file(
+                &Component::Native(native.metadata.try_clone().map_err(io)?),
+                manifest.metadata_bytes,
+                || native.check(&generation),
+            )? != manifest.metadata_sha256
         {
             return Err(invalid("vector component hash mismatch"));
         }
         native.check(&generation)?;
-        Ok(Self {
-            _root: root.to_path_buf(),
-            generation,
-            manifest,
-            native,
-            _work: std::sync::Arc::new(work),
-        })
+        Self::from_native(root, generation, manifest, native, work)
     }
 
     /// Compatibility byte-slice seam, NOT an archive reader or activation grant.
@@ -545,7 +619,6 @@ impl VectorStore {
     where
         F: FnMut(&str) -> Result<bool, VectorError>,
     {
-        use std::os::unix::fs::FileExt;
         if !valid_vector(&self.manifest.identity, query) {
             return Err(VectorError::Vector("query".into()));
         }
@@ -559,7 +632,7 @@ impl VectorStore {
             return Err(VectorError::Grant(GrantError::TooSmall));
         }
         self.native.check(&self.generation)?;
-        let file = self.native.segment.try_clone().map_err(io)?;
+        let file = self.segment.try_clone().map_err(io)?;
         let row_bytes = self
             .manifest
             .identity
@@ -573,7 +646,7 @@ impl VectorStore {
         for number in 0..self.manifest.rows {
             self.native.check(&self.generation)?;
             let row = read_row(
-                &self.native.metadata,
+                &self.metadata,
                 &mut offset,
                 self.manifest.metadata_bytes,
                 self.manifest.max_row_bytes,
@@ -679,11 +752,19 @@ impl VectorStore {
         .take()
         .map_err(VectorError::Grant)?;
         self.native.check(&self.generation)?;
-        let file = self.native.open_component("READERS")?;
-        fs2::FileExt::try_lock_shared(&file).map_err(|_| VectorError::Pinned)?;
+        let resource = match &self.native {
+            Source::Native(reader) => {
+                let file = reader.open_component("READERS")?;
+                fs2::FileExt::try_lock_shared(&file).map_err(|_| VectorError::Pinned)?;
+                PinResource::Native { _file: file }
+            }
+            Source::Directory(directory) => PinResource::Directory {
+                _directory: directory.clone(),
+            },
+        };
         self.native.check(&self.generation)?;
         Ok(Pin {
-            _file: file,
+            _resource: resource,
             _work: work,
         })
     }
@@ -791,7 +872,7 @@ pub struct VectorResult {
     ranked: Vec<(String, f32)>,
     evidence: Vec<VectorEvidence>,
     query: Vec<f32>,
-    file: File,
+    file: Component,
     store: VectorStore,
 }
 impl std::ops::Deref for VectorResult {
@@ -801,6 +882,10 @@ impl std::ops::Deref for VectorResult {
     }
 }
 impl VectorResult {
+    /// Recheck the retained actual source/Claim owner before every controllable delivery chunk.
+    pub fn check(&self) -> Result<(), VectorError> {
+        self.store.native.check(&self.store.generation)
+    }
     pub fn evidence(&self) -> &[VectorEvidence] {
         &self.evidence
     }
@@ -810,7 +895,6 @@ impl VectorResult {
         &self,
         mut visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
     ) -> Result<(), VectorError> {
-        use std::os::unix::fs::FileExt;
         let selected: BTreeSet<_> = self.ranked.iter().map(|(id, _)| id.as_str()).collect();
         let mut offset = 0;
         let mut bytes = vec![
@@ -825,7 +909,7 @@ impl VectorResult {
         for _ in 0..self.store.manifest.rows {
             self.store.native.check(&self.store.generation)?;
             let row = read_row(
-                &self.store.native.metadata,
+                &self.store.metadata,
                 &mut offset,
                 self.store.manifest.metadata_bytes,
                 self.store.manifest.max_row_bytes,
@@ -879,8 +963,16 @@ impl VectorResult {
     }
 }
 
+enum PinResource {
+    Native {
+        _file: File,
+    },
+    Directory {
+        _directory: std::sync::Arc<dyn knowledge_retrieval::ByteDirectory>,
+    },
+}
 pub struct Pin {
-    _file: File,
+    _resource: PinResource,
     _work: Work,
 }
 
@@ -942,6 +1034,32 @@ fn write_funded(
         };
         work.written(n as u64).map_err(invalid)?;
         bytes = &bytes[n..];
+    }
+    Ok(())
+}
+
+fn check_manifest(
+    manifest: &Manifest,
+    identity: &ModelIdentity,
+    work: &Work,
+) -> Result<(), VectorError> {
+    if &manifest.identity != identity {
+        return Err(VectorError::Identity("model identity mismatch".into()));
+    }
+    if manifest.format_version != 2
+        || manifest.segment_bytes
+            != manifest
+                .rows
+                .checked_mul(identity.dimension as u64)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or_else(|| invalid("manifest segment length overflow"))?
+        || (manifest.rows == 0 && (manifest.metadata_bytes != 0 || manifest.max_row_bytes != 0))
+        || (manifest.rows != 0 && manifest.max_row_bytes == 0)
+    {
+        return Err(invalid("incompatible paged vector manifest"));
+    }
+    if reader_need(manifest, 0)? > work.remaining().map_err(invalid)?.memory_bytes {
+        return Err(VectorError::Grant(GrantError::TooSmall));
     }
     Ok(())
 }

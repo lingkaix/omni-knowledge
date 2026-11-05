@@ -13,6 +13,43 @@ pub struct VectorBuildPlan {
     pub max_row_bytes: u64,
 }
 
+/// Exact retained native FD or the ONE kernel's already admitted component handle.
+pub(super) enum Component {
+    Native(File),
+    Directory(std::sync::Arc<dyn knowledge_retrieval::ByteHandle>),
+}
+impl Component {
+    pub(super) fn read_exact_at(&self, output: &mut [u8], offset: u64) -> std::io::Result<()> {
+        match self {
+            Self::Native(file) => file.read_exact_at(output, offset),
+            Self::Directory(handle) => {
+                let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+                let end = start
+                    .checked_add(output.len())
+                    .ok_or_else(|| std::io::Error::other("component offset overflow"))?;
+                let bytes = handle.read_bytes(start..end)?;
+                if bytes.len() != output.len() {
+                    return Err(std::io::Error::other("short admitted component"));
+                }
+                output.copy_from_slice(&bytes);
+                Ok(())
+            }
+        }
+    }
+    pub(super) fn len(&self) -> std::io::Result<u64> {
+        match self {
+            Self::Native(file) => Ok(file.metadata()?.len()),
+            Self::Directory(handle) => Ok(handle.len() as u64),
+        }
+    }
+    pub(super) fn try_clone(&self) -> std::io::Result<Self> {
+        match self {
+            Self::Native(file) => Ok(Self::Native(file.try_clone()?)),
+            Self::Directory(handle) => Ok(Self::Directory(handle.clone())),
+        }
+    }
+}
+
 /// Two bounded windows share the one actual Work, never an independent resource pool.
 pub(super) struct Output {
     file: File,
@@ -119,7 +156,7 @@ impl Write for JsonBuffer {
 /// Read one framed row through the SAME retained metadata FD. The caller checks
 /// currentness before/after; a frame length cannot exceed the already paid window.
 pub(super) fn read_row(
-    file: &File,
+    file: &Component,
     offset: &mut u64,
     total: u64,
     maximum: u64,
@@ -147,7 +184,7 @@ pub(super) fn read_row(
 }
 
 pub(super) fn hash_file(
-    file: &File,
+    file: &Component,
     expected: u64,
     check: impl Fn() -> Result<(), VectorError>,
 ) -> Result<String, VectorError> {
@@ -163,7 +200,7 @@ pub(super) fn hash_file(
         hash.update(&bytes[..take]);
         position += take as u64;
     }
-    if file.metadata().map_err(io)?.len() != expected {
+    if file.len().map_err(io)? != expected {
         return Err(invalid("component length drift"));
     }
     Ok(format!("{:x}", hash.finalize()))
