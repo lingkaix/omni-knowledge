@@ -3,13 +3,16 @@
 //! The adapter implements [`MountBackend`] with
 //! descriptor-relative no-follow metadata, listing, and full-digest range reads.
 //! It does not discover libraries, detect cloud or NAS residency, follow symlinks,
-//! write, watch, or authorize a caller. Read the crate guide before integrating it.
+//! write or authorize a caller. Optional caller-driven Linux watch hints never establish versions/absence.
+//! Read the crate guide before integrating it.
 //! Linux and macOS share this source. macOS execution is not claimed from a Linux build.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod native;
+mod watch;
+pub use watch::{HintState, HintWatch, WatchError};
 
 use knowledge_core::backend::{
     Availability, BackendError, BackendIdentity, Budget, ByteRange, Capabilities, Cursor,
@@ -149,6 +152,76 @@ impl<P: LocalReadPolicy> LocalMount<P> {
         })
     }
 
+    /// Hash a complete actually admitted regular source before a verified source/job key exists.
+    /// The caller retains a SAME-account pre-verification holding through all input/result lifetimes.
+    /// No placeholder/locality guess or fabricated expected digest is needed; drift/refusal stays typed.
+    pub fn verify(
+        &self,
+        path: &RelativePath,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<ExpectedVersion, BackendError> {
+        admitted_budget(holding, budget)?;
+        let root = self.root()?;
+        let started = Instant::now();
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id)? {
+            Gate::Proceed(a) => a,
+            Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
+            Gate::Refuse(e) => return Err(e),
+        };
+        if outside(path.as_str(), &admission.outside) {
+            return Err(BackendError::Unavailable(Unavailable::Denied));
+        }
+        if !metadata_fits(path.as_str(), budget) || expired(started, budget.max_millis) {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let (parent, name) = open_parent(&root, path)?;
+        let observed = native::observe(&parent, &name).map_err(map_native)?;
+        if observed.kind != native::NodeKind::File {
+            return Err(kind_error(observed.kind));
+        }
+        let charged = (path.as_str().len() as u64)
+            .checked_add(observed.size)
+            .ok_or(BackendError::BudgetExhausted)?;
+        if charged > budget.max_bytes || budget.max_files == 0 {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let meta = stat_charge(path.as_str(), &observed, &self.library_id, &self.mount_id)
+            .and_then(|n| n.checked_add(DIGEST_TEXT))
+            .ok_or(BackendError::BudgetExhausted)?;
+        if meta >= budget.max_memory_bytes {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let snapshot = snapshot_from(self, path, &observed);
+        let mut hash_budget = budget;
+        hash_budget.max_memory_bytes -= meta;
+        let (_, digest) = hash_file(
+            &parent,
+            &name,
+            &observed,
+            ByteRange::new(0, 1).map_err(|_| BackendError::InvalidRequest)?,
+            hash_budget,
+            started,
+            false,
+        )?;
+        let after = native::observe(&parent, &name).map_err(map_native)?;
+        if !same_content(&snapshot, &after) {
+            return Err(BackendError::Unavailable(Unavailable::Changed));
+        }
+        if live(self, &admission)? == Live::Cancelled {
+            return Err(BackendError::Unavailable(Unavailable::Unknown));
+        }
+        Ok(ExpectedVersion { digest, snapshot })
+    }
+    /// Enumerate only after the actual process account has prepaid the declared working-memory ceiling.
+    pub fn list_admitted(
+        &self,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<Enumeration, BackendError> {
+        admitted_budget(holding, budget)?;
+        self.list(None, budget)
+    }
     fn backend_identity(&self) -> BackendIdentity {
         BackendIdentity {
             library_id: self.library_id.clone(),
@@ -637,6 +710,21 @@ fn walk<P: LocalReadPolicy>(
             }
         }
     }
+}
+
+/// Validate an actual unsettled process holding before allocating under a public backend budget.
+fn admitted_budget(
+    holding: &knowledge_core::admission::Holding,
+    budget: Budget,
+) -> Result<(), BackendError> {
+    knowledge_core::admission::Account::current().map_err(|_| BackendError::InvalidRequest)?;
+    let remaining = holding
+        .remaining()
+        .map_err(|_| BackendError::InvalidRequest)?;
+    if budget.max_memory_bytes == 0 || budget.max_memory_bytes > remaining.memory_bytes {
+        return Err(BackendError::BudgetExhausted);
+    }
+    Ok(())
 }
 
 fn deliver_list<P: LocalReadPolicy>(

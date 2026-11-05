@@ -6,7 +6,8 @@ The [storage owner](../../docs/specs/storage.md) governs mount identity, verify-
 [Product](../../docs/specs/product.md) places ordinary local reads ahead of the optional GUI.
 [Service](../../docs/specs/service.md) still owns exposure and read admission; this crate does not cut over to it.
 
-This is a builder implementation. It is not M0 acceptance, M1, or an application authority change.
+This adapter now includes M1 shared-admission verification and caller-driven Linux native hints.
+Builder evidence is not independent M0/M1 acceptance or an application authority change.
 
 ## What The Caller Must Already Know
 
@@ -61,6 +62,23 @@ The hash buffer needs at least one byte of memory budget beyond the retained req
 An offset past the end is `InvalidRequest` only after the full digest still matches. Drift wins over that classification.
 After the read, `fstat` of the descriptor and a fresh no-follow stat must still match, and the root and policy are checked again.
 
+## Shared Admission And Native Hints
+
+`verify(path, budget, holding)` obtains the first verified full SHA-256/stat version from actual admitted bytes.
+The caller supplies an unsettled SAME-process Account holding before verification; it needs no fabricated source digest or second queue.
+`list_admitted` checks that the declared working-memory ceiling is prepaid by that same account before enumeration.
+The caller must retain the holding through all owned arguments/results, and current LocalReadPolicy still decides actual read admission.
+
+`watch(budget)` reserves its complete declared metadata/buffer/kernel-watch plan through the same process Account before native setup.
+Linux uses nonblocking inotify descriptors on held-directory `/proc/self/fd` names, without a background worker or detached thread.
+Poll returns hints only; startup, overflow, lost/root/new-directory coverage and work exhaustion require actual bounded reconciliation.
+Only the native owner may acknowledge a completed durable relevant scan at an unchanged hint epoch.
+New/incomplete directory coverage cannot be repaired by a quiet interval or acknowledgement; rebuild the watch after reconciliation.
+Native watch/instance/descriptor exhaustion is `WatchError::Exhausted`, never empty success or evidence of absence.
+Drop closes the exact native descriptor and destroys owned policy metadata before settling its independent holding; execution mount slots are not retained.
+No native FSEvents binding is implemented yet: macOS watch returns Unsupported, with reconciliation still available.
+The frozen backend reliable_watch capability remains false; these hints do not claim durable replay or end-to-end tracking qualification.
+
 ## Budgets And Cancellation
 
 A zero file, byte, time, or memory ceiling stops a listing as `Partial` / `BudgetExhausted` without claiming an empty directory.
@@ -86,4 +104,6 @@ macOS source is compiled behind `cfg(target_os = "macos")` for birth time and ge
 Other targets compile an empty crate because the module is limited to Linux and macOS.
 Cooperative budgets do not bound a single kernel call.
 Descriptor checks do not make a same-user directory swap atomic against a privileged remount.
-No write, watch, tracker, GC, job, package, service, or MCP integration is included.
+No write backend, durable inventory controller, GC, package, service, or MCP cutover is included.
+The [M1 change record](../../docs/changes/2026-11-05-m1-storage.md) tracks the positive-watch ENOSPC setup RED and native qualification debt.
+Resolve that gap with actual available native-watch evidence, not altered limits, bypassed checks, fake events or a false success carrier.

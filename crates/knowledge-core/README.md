@@ -21,6 +21,9 @@ Use `job_status` for a coherent native waiting reason and the current execution-
 Decision::Waiting(Memory) means current contention, not an impossible job or an instruction to spin; a whole-limit excess is a distinct typed refusal.
 
 `split_claim` atomically moves part of the already charged claim into a non-cloneable Holding; total charge never drops or doubles.
+`rejoin_claim` returns only a synchronous split loan to its exact original still-live owner/job/generation/key, without releasing aggregate charge.
+The synchronous owner must already have destroyed its temporary allocations and completed owned I/O; stale/foreign/pre-verification/ordinary-reserve holdings cannot be adopted as such a loan.
+A stale return conservatively keeps the holding charged, and a successful return makes the old holding stale.
 Actual worker settlement releases only its remaining execution portion and its mount slot; live child/runtime/model/reader holdings stay charged independently.
 Holdings can be moved into the real resource owner and outlive execution; `grow` reserves before additional allocation, and `finish` requires actual resource settlement.
 Dropping or losing a holding releases nothing, because child/model/pin liveness is not inferred from a Rust capability disappearing.

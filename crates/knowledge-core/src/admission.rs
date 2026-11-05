@@ -204,6 +204,8 @@ pub(crate) struct Held {
     id: u64,
     /// Causing job identity, retained even if execution metadata has been explicitly retired.
     origin: Option<u64>,
+    /// Only synchronous claim-split loans may rejoin this exact original generation.
+    generation: Option<u64>,
     /// Outstanding memory and unwritten storage promises.
     remaining: Reservation,
 }
@@ -383,6 +385,7 @@ impl Account {
         i.extra.as_mut().ok_or(Error::NotStarted)?.held.push(Held {
             id,
             origin,
+            generation: None,
             remaining: need,
         });
         i.sequence = id;
@@ -392,6 +395,36 @@ impl Account {
             id,
         }))
     }
+    /// Return a synchronous resource loan to the same still-live claim without freeing any charge.
+    /// This supports repeated filesystem/Git phases; the parent still owns settlement responsibility.
+    /// A stale/foreign claim or holding changes nothing and cannot release a possibly live resource.
+    pub fn rejoin_claim(
+        &self,
+        holding: &mut Holding,
+        claim: &Claim,
+        expected: Key<'_>,
+    ) -> Result<(), Error> {
+        if !self.queue.owns(claim) || !holding.owner.owns(claim) {
+            return Err(Error::Stale);
+        }
+        let mut i = self.queue.lock()?;
+        let r = record(&i, holding.id)?;
+        if r.origin != Some(claim.job()) || r.generation != Some(claim.generation_id()) {
+            return Err(Error::Stale);
+        }
+        let amount = r.remaining;
+        let total = plus(*i.claim_resources(claim, expected)?, amount)?;
+        let x = i.extra.as_mut().ok_or(Error::NotStarted)?;
+        let n = x
+            .held
+            .iter()
+            .position(|r| r.id == holding.id)
+            .ok_or(Error::Stale)?;
+        x.held.remove(n);
+        *i.claim_resources(claim, expected)? = total;
+        Ok(())
+    }
+
     /// Transfer part of a live claim to an independent resource lifetime atomically, with NO double charge/gap.
     /// After actual worker settlement the resource remains charged but no longer owns the mount execution slot.
     pub fn split_claim(
@@ -409,6 +442,7 @@ impl Account {
         i.extra.as_mut().ok_or(Error::NotStarted)?.held.push(Held {
             id,
             origin: Some(claim.job()),
+            generation: Some(claim.generation_id()),
             remaining: need,
         });
         *i.claim_resources(claim, expected)? = remaining;

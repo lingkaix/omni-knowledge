@@ -243,6 +243,10 @@ pub struct Claim {
     deadline: Instant,
 }
 impl Claim {
+    /// Bind a private synchronous admission loan to its exact immutable claim generation.
+    pub(crate) fn generation_id(&self) -> u64 {
+        self.generation
+    }
     /// Return the canonical instance-local job number for host dispatch mapping.
     pub fn job(&self) -> u64 {
         self.job

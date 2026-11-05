@@ -4158,6 +4158,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-storage"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "knowledge-core",
+ "knowledge-history",
+ "knowledge-local",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5271,6 +5287,8 @@ dependencies = [
  "gpui-component",
  "hex",
  "html2text",
+ "knowledge-core",
+ "knowledge-storage",
  "libc",
  "mime_guess",
  "objc2",
