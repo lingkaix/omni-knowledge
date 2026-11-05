@@ -9,4 +9,5 @@ pub mod backend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod cache;
 pub mod data;
+pub mod jobs;
 pub mod manifest;
