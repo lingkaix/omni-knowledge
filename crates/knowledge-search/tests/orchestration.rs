@@ -191,12 +191,96 @@ fn vector_root() -> tempfile::TempDir {
 
 fn identity() -> ModelIdentity {
     ModelIdentity {
+        provider: "numeric-control".into(),
         model: "fixture".into(),
+        revision: "immutable-revision-1".into(),
         dimension: 2,
+        metric: knowledge_search::VectorMetric::Cosine,
+        normalization: knowledge_search::VectorNormalization::Raw,
         package_fingerprint: "c".repeat(64),
         embedding_space: "fixture-space".into(),
         preprocessing: "none".into(),
     }
+}
+
+/// Complete identity is data, not native authority. Unknown fields must not silently
+/// collapse two provider/revision/normalization spaces into one reusable generation.
+fn full_identity_json() -> serde_json::Value {
+    let mut json = serde_json::to_value(identity()).unwrap();
+    json["provider"] = "numeric-control".into();
+    json["revision"] = "immutable-revision-1".into();
+    json["metric"] = "cosine".into();
+    json["normalization"] = "raw".into();
+    json
+}
+
+#[test]
+fn complete_model_space_refuses_equal_dimension_provider_revision_or_normalization() {
+    let root = vector_root();
+    let original = full_identity_json();
+    let selected: ModelIdentity = serde_json::from_value(original.clone()).unwrap();
+    let rows = vec![VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    drop(VectorStore::build(root.path(), &selected, &rows, &grant(1024), None).unwrap());
+    for (field, value) in [
+        ("provider", "another-provider"),
+        ("revision", "another-revision"),
+        ("normalization", "l2"),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value.into();
+        let other = serde_json::from_value(changed).unwrap();
+        assert!(
+            VectorStore::open(root.path(), &other).is_err(),
+            "ignored {field} in full model space"
+        );
+    }
+}
+
+#[test]
+fn full_model_space_requires_every_component_and_rejects_unknown_metric() {
+    for field in ["provider", "revision", "metric", "normalization"] {
+        let mut incomplete = full_identity_json();
+        incomplete.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<ModelIdentity>(incomplete).is_err(),
+            "missing {field} accepted"
+        );
+    }
+    let mut wrong_metric = full_identity_json();
+    wrong_metric["metric"] = "unsupported-dot".into();
+    assert!(serde_json::from_value::<ModelIdentity>(wrong_metric).is_err());
+}
+
+#[test]
+fn declared_l2_contract_rejects_bad_rows_and_queries_without_changing_current() {
+    let root = vector_root();
+    let rows = vec![VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    }];
+    drop(VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap());
+    let before = fs::read(root.path().join("CURRENT")).unwrap();
+    let mut normalized = identity();
+    normalized.normalization = knowledge_search::VectorNormalization::L2;
+    let mut bad = rows.clone();
+    bad[0].vector = vec![2.0, 0.0];
+    assert!(VectorStore::build(root.path(), &normalized, &bad, &grant(1024), None).is_err());
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), before);
+    let correct = VectorStore::build(root.path(), &normalized, &rows, &grant(1024), None).unwrap();
+    let eligible = BTreeSet::from(["source".into()]);
+    assert!(correct.query(&eligible, &[2.0, 0.0]).is_err());
+    let correct = VectorStore::open(root.path(), &normalized).unwrap();
+    assert_eq!(
+        correct.query(&eligible, &[1.0, 0.0]).unwrap()[0].0,
+        "source"
+    );
 }
 
 #[test]

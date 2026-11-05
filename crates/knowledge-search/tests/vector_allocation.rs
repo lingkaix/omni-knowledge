@@ -86,8 +86,12 @@ fn real_disk_segment_build_does_not_duplicate_the_float_corpus() {
         })
         .collect();
     let identity = ModelIdentity {
+        provider: "numeric-control".into(),
         model: "precomputed-control".into(),
+        revision: "immutable-control-1".into(),
         dimension: 1024,
+        metric: knowledge_search::VectorMetric::Cosine,
+        normalization: knowledge_search::VectorNormalization::Raw,
         package_fingerprint: "c".repeat(64),
         embedding_space: "numeric-control-space".into(),
         preprocessing: "none".into(),

@@ -17,7 +17,10 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-pub use vectors::{ModelIdentity, VectorResult, VectorRow, VectorStore, import_stored_segment};
+pub use vectors::{
+    ModelIdentity, VectorMetric, VectorNormalization, VectorResult, VectorRow, VectorStore,
+    import_stored_segment,
+};
 
 /// A real non-forgeable Core lifetime. Clones retain the SAME promise, not independent spending credit.
 /// The caller provides the complete concurrent operation envelope before constructing inputs.

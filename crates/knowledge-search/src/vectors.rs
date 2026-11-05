@@ -13,10 +13,31 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Exact baseline metric. Unknown metrics cannot silently reuse cosine data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorMetric {
+    Cosine,
+}
+
+/// The provider's vector-output contract; cosine does not make spaces interchangeable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorNormalization {
+    Raw,
+    L2,
+}
+
+/// Complete cache/space identity, never source or native effect authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelIdentity {
+    pub provider: String,
     pub model: String,
+    pub revision: String,
     pub dimension: usize,
+    pub metric: VectorMetric,
+    pub normalization: VectorNormalization,
     pub package_fingerprint: String,
     pub embedding_space: String,
     pub preprocessing: String,
@@ -71,7 +92,9 @@ impl VectorStore {
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| VectorError::Identity("segment size overflow".into()))?;
         let identity_bytes = [
+            &identity.provider,
             &identity.model,
+            &identity.revision,
             &identity.package_fingerprint,
             &identity.embedding_space,
             &identity.preprocessing,
@@ -128,7 +151,7 @@ impl VectorStore {
             if !seen.insert(row.source_id.clone()) {
                 return Err(VectorError::Identity("duplicate source id".into()));
             }
-            if row.vector.len() != identity.dimension || !finite_nonzero(&row.vector) {
+            if !valid_vector(identity, &row.vector) {
                 return Err(VectorError::Vector(row.source_id.clone()));
             }
             let offset = segment_bytes;
@@ -313,7 +336,7 @@ impl VectorStore {
         eligible: &BTreeSet<String>,
         query: &[f32],
     ) -> Result<VectorResult, VectorError> {
-        if query.len() != self.manifest.identity.dimension || !finite_nonzero(query) {
+        if !valid_vector(&self.manifest.identity, query) {
             return Err(VectorError::Vector("query".into()));
         }
         let row_bytes = self
@@ -376,7 +399,7 @@ impl VectorStore {
                     f32::from_le_bytes(le)
                 })
                 .collect();
-            if !finite_nonzero(&vector) {
+            if !valid_vector(&self.manifest.identity, &vector) {
                 return Err(VectorError::Vector(row.source_id.clone()));
             }
             ranked.push((row.source_id.clone(), cosine(query, &vector)));
@@ -575,12 +598,15 @@ fn expected_segment(identity: &ModelIdentity, rows: &[VectorRow]) -> Result<Stri
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn finite_nonzero(vector: &[f32]) -> bool {
-    let norm: f64 = vector
-        .iter()
-        .map(|value| f64::from(*value) * f64::from(*value))
-        .sum();
-    vector.iter().all(|value| value.is_finite()) && norm.is_finite() && norm > 0.0
+fn valid_vector(identity: &ModelIdentity, vector: &[f32]) -> bool {
+    if vector.len() != identity.dimension || vector.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let squared_norm: f64 = vector.iter().map(|v| f64::from(*v).powi(2)).sum();
+    squared_norm.is_finite()
+        && squared_norm > 0.0
+        && (identity.normalization == VectorNormalization::Raw
+            || (squared_norm - 1.0).abs() <= 1e-4)
 }
 
 fn cosine(left: &[f32], right: &[f32]) -> f32 {
@@ -619,9 +645,11 @@ fn private_dir(path: &Path) -> Result<(), VectorError> {
 fn validate_identity(identity: &ModelIdentity) -> Result<(), VectorError> {
     if identity.dimension == 0
         || identity.dimension.checked_mul(4).is_none()
-        || identity.model.is_empty()
-        || identity.embedding_space.is_empty()
-        || identity.preprocessing.is_empty()
+        || identity.provider.trim().is_empty()
+        || identity.model.trim().is_empty()
+        || identity.revision.trim().is_empty()
+        || identity.embedding_space.trim().is_empty()
+        || identity.preprocessing.trim().is_empty()
         || identity.package_fingerprint.len() != 64
         || !identity
             .package_fingerprint
