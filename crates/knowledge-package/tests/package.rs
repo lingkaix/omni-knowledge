@@ -36,7 +36,10 @@ fn open_account() -> Session {
     static START: Once = Once::new();
     static GATE: Mutex<()> = Mutex::new(());
     START.call_once(|| {
-        let path = std::env::temp_dir().join("pkg-m5-account");
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical native temporary parent")
+            .join("pkg-m5-account");
         let _ = fs::remove_dir_all(&path);
         fs::create_dir(&path).expect("account dir");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
@@ -236,7 +239,10 @@ fn dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("pkg-{name}-{nanos}"));
+    let path = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical native temporary parent")
+        .join(format!("pkg-{name}-{nanos}"));
     fs::create_dir(&path).expect("dir");
     path
 }
