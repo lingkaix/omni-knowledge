@@ -131,6 +131,22 @@ impl Journal {
         j.last_sequence()?;
         Ok(j)
     }
+    /// Identify this actual visible stream incarnation by its bounded, validated first record.
+    /// An empty stream has no reusable projection generation; cache state cannot create its history.
+    pub(crate) fn projection_generation(&mut self) -> Result<Option<String>, Error> {
+        let Some((end, _)) = self.next_tracking(0, self.max)? else {
+            return Ok(None);
+        };
+        self.replay = None;
+        self.replay_next = 0;
+        self.replay_sequence = None;
+        self.file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
+        let mut bytes = vec![0; usize::try_from(end).map_err(|_| Error::Budget)?];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|_| Error::Recovery)?;
+        Ok(Some(format!("{:x}", Sha256::digest(&bytes))))
+    }
     /// Open retained evidence read-only, never creating a stream or modifying a damaged tail.
     pub(crate) fn read(dir: &File, writer: &str, max: u64) -> Result<Self, Error> {
         if !crate::component(writer) {

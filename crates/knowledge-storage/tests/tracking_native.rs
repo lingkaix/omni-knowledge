@@ -317,6 +317,40 @@ fn partial_and_unavailable_never_emit_false_tombstones() {
     );
     fs::rename(detached, f.root()).unwrap();
 }
+/// Disposable projections cannot override a new visible writer-stream incarnation at the same native root.
+/// Storage's rebuildable-state rule requires current visible evidence, not an old generated anchor.
+#[test]
+fn stale_generated_projection_does_not_corrupt_a_fresh_visible_stream() {
+    let f = Fixture::new();
+    fs::write(f.root().join("pages/a.md"), b"same bytes").unwrap();
+    assert!(f.scan().complete);
+    let before = f.store().replay_tracking(0, &f.preflight()).unwrap();
+    let old_id = before.observations[0].source_id.clone();
+    let old_journal = fs::read(f.root().join("journal/tracking-writer.jsonl")).unwrap();
+    let archive = tempfile::Builder::new()
+        .prefix("retained-journal-")
+        .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
+        .unwrap();
+    // Retain the actual old stream outside the selected home, leaving its generated projection behind.
+    // This reproduces the namespace collision from native root-inode reuse without forging metadata.
+    fs::rename(f.root().join("journal"), archive.path().join("journal")).unwrap();
+    assert!(f.scan().complete);
+    let current = f.store().replay_tracking(0, &f.preflight()).unwrap();
+    assert!(current.complete && current.issue.is_none());
+    assert_ne!(
+        current.observations[0].source_id, old_id,
+        "generated cache became asset authority"
+    );
+    assert_eq!(
+        fs::read(archive.path().join("journal/tracking-writer.jsonl")).unwrap(),
+        old_journal
+    );
+    let id = current.observations[0].source_id.clone();
+    assert!(f.scan().complete);
+    let reopened = f.store().replay_tracking(0, &f.preflight()).unwrap();
+    assert!(reopened.observations.iter().all(|o| o.source_id == id));
+}
+
 /// Actual polling is an explicit reduced-capability choice and performs bounded metadata, never fake events.
 #[test]
 fn explicit_budgeted_polling_and_native_capacity_fallback() {

@@ -82,6 +82,9 @@ M6 owns when caller-driven checks run; no background scheduler or event-replay c
 The external selected-volume projection is disposable and qualified by root, mount/backend and writer.
 Reconciliation rebuilds relevant identity evidence from all visible writer streams, preserves unchanged asset IDs across sequential writers, and refuses contradictory mappings without comparing cross-writer sequences.
 Every reused projection frame binds an exact actual visible journal proof; rebuild replays bounded lines sequentially without retaining whole inventory in RAM.
+The generated namespace also binds the bounded validated first record of the actual visible writer stream, so native root-inode reuse cannot select an earlier stream's cache frames.
+An empty stream receives a fresh disposable projection generation; later scans rebuild from its actual visible records, not from the old generated cache.
+Old generated generations remain cache-owned and are not deleted or promoted to authored history by reconciliation.
 Eviction does not lose source identities or annotation authority; replay reports exact byte cursors, bounded progress and malformed tails without truncation.
 Resumed replay validates the bounded predecessor and writer-local sequence, including at EOF, before reporting progress or completion.
 Large histories require explicit sufficient replay/work budgets; budget refusal is not a corpus-size prohibition or empty success.

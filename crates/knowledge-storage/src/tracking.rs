@@ -156,8 +156,14 @@ struct Projection {
     writer: String,
 }
 impl Projection {
-    /// Namespace by actual root/library/writer, not global body digest.
-    fn open(root: (u64, u64), backend: &BackendIdentity, writer: &str) -> Result<Self, Error> {
+    /// Namespace by actual root/library/writer and the current visible stream incarnation.
+    /// Reused native root inodes cannot revive disposable frames from a different journal history.
+    fn open(
+        root: (u64, u64),
+        backend: &BackendIdentity,
+        writer: &str,
+        generation: &str,
+    ) -> Result<Self, Error> {
         let parent = Account::current()?.generated_directory()?;
         let parent = native::private_child(&parent, "inventory-v1")?;
         let key = hash(
@@ -165,8 +171,9 @@ impl Projection {
                 .map_err(|_| Error::Invalid)?
                 .as_bytes(),
         );
+        let namespace = native::private_child(&parent, &key)?;
         Ok(Self {
-            dir: native::private_child(&parent, &key)?,
+            dir: native::private_child(&namespace, generation)?,
             root,
             backend: backend.clone(),
             writer: writer.to_owned(),
