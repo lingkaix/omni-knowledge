@@ -1926,3 +1926,271 @@ fn external_observation_keeps_native_evidence_and_not_agent_authorship() {
         Error::ContextMismatch
     );
 }
+
+/// Use only this selected disposable working tree, never the harness cwd or personal configuration.
+fn user_worktree_git(repo: &Path, args: &[&str]) -> String {
+    let worktree = format!("--work-tree={}", repo.parent().unwrap().display());
+    let mut selected = vec![worktree.as_str()];
+    selected.extend_from_slice(args);
+    git(repo, &selected)
+}
+
+/// Real owned ordinary user repository, not imported host Git configuration.
+fn legacy_user_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let output = Command::new("/usr/bin/git")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(["init", "--initial-branch=main", "--template="])
+        .arg(&home)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    fs::create_dir(home.join("pages")).unwrap();
+    fs::create_dir(home.join("raw")).unwrap();
+    fs::write(home.join("pages/a.md"), "Legacy authored text\n").unwrap();
+    fs::write(home.join("raw/photo.bin"), b"actual legacy media\0bytes").unwrap();
+    fs::write(
+        home.join(".gitattributes"),
+        "* filter=fixture-evil diff=fixture-evil\n",
+    )
+    .unwrap();
+    let repo = home.join(".git");
+    user_worktree_git(
+        &repo,
+        &["add", "--", "pages/a.md", "raw/photo.bin", ".gitattributes"],
+    );
+    user_worktree_git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Legacy Human Author",
+            "-c",
+            "user.email=legacy@example.invalid",
+            "commit",
+            "-m",
+            "Original actual user history",
+        ],
+    );
+    (root, home, repo)
+}
+
+/// Use-existing retains actual user history/media/branches/staging while making one selected text-only app commit through a private index.
+#[test]
+fn existing_user_git_preserves_staging_media_history_and_inert_configuration() {
+    use knowledge_history::{ExistingRepository, GitPlacement};
+    use std::os::unix::fs::PermissionsExt;
+    let (root, home, repo) = legacy_user_repo();
+    let base = Oid::parse(&git(&repo, &["rev-parse", "refs/heads/main"])).unwrap();
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "refs/heads/unrelated-user-branch",
+            base.as_str(),
+            &"0".repeat(40),
+        ],
+    );
+    fs::write(
+        home.join("raw/photo.bin"),
+        b"Unrelated actually staged media\0bytes",
+    )
+    .unwrap();
+    user_worktree_git(&repo, &["add", "--", "raw/photo.bin"]);
+    let index = fs::read(repo.join("index")).unwrap();
+    let staged = git(&repo, &["rev-parse", ":raw/photo.bin"]);
+    let media = git(
+        &repo,
+        &["rev-parse", &format!("{}:raw/photo.bin", base.as_str())],
+    );
+    let hooks = root.path().join("hostile-hooks");
+    fs::create_dir(&hooks).unwrap();
+    let marker = root.path().join("must-not-execute");
+    let hostile = hooks.join("post-commit");
+    fs::write(
+        &hostile,
+        format!(
+            "#!/bin/sh\nprintf forbidden > '{}'\nexit 17\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hostile, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = fs::read_to_string(repo.join("config")).unwrap();
+    config.push_str(&format!("\n[core]\n hooksPath = {}\n fsmonitor = {}\n[filter \"fixture-evil\"]\n process = {}\n required = true\n[diff \"fixture-evil\"]\n textconv = {}\n", hooks.display(), hostile.display(), hostile.display(), hostile.display()));
+    fs::write(repo.join("config"), &config).unwrap();
+    let admission = Admission::new();
+    let selected = ExistingRepository {
+        git_dir: &repo,
+        baseline: "refs/heads/main",
+        placement: GitPlacement::LocalUnsynced,
+    };
+    let history =
+        History::use_existing(selected, &home, "pages", owner(false), &admission.claim).unwrap();
+    assert_eq!(history.head(&admission.claim).unwrap(), Some(base.clone()));
+    let request = Request {
+        operation_id: "actual-existing-user-git".into(),
+        base: Some(base.clone()),
+        destination: Destination::Accepted,
+        changes: vec![Change {
+            path: "pages/a.md".into(),
+            text: Some("New app authored text\n".into()),
+        }],
+    };
+    let prepared = history.prepare(&request, &admission.claim).unwrap();
+    assert_eq!(prepared.affected_paths, ["pages/a.md"]);
+    assert!(matches!(
+        history
+            .publish(&request.operation_id, &admission.claim)
+            .unwrap(),
+        State::Published(_)
+    ));
+    let candidate = prepared.candidate.as_ref().unwrap();
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "rev-parse",
+                &format!("{}:raw/photo.bin", candidate.as_str())
+            ]
+        ),
+        media
+    );
+    assert_eq!(git(&repo, &["rev-parse", "refs/heads/main"]), base.as_str());
+    assert_eq!(
+        git(&repo, &["rev-parse", "refs/heads/unrelated-user-branch"]),
+        base.as_str()
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &["-c", "core.fsmonitor=false", "rev-parse", ":raw/photo.bin"]
+        ),
+        staged
+    );
+    assert_eq!(fs::read(repo.join("index")).unwrap(), index);
+    assert_eq!(fs::read_to_string(repo.join("config")).unwrap(), config);
+    assert!(!marker.exists());
+    assert_eq!(
+        fs::read_to_string(home.join("pages/a.md")).unwrap(),
+        "Legacy authored text\n",
+        "Git Published is not filesystem saved_local"
+    );
+    let entries = history.commits(None, 10, &admission.claim).unwrap().entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].author.name, "Legacy Human Author");
+    let mut unselected = request.clone();
+    unselected.operation_id = "never-purge-user-media".into();
+    unselected.base = Some(candidate.clone());
+    unselected.changes = vec![Change {
+        path: "raw/photo.bin".into(),
+        text: None,
+    }];
+    assert_eq!(
+        history.prepare(&unselected, &admission.claim).unwrap_err(),
+        Error::Invalid
+    );
+    // Native re-selection may revalidate changed inert config, but may never reset app history back to user HEAD.
+    config.push_str("\n# Actual native user changed a comment\n");
+    fs::write(repo.join("config"), &config).unwrap();
+    assert!(matches!(
+        History::open(&repo, &home, "pages", owner(false), &admission.claim),
+        Err(Error::ContextMismatch)
+    ));
+    let reopened =
+        History::use_existing(selected, &home, "pages", owner(false), &admission.claim).unwrap();
+    assert_eq!(
+        reopened.head(&admission.claim).unwrap().as_ref(),
+        Some(candidate)
+    );
+    assert_eq!(fs::read(repo.join("index")).unwrap(), index);
+    assert_eq!(fs::read_to_string(repo.join("config")).unwrap(), config);
+    assert!(!marker.exists());
+}
+
+/// Native synchronized/unknown placement cannot authorize use-existing; explicit separate history leaves user Git/HEAD untouched.
+#[test]
+fn existing_selection_requires_native_non_sync_and_separate_never_redirects_home_git() {
+    use knowledge_history::{ExistingRepository, GitPlacement};
+    let (root, home, repo) = legacy_user_repo();
+    let admission = Admission::new();
+    let head = git(&repo, &["rev-parse", "refs/heads/main"]);
+    let index = fs::read(repo.join("index")).unwrap();
+    let config = fs::read(repo.join("config")).unwrap();
+    for placement in [GitPlacement::Synchronized, GitPlacement::Unknown] {
+        assert!(matches!(
+            History::use_existing(
+                ExistingRepository {
+                    git_dir: &repo,
+                    baseline: "refs/heads/main",
+                    placement
+                },
+                &home,
+                "pages",
+                owner(false),
+                &admission.claim
+            ),
+            Err(Error::ContextMismatch)
+        ));
+        assert!(!repo.join("omni-state").exists());
+    }
+    let separate = History::init(
+        &root.path().join("separate-local-history"),
+        &home,
+        "pages",
+        owner(false),
+        &admission.claim,
+    )
+    .unwrap();
+    assert_eq!(separate.head(&admission.claim).unwrap(), None);
+    assert!(home.join(".git").is_dir());
+    assert_eq!(fs::read(repo.join("index")).unwrap(), index);
+    assert_eq!(fs::read(repo.join("config")).unwrap(), config);
+    assert_eq!(git(&repo, &["rev-parse", "refs/heads/main"]), head);
+}
+
+/// The native config parser refuses include/rewrite widening before creating app state, without reading/executing the include target.
+#[test]
+fn existing_config_include_is_inert_and_never_opened() {
+    use knowledge_history::{ExistingRepository, GitPlacement};
+    let (root, home, repo) = legacy_user_repo();
+    let fifo = root.path().join("must-not-read-private-include");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .env_clear()
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = fs::read_to_string(repo.join("config")).unwrap();
+    config.push_str(&format!("\n[include]\n path = {}\n", fifo.display()));
+    fs::write(repo.join("config"), &config).unwrap();
+    let admission = Admission::with_budget(Budget {
+        max_files: 100,
+        max_bytes: 524_288,
+        max_millis: 2000,
+        max_memory_bytes: 64 << 20,
+    });
+    let start = Instant::now();
+    assert!(matches!(
+        History::use_existing(
+            ExistingRepository {
+                git_dir: &repo,
+                baseline: "refs/heads/main",
+                placement: GitPlacement::LocalUnsynced
+            },
+            &home,
+            "pages",
+            owner(false),
+            &admission.claim
+        ),
+        Err(Error::Invalid)
+    ));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(!repo.join("omni-state").exists());
+}

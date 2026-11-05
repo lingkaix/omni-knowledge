@@ -7,6 +7,8 @@
 mod native;
 pub use native::{ProcessIdentity, UnsettledChild};
 
+mod adopt;
+pub use adopt::{ExistingRepository, GitPlacement};
 mod bundle;
 pub use bundle::{BundleError, BundleRef, BundleReport};
 #[cfg(all(test, target_os = "linux"))]
@@ -255,6 +257,9 @@ struct Binding {
     email: String,
     /// Explicit signing choice.
     mode: Mode,
+    /// Native explicitly selected existing database; metadata does not grant current placement/permission.
+    #[serde(default)]
+    existing: Option<adopt::ExistingBinding>,
 }
 /// One durable operation recipe; commit construction is deterministic after this file is synced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -461,6 +466,7 @@ impl History {
             name: owner.name.clone(),
             email: owner.email.clone(),
             mode: owner.mode.clone(),
+            existing: None,
         };
         let history = Self {
             repo,
@@ -509,6 +515,7 @@ impl History {
         Call::new(claim)?;
         let repo = selected_directory(repo)?;
         let home = selected_directory(home)?;
+        selected_directory(&repo.join("omni-state"))?;
         let binding: Binding = load(&repo.join("omni-state/binding.json"))?;
         if binding.version != 1
             || binding.text_root != text_root
@@ -629,6 +636,14 @@ impl History {
         }
         let mut update = Vec::new();
         for change in &request.changes {
+            let mode = if self.binding.existing.is_some() {
+                match &request.base {
+                    Some(base) => self.editable_base(base, &change.path, scratch.path(), &call)?,
+                    None => "100644",
+                }
+            } else {
+                "100644"
+            };
             let entry = if let Some(text) = &change.text {
                 let oid = oid_output(self.git(
                     &["hash-object", "-w", "--stdin", "--no-filters"],
@@ -637,7 +652,7 @@ impl History {
                     None,
                     &call,
                 )?)?;
-                format!("100644 {}\t{}\0", oid.as_str(), change.path)
+                format!("{mode} {}\t{}\0", oid.as_str(), change.path)
             } else {
                 format!("0 {}\t{}\0", "0".repeat(40), change.path)
             };
@@ -822,6 +837,9 @@ impl History {
         self.validate()?;
         let scratch = self.scratch()?;
         self.base_tree(Some(commit), scratch.path(), &call)?;
+        if self.binding.existing.is_some() {
+            self.editable_base(commit, path, scratch.path(), &call)?;
+        }
         let spec = format!("{}:{path}", commit.as_str());
         String::from_utf8(self.git(
             &["cat-file", "blob", &spec],
@@ -839,12 +857,24 @@ impl History {
         selected_directory(&self.home)?;
         if identity(&self.repo)? != self.binding.repo
             || identity(&self.home)? != self.binding.home
-            || self.repo.starts_with(&self.home)
+            || (self.repo.starts_with(&self.home) && self.binding.existing.is_none())
             || self.home.starts_with(&self.repo)
         {
             return Err(Error::ContextMismatch);
         }
-        if bounded_read(&self.repo.join("config"), CONTROL_LIMIT)? != CONFIG.as_bytes() {
+        for name in ["HEAD", "packed-refs"] {
+            if let Ok(meta) = fs::symlink_metadata(self.repo.join(name))
+                && (!meta.is_file() || meta.file_type().is_symlink())
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        let config = bounded_read(&self.repo.join("config"), CONTROL_LIMIT)?;
+        if let Some(existing) = &self.binding.existing {
+            if digest(&config) != existing.config_digest {
+                return Err(Error::ContextMismatch);
+            }
+        } else if config != CONFIG.as_bytes() {
             return Err(Error::Invalid);
         }
         for path in [
@@ -963,6 +993,10 @@ impl History {
         let spec = format!("{}^{{tree}}", base.as_str());
         let tree =
             oid_output(self.git(&["rev-parse", "--verify", &spec], b"", scratch, None, call)?)?;
+        // Existing user history (including media/gitlinks/symlinks) is retained unchanged; each changed/read text path is checked separately.
+        if self.binding.existing.is_some() {
+            return Ok(tree);
+        }
         let listing = self.git(
             &["ls-tree", "-r", "-z", tree.as_str()],
             b"",
@@ -1019,6 +1053,12 @@ impl History {
                 .map_err(|_| Error::Recovery)?
                 .to_owned();
             self.validate_path(&path)?;
+            if self.binding.existing.is_some() {
+                if let Some(base) = base {
+                    self.editable_base(base, &path, scratch, call)?;
+                }
+                self.editable_base(tree, &path, scratch, call)?;
+            }
             affected_paths.push(path);
         }
         if affected_paths.len() as u64 > call.files {

@@ -73,10 +73,14 @@ Later ref activation requires separate native M6 context/permissions and actual 
 ```no_run
 use std::{fs::File, path::Path};
 use knowledge_core::{data::ContentDigest, jobs::Claim};
-use knowledge_history::{History, SshSigner, Error, BundleError, BundleReport};
+use knowledge_history::{History, SshSigner, Error, BundleError, BundleReport, ExistingRepository, OwnerContext};
 // These inputs are supplied only by the already-admitted native host, not decoded as MCP grants.
 fn selected_provider(public_file: &File, native_socket: &Path, claim: &Claim) -> Result<SshSigner, Error> {
     SshSigner::select_agent(public_file, native_socket, claim)
+}
+fn native_existing_choice(selection: ExistingRepository<'_>, home: &Path,
+                          owner: OwnerContext, claim: &Claim) -> Result<History, Error> {
+    History::use_existing(selection, home, "pages", owner, claim)
 }
 fn inert_package_history(history: &History, private_verified_output: &File,
                          exact_stream: &ContentDigest, claim: &Claim) -> Result<BundleReport, BundleError> {
@@ -85,6 +89,15 @@ fn inert_package_history(history: &History, private_verified_output: &File,
     history.admit_bundle(private_verified_output, exact_stream, claim)
 }
 ```
+
+## Native Use-Existing Or Separate Selection
+
+`History::use_existing(ExistingRepository { git_dir, baseline, placement }, home, text_root, owner, &Claim)` uses the actual selected user's object database and reserved app refs, with a private index. `baseline` is an explicit qualified user branch; its unchanged expectation is verified transactionally when creating the initial app accepted ref.
+M6 supplies **current native** `GitPlacement::LocalUnsynced`, ownership and permission, never a decoded model/package placement/confirmed flag. `Synchronized`/`Unknown` refuse before app effects; native placement must be revalidated on later opens too. A stored binding/locator is not a placement or authority grant.
+The explicit separate choice remains `History::init` in external local app data; neither choice relocates Git, writes an absolute home .git redirect, resets the user branch, rewrites history or deletes tracked media.
+Use-existing leaves user HEAD/branches/index/staged bytes untouched and writes new app operations under the app accepted/proposal namespace. It retains original history authors/signatures and all unchanged tracked media/attributes/gitlinks; only selected regular UTF-8 text deltas are accepted. Executable regular text keeps its original mode; symlinks/submodules/binary originals cannot be silently reinterpreted as changed text.
+Existing configuration is parsed by native Git with **no-includes/stdin/name-only**, not executed/copied into app metadata or queried from personal global/system config. Unsafe includes, transport/rewrite widening, alternates and linked-worktree config refuse. Native hooks/fsmonitor/filter/diff execution remains disabled on real plumbing commands; user configuration is not overwritten.
+Configuration version drift refuses. Explicit native re-selection can validate new inert configuration, but never resets an already active app accepted history to today's user HEAD. Existing synced Git requires separate history or a separately authorized relocation; this seam does not perform relocation.
 
 ## Native Cost And Unknown Ownership
 
@@ -119,9 +132,9 @@ System Git is executed directly with cleared environment, disabled global/system
 Commands use finite nonblocking I/O and actual PID/start-pinned owned-group collection; unknown process/I/O/file/lock ownership is retained rather than hidden by an unbounded wait or best-effort cleanup. No broad cleanup or serialized-PID rediscovery authority is used.
 Core whole-call byte/entry ceilings and the earliest claim/call deadline remain enforced; repeated tree reads conservatively consume the same finite work ceiling.
 Native resident observations and file extent ceilings are not an OS/cgroup physical sandbox; the admitted host owns the complete resource plan and actual retained Core-credit lifetime.
-Home/repository native identities are rechecked; existing arbitrary repositories, imported config, symlinks, alternates, and unsafe selected text paths refuse.
+Home/repository native identities are rechecked; use-existing requires explicit native selection and bounded inert config validation. Unsupported/widening config, control-file symlinks, alternates and unsafe changed text paths refuse.
 The host selects an external local non-synced history root and validates all mount overlaps; this crate checks home overlap, not provider residency.
-Native SSH signed commit production/verification and inert bundle admission are real implemented mechanisms; real OS Keychain/GUI prompts and macOS native lifetime behavior remain platform qualification. Remote synchronization/adoption/scheduling remain active completion work, not accepted scope reductions.
+Native SSH signed commit production/verification and inert bundle admission are real implemented mechanisms; real OS Keychain/GUI prompts and macOS native lifetime behavior remain platform qualification. Actual remote synchronization/scheduling remain active completion work, not accepted scope reductions; use-existing/separate selection is implemented as above and still needs integrated/native review.
 This narrow backend does not claim complete history.md product acceptance.
 
 ## Necessity And Checks

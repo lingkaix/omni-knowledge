@@ -302,6 +302,9 @@ impl History {
         let scratch = self.scratch()?;
         self.qualify_version(version, scratch.path(), &call)?;
         self.base_tree(Some(version), scratch.path(), &call)?;
+        if self.binding.existing.is_some() {
+            self.editable_base(version, path, scratch.path(), &call)?;
+        }
         let spec = format!("{}:{path}", version.as_str());
         String::from_utf8(self.git(
             &["cat-file", "blob", &spec],
@@ -333,6 +336,9 @@ impl History {
         )? != Some(intent.prepared.tree.clone())
         {
             return Err(Error::Recovery);
+        }
+        if self.binding.existing.is_some() {
+            self.editable_base(&intent.prepared.tree, path, scratch.path(), &call)?;
         }
         let spec = format!("{}:{path}", intent.prepared.tree.as_str());
         String::from_utf8(self.git(
