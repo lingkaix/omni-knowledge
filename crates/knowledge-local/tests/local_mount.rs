@@ -2662,7 +2662,9 @@ fn spawn_observer_child(test: &str, mode: &str, bound_ms: Option<u64>) -> ChildO
         .env("OMNI_OBSERVER_CHILD", mode)
         .env("OMNI_OBSERVER_MARKER", &marker_path)
         .env_remove("OMNI_FIFO_WORKER")
-        .stdout(Stdio::inherit())
+        // The parent is the libtest case; a deliberately failing child harness
+        // must not masquerade as another outer case in workspace accounting.
+        .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     if let Some(ms) = bound_ms {
         command.env("OMNI_OBSERVER_BOUND_MS", ms.to_string());
@@ -2679,6 +2681,9 @@ fn spawn_observer_child(test: &str, mode: &str, bound_ms: Option<u64>) -> ChildO
     };
     let status = wait_child(&mut child, limit, pid, mode);
     let marker = fs::read_to_string(&marker_path).unwrap_or_default();
+    emit_line(&format!(
+        "OBSERVER_CHILD_RESULT pid={pid} status={status} marker={marker:?}"
+    ));
     assert!(
         marker.contains(&format!("pid={pid}")),
         "marker {marker:?} does not name pid {pid}"
