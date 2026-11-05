@@ -2730,6 +2730,7 @@ pub mod native_service {
     use base64::Engine;
     pub use extraction::{
         NativeAdmitted, NativeAdmittedError, NativeExtraction, NativeExtractionError,
+        NativeIndexInput,
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     use knowledge_core::admission::{Decision, Origin};
@@ -4486,6 +4487,282 @@ mod native_kernel_builder_tests {
         assert!(delivery.check().is_err());
         assert_eq!(result(&delivery)["error"]["code"], "not_exposed");
     }
+    /// Real M3 HTML -> source/processor-bound M4 rows -> immutable unpublished components.
+    /// Precomputed numeric values test the IO contract, not a fake provider or model quality.
+    #[test]
+    fn actual_m3_text_binds_index_representation_before_prepared_vector_consumption() {
+        // Keep the shared process queue's selected-Claim assertions independent of
+        // unrelated native builder tests; preserve all within-case real queue controls.
+        if std::env::var_os("OMNI_NATIVE_INDEX_INPUT_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","native_kernel_builder_tests::actual_m3_text_binds_index_representation_before_prepared_vector_consumption","--nocapture"])
+                .env("OMNI_NATIVE_INDEX_INPUT_CHILD","1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "isolated actual native pipeline: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use knowledge_core::{
+            backend::Budget,
+            data::ContentDigest,
+            jobs::{Priority, Reservation},
+        };
+        use knowledge_search::{
+            AccountGrant, ModelIdentity, VectorMetric, VectorNormalization, VectorRow, VectorStore,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let (_directory, kb, word) = library();
+        let html = format!("<h1>{word}</h1><p>Native 日本語 provenance</p>");
+        fs::write(kb.root.join("raw/indexed.html"), &html).unwrap();
+        let policy = LocalPolicy {
+            mode: wire::ExposureMode::ReadOnly,
+            sensitive: false,
+            excluded_paths: vec![],
+            transports: vec![wire::Transport::OwnerStdio],
+            http_hosts: vec![],
+            http_origins: vec![],
+        };
+        let (service, owner, selection) =
+            native_service::NativeLibraryService::ordinary_local(kb, policy.clone()).unwrap();
+        let session = service.connect(TransportFacts::OwnerStdio).unwrap();
+        let browse = frame(
+            serde_json::json!({"op":"browse","library_id":service.library_id().as_str(),"mount_id":null,"path":"raw","cursor":null,"limit":100}),
+        );
+        let listing = service.dispatch(&browse, &session).unwrap();
+        let listed = result(&listing);
+        let source_id = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "indexed.html")
+            .unwrap()["source"]["source_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        drop(listed);
+        drop(listing);
+        let process = frame(
+            serde_json::json!({"op":"process","library_id":service.library_id().as_str(),"source_ids":[source_id],"recipe":"extract",
+            "budget":{"max_files":1,"max_bytes":"65536","max_millis":60000,"max_memory_bytes":"134217728"},"operation_id":"native-index-input"}),
+        );
+        let command = wire::decode_request(&process).unwrap().command;
+        assert!(
+            matches!(
+                service.native_scope(&session, &command, None),
+                Err(wire::ErrorCode::ReadOnly)
+            ),
+            "actual Process must not borrow a fabricated read-only status permit"
+        );
+        // Explicit controlled native OWNER policy selection, never a request flag/transport grant.
+        owner
+            .set_policy(
+                &selection,
+                LocalPolicy {
+                    mode: wire::ExposureMode::ReadWrite,
+                    ..policy
+                },
+            )
+            .unwrap();
+        let permit = service.native_scope(&session, &command, None).unwrap();
+        let clone = permit.clone();
+        assert!(
+            std::ptr::eq(
+                permit.admitted_command().unwrap(),
+                clone.admitted_command().unwrap()
+            ),
+            "permit clones share the one paid admitted command"
+        );
+        drop(clone);
+        let input_memory = AccountGrant::reserve(
+            Reservation {
+                memory_bytes: 16 * 1024 * 1024,
+                temporary_bytes: 0,
+            },
+            knowledge_core::admission::Origin::BeforeVerification,
+        )
+        .unwrap();
+        let mut oversized = command.clone();
+        if let wire::Command::Process { source_ids, .. } = &mut oversized {
+            let id = source_ids[0].clone();
+            *source_ids = vec![id; 100_000];
+        }
+        assert!(
+            matches!(
+                service.native_scope(&session, &oversized, None),
+                Err(wire::ErrorCode::InvalidRequest)
+            ),
+            "native command size must be bounded before storing its clone"
+        );
+        drop(oversized);
+        drop(input_memory);
+        let budget = Budget {
+            max_files: 1,
+            max_bytes: 65536,
+            max_memory_bytes: 128 * 1024 * 1024,
+            max_millis: 60000,
+        };
+        let digest = |bytes: &[u8]| ContentDigest::new(hex::encode(Sha256::digest(bytes))).unwrap();
+        {
+            let status=wire::decode_request(&frame(serde_json::json!({"op":"library_status","library_id":service.library_id().as_str()}))).unwrap().command;
+            let wrong_permit = service.native_scope(&session, &status, None).unwrap();
+            let wrong = service
+                .source(
+                    &wrong_permit,
+                    &wire::RelativePath::new("raw/indexed.html").unwrap(),
+                    budget,
+                )
+                .unwrap()
+                .processing(
+                    digest(b"wrong-index-status-scope"),
+                    digest(b"native-m3-m4-consumer"),
+                )
+                .unwrap();
+            let account = knowledge_core::admission::Account::current().unwrap();
+            let submitted = wrong
+                .submit(native_service::NativeJobPlan {
+                    operation_id: "wrong-index-scope",
+                    job_id: "wrong-index-scope",
+                    budget,
+                    reservation: Reservation {
+                        memory_bytes: 128 * 1024 * 1024,
+                        temporary_bytes: 0,
+                    },
+                    priority: Priority::Normal,
+                    max_attempts: 1,
+                })
+                .unwrap();
+            let claim = account
+                .queue()
+                .claim(std::time::Instant::now())
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.job(), submitted.job);
+            assert!(
+                wrong.extract_indexed(claim, 65536, None).is_err(),
+                "a status Permit is not the actual Process command/selected source intention"
+            );
+        }
+        let processing = service
+            .source(
+                &permit,
+                &wire::RelativePath::new("raw/indexed.html").unwrap(),
+                budget,
+            )
+            .unwrap()
+            .processing(
+                digest(b"actual-index-html-65536"),
+                digest(b"native-m3-m4-consumer"),
+            )
+            .unwrap();
+        let expected_processor = processing.key().processor.clone();
+        let expected_source = processing.key().source.to_owned();
+        let account = knowledge_core::admission::Account::current().unwrap();
+        let submitted = processing
+            .submit(native_service::NativeJobPlan {
+                operation_id: "native-index-input",
+                job_id: "native-index-input",
+                budget,
+                reservation: Reservation {
+                    memory_bytes: 128 * 1024 * 1024,
+                    temporary_bytes: 2 * 1024 * 1024,
+                },
+                priority: Priority::Normal,
+                max_attempts: 1,
+            })
+            .unwrap();
+        let claim = account
+            .queue()
+            .claim(std::time::Instant::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.job(), submitted.job);
+        // Split the consumer sibling from the SAME complete Claim BEFORE M3 can spend remaining RSS.
+        let work = knowledge_retrieval::Work::split_claim(
+            &claim,
+            processing.key(),
+            Reservation {
+                memory_bytes: 2 * 1024 * 1024,
+                temporary_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let input = processing.extract_indexed(claim, 65536, None).unwrap();
+        assert!(input.text().unwrap().contains(&word));
+        assert_eq!(input.source_id().unwrap(), expected_source);
+        assert_eq!(
+            input.source_digest().unwrap(),
+            digest(html.as_bytes()).as_str()
+        );
+        assert_eq!(
+            input.representation().unwrap().digest,
+            hex::encode(Sha256::digest(input.text().unwrap().as_bytes()))
+        );
+        assert_eq!(
+            input.representation().unwrap().processor,
+            expected_processor.as_str()
+        );
+        let model = ModelIdentity {
+            provider: "precomputed-control".into(),
+            model: "numeric-f32".into(),
+            revision: "fixture-v1".into(),
+            dimension: 2,
+            metric: VectorMetric::Cosine,
+            normalization: VectorNormalization::Raw,
+            package_fingerprint: "cc".repeat(32),
+            embedding_space: "numeric-only".into(),
+            preprocessing: "fixture-input".into(),
+        };
+        let rows = [VectorRow {
+            source_id: input.source_id().unwrap().into(),
+            source_digest: input.source_digest().unwrap().into(),
+            representation: input.representation().unwrap().clone(),
+            locator: "extracted-line:1".into(),
+            vector: vec![1.0, 0.0],
+        }];
+        let output = tempfile::tempdir().unwrap();
+        fs::set_permissions(output.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = std::sync::Arc::new(
+            VectorStore::prepare(
+                output.path(),
+                &model,
+                &rows,
+                &AccountGrant::from_work(work),
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(
+            !output.path().join("CURRENT").exists(),
+            "no partial/independent tuple selection"
+        );
+        let mut member = prepared.component("rows.bin").unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut member, &mut bytes).unwrap();
+        let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let row: serde_json::Value = serde_json::from_slice(&bytes[4..4 + length]).unwrap();
+        assert_eq!(row["source_digest"], input.source_digest().unwrap());
+        assert_eq!(
+            row["representation"]["processor"],
+            expected_processor.as_str()
+        );
+        assert_eq!(
+            row["representation"]["digest"],
+            input.representation().unwrap().digest
+        );
+        drop(row);
+        drop(bytes);
+        drop(member);
+        drop(prepared);
+        drop(rows);
+        drop(model);
+        let source = input.complete().unwrap();
+        source.check().unwrap();
+        assert_eq!(account.status().unwrap().queue.unsettled, 0);
+    }
+
     /// Actual funded opaque extraction retains its source/Claim/paid value and returns credit only after the last reader.
     #[test]
     fn native_extraction_owns_complete_claim_and_paid_result_lifetime() {

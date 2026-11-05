@@ -46,7 +46,8 @@ pub struct ModelIdentity {
     pub preprocessing: String,
 }
 
-/// Original input modality; this never selects or authorizes a native processor.
+/// Embedding-input modality; original media/type remains source-owned. This never
+/// selects or authorizes a native processor (e.g. PDF-derived text is a text input).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorModality {

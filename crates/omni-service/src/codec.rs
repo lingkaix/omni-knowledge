@@ -139,6 +139,24 @@ pub fn encode_response(response: &Response) -> std::result::Result<Vec<u8>, Code
     Ok(writer.bytes)
 }
 
+/// Native callers bypass wire decoding but cannot store an unbounded command clone.
+/// Runtime reserves its actual frame BEFORE this bounded existing codec serialization.
+pub(crate) fn validate_native_command(command: &Command) -> std::result::Result<(), CodecError> {
+    validate_command(command)?;
+    let mut writer = FrameWriter {
+        bytes: Vec::new(),
+        exceeded: false,
+    };
+    if serde_json::to_writer(&mut writer, command).is_err() {
+        return Err(if writer.exceeded {
+            CodecError::FrameTooLarge
+        } else {
+            CodecError::InvalidWireData
+        });
+    }
+    Ok(())
+}
+
 /// Check the owner-defined inclusive range without choosing defaults.
 fn in_range(value: u64, maximum: u64) -> std::result::Result<(), CodecError> {
     if (1..=maximum).contains(&value) {

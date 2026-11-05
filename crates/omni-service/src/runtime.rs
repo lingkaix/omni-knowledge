@@ -97,6 +97,7 @@ impl Runtime {
         approval: Option<HumanApproval>,
     ) -> std::result::Result<Permit, ErrorCode> {
         let resources = std::sync::Arc::new(reserve_frame()?);
+        crate::codec::validate_native_command(command).map_err(|_| ErrorCode::InvalidRequest)?;
         let (_, write, owner) = route(command);
         let mut permit = self.authority.admit(
             session,
