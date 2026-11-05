@@ -1,7 +1,7 @@
 //! Source capabilities retain the verified native descriptor through owner delegation.
 use crate::{
-    ContentDigest, Error, Work, charge_fresh, gate, hex, native, note_read, note_written,
-    preallocate,
+    ContentDigest, Error, Work, charge_fresh, gate, hex, native, note_file, note_read,
+    note_written, preallocate,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{File, Metadata};
@@ -75,6 +75,7 @@ impl VerifiedSource {
         mut output: Option<&mut dyn Write>,
         work: &mut Work<'_>,
     ) -> Result<(), Error> {
+        note_file(work)?;
         let _scratch = preallocate(work, 8192)?;
         if Version::of(&self.file.metadata().map_err(|_| Error::Io)?) != self.version {
             return Err(Error::Drift);
@@ -130,7 +131,7 @@ pub(crate) fn open(
     digest: &ContentDigest,
     work: &mut Work<'_>,
 ) -> Result<VerifiedSource, Error> {
-    let file = native::file(root, path, false)?;
+    let file = native::file(root, path, false, work)?;
     let version = Version::of(&file.metadata().map_err(|_| Error::Io)?);
     let mut source = VerifiedSource {
         file,

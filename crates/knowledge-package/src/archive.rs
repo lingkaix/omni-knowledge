@@ -1,6 +1,6 @@
 //! Bounded ZIP framing. Declared sizes never grant allocation or output.
 use crate::manifest::forbidden;
-use crate::{Error, Method, Work, charge_fresh, note_written, preallocate};
+use crate::{Error, Method, Work, charge_fresh, note_file, note_written, preallocate};
 use crc32fast::Hasher;
 use flate2::{Decompress, FlushDecompress, Status};
 use sha2::{Digest, Sha256};
@@ -31,6 +31,7 @@ pub(crate) struct Member {
 }
 
 pub(crate) fn list(file: &mut File, work: &mut Work<'_>) -> Result<Vec<Member>, Error> {
+    note_file(work)?;
     let len = file.metadata().map_err(|_| Error::Io)?.len();
     if len > work.bounds.quotas.max_archive_bytes {
         return Err(Error::Quota);
@@ -39,7 +40,6 @@ pub(crate) fn list(file: &mut File, work: &mut Work<'_>) -> Result<Vec<Member>, 
     if eocd.entries > work.bounds.quotas.max_entries {
         return Err(Error::Quota);
     }
-    note_file(work)?;
     charge_fresh(
         work,
         eocd.entries
@@ -703,14 +703,6 @@ fn gate(work: &Work<'_>) -> Result<(), Error> {
     }
     if Instant::now() >= work.deadline {
         return Err(Error::Deadline);
-    }
-    Ok(())
-}
-
-fn note_file(work: &mut Work<'_>) -> Result<(), Error> {
-    work.files = work.files.checked_add(1).ok_or(Error::Quota)?;
-    if work.files > work.bounds.budget.max_files {
-        return Err(Error::Quota);
     }
     Ok(())
 }

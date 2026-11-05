@@ -21,18 +21,20 @@ pub fn stage(
 ) -> Result<Staged, Error> {
     operation_id(operation_id_value)?;
     gate(work)?;
-    let parent = native::bind(private_dir)?;
+    let parent = native::bind(private_dir, work)?;
     let generation = private_dir.join(operation_id_value);
-    let prior = native::directory(&parent, Path::new(operation_id_value), false);
+    let prior = native::directory(&parent, Path::new(operation_id_value), false, work);
     if let Ok(root) = &prior {
-        if native::exists(root, "INCOMPLETE")? {
+        if native::exists(root, "INCOMPLETE", work)? {
             return Err(Error::Interrupted);
         }
-        if !native::exists(root, "COMPLETE")? {
+        if !native::exists(root, "COMPLETE", work)? {
             return Err(Error::Conflict);
         }
-    } else if matches!(prior, Err(Error::Hostile)) {
-        return Err(Error::Hostile);
+    } else if let Err(error) = &prior
+        && *error != Error::Io
+    {
+        return Err(*error);
     }
     let opened = open_verified(archive, work)?;
     if !opened.installable {
@@ -56,14 +58,15 @@ pub fn stage(
             work,
         );
     }
+    note_file(work)?;
     rustix::fs::mkdirat(
         &parent,
         operation_id_value,
         rustix::fs::Mode::from_raw_mode(0o700),
     )
     .map_err(|_| Error::Conflict)?;
-    let root = native::directory(&parent, Path::new(operation_id_value), false)?;
-    native::file(&root, Path::new("INCOMPLETE"), true)?
+    let root = native::directory(&parent, Path::new(operation_id_value), false, work)?;
+    native::file(&root, Path::new("INCOMPLETE"), true, work)?
         .sync_all()
         .map_err(|_| Error::Io)?;
     for entry in &opened.manifest.entries {
@@ -71,17 +74,17 @@ pub fn stage(
             .members
             .binary_search_by(|m| m.name.as_str().cmp(entry.path.as_str()))
             .map_err(|_| Error::Disagreement)?];
-        let mut output = native::file(&root, &staged_name(entry), true)?;
+        let mut output = native::file(&root, &staged_name(entry), true, work)?;
         let digest = stream(archive, member, work, &mut Out::Disk(&mut output))?;
         if digest != entry.sha256.as_str() {
             return Err(Error::Checksum);
         }
         output.sync_all().map_err(|_| Error::Io)?;
     }
-    let mut manifest_file = native::file(&root, Path::new("MANIFEST"), true)?;
+    let mut manifest_file = native::file(&root, Path::new("MANIFEST"), true, work)?;
     write_bytes(&mut manifest_file, &opened.canonical, work)?;
     manifest_file.sync_all().map_err(|_| Error::Io)?;
-    let mut plan = native::file(&root, Path::new("PLAN"), true)?;
+    let mut plan = native::file(&root, Path::new("PLAN"), true, work)?;
     plan_parts(
         &opened.snapshot_id,
         operation_id_value,
@@ -89,7 +92,7 @@ pub fn stage(
         |part| write_bytes(&mut plan, part, work),
     )?;
     plan.sync_all().map_err(|_| Error::Io)?;
-    native::file(&root, Path::new("COMPLETE"), true)?
+    native::file(&root, Path::new("COMPLETE"), true, work)?
         .sync_all()
         .map_err(|_| Error::Io)?;
     root.sync_all().map_err(|_| Error::Io)?;
@@ -127,8 +130,8 @@ pub fn apply(
         0,
     )?;
     let mut conflicts = authority.conflicts.clone();
-    if !native::exists(&authority.root, "COMPLETE")?
-        || native::exists(&authority.root, "INCOMPLETE")?
+    if !native::exists(&authority.root, "COMPLETE", work)?
+        || native::exists(&authority.root, "INCOMPLETE", work)?
     {
         return Ok(Applied {
             state: ApplyState::Interrupted,
@@ -183,6 +186,8 @@ pub fn apply(
         {
             continue;
         }
+        // The owner copy admits its own examination; do not delegate when no unit remains.
+        check_file(work)?;
         if entry.role == Role::History {
             if git.admit_inert_bundle(&authority.operation, &mut source, work)? == GitAdmit::Refused
             {
@@ -285,13 +290,13 @@ fn recover(
     operation: &str,
     work: &mut Work<'_>,
 ) -> Result<Manifest, Error> {
-    let mut file = native::file(root, Path::new("MANIFEST"), false)?;
+    let mut file = native::file(root, Path::new("MANIFEST"), false, work)?;
     let canonical = read_source(&mut file, work)?;
     if digest_bytes(&canonical)? != *snapshot {
         return Err(Error::Conflict);
     }
     let manifest = manifest::parse(&canonical, work)?;
-    let mut plan = native::file(root, Path::new("PLAN"), false)?;
+    let mut plan = native::file(root, Path::new("PLAN"), false, work)?;
     let _scratch = preallocate(work, 8192)?;
     let mut buffer = [0u8; 8192];
     plan_parts(snapshot, operation, &manifest, |part| {

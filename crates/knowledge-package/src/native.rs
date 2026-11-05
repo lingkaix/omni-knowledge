@@ -1,29 +1,37 @@
 //! Held-directory operations. Every component is opened with NOFOLLOW.
-use crate::Error;
+use crate::{Error, Work, note_file};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, mkdirat, openat, statat};
 use std::fs::File;
 use std::path::{Component, Path};
 
 /// Bind an absolute directory without following any symlink ancestor.
-pub(crate) fn bind(path: &Path) -> Result<File, Error> {
+pub(crate) fn bind(path: &Path, work: &mut Work<'_>) -> Result<File, Error> {
     if !path.is_absolute() {
         return Err(Error::Hostile);
     }
+    note_file(work)?;
     let root = File::open("/").map_err(|_| Error::Io)?;
     directory(
         &root,
         path.strip_prefix("/").map_err(|_| Error::Hostile)?,
         false,
+        work,
     )
 }
 
 /// Walk ordinary relative components, optionally creating absent directories.
-pub(crate) fn directory(root: &File, path: &Path, create: bool) -> Result<File, Error> {
+pub(crate) fn directory(
+    root: &File,
+    path: &Path,
+    create: bool,
+    work: &mut Work<'_>,
+) -> Result<File, Error> {
     let mut dir = root.try_clone().map_err(|_| Error::Io)?;
     for component in path.components() {
         let Component::Normal(name) = component else {
             return Err(Error::Hostile);
         };
+        note_file(work)?;
         if create {
             match mkdirat(&dir, name, Mode::from_raw_mode(0o700)) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => {}
@@ -43,9 +51,15 @@ pub(crate) fn directory(root: &File, path: &Path, create: bool) -> Result<File, 
 }
 
 /// Open a regular file through held parents. Exclusive creation never truncates evidence.
-pub(crate) fn file(root: &File, path: &Path, create: bool) -> Result<File, Error> {
-    let parent = directory(root, path.parent().ok_or(Error::Hostile)?, create)?;
+pub(crate) fn file(
+    root: &File,
+    path: &Path,
+    create: bool,
+    work: &mut Work<'_>,
+) -> Result<File, Error> {
+    let parent = directory(root, path.parent().ok_or(Error::Hostile)?, create, work)?;
     let name = path.file_name().ok_or(Error::Hostile)?;
+    note_file(work)?;
     if !create {
         let stat = statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(classify)?;
         if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
@@ -72,7 +86,8 @@ pub(crate) fn file(root: &File, path: &Path, create: bool) -> Result<File, Error
 }
 
 /// Observe a marker without following it. Unknown special nodes are refused.
-pub(crate) fn exists(root: &File, name: &str) -> Result<bool, Error> {
+pub(crate) fn exists(root: &File, name: &str, work: &mut Work<'_>) -> Result<bool, Error> {
+    note_file(work)?;
     match statat(root, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => Ok(true),
         Ok(_) => Err(Error::Hostile),
@@ -82,8 +97,14 @@ pub(crate) fn exists(root: &File, name: &str) -> Result<bool, Error> {
 }
 
 /// Link an already confined name into a held destination parent, without replacement.
-pub(crate) fn link(root: &File, name: &str, destination: &Path) -> Result<bool, Error> {
-    let parent = bind(destination.parent().ok_or(Error::Hostile)?)?;
+pub(crate) fn link(
+    root: &File,
+    name: &str,
+    destination: &Path,
+    work: &mut Work<'_>,
+) -> Result<bool, Error> {
+    let parent = bind(destination.parent().ok_or(Error::Hostile)?, work)?;
+    note_file(work)?;
     match rustix::fs::linkat(
         root,
         name,

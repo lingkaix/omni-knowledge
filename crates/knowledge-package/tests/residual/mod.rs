@@ -1,4 +1,6 @@
 //! Public-API regressions using bounded, valid, owned native files only.
+mod files_budget;
+
 use super::*;
 use sha2::{Digest, Sha256};
 

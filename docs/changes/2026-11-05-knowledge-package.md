@@ -58,6 +58,23 @@ This is source-level review with public API runtime regression evidence, not an 
 No independent agent was started because the task excluded agents; external consequential acceptance remains with the lead.
 Linux native gates do not certify macOS/Windows effects or the unfinished cross-owner integrations below.
 
+## Examined-Object Ceiling Correction
+
+The independent review of `130b1584046e482375aa2f971b0fb83407b28257` closed M5-S2-02 and carried 01/04 and the native-handle corrections, but retained M5-S2-03 for missing Core examined-object accounting during restore.
+The review's owned two-file probe and source-bound receipt remain outside the product tree; no reviewer source was copied before the actual repair.
+The correction uses one pre-examination helper for `Work.files`, checked against the supplied `Budget.max_files` before access and incremented only for an admitted attempt, including unavailable objects.
+Native root/component/file/marker operations use that helper, recovery includes completion markers and fresh `MANIFEST`/`PLAN` reads, and source hash/copy passes admit before descriptor examination or output.
+Apply checks remaining examination capacity before delegating to the destination owner, so a later copy refusal is not the first guard.
+Archive and foreign traversal use the same non-overshooting counter; no Core owner, external module, reservation pool, ceiling, or public signature changed.
+
+Three new ordinary two-file public tests supplement all 18 retained controls.
+With max_files=100, both exact files complete and the counter is 14: two marker observations, two recovery files, and two source paths with two parents, a regular file, a verification pass, and an exact-copy pass each.
+With max_files=1, typed `Error::Quota` stops before recovery reads or owner effects, leaves the counter at 1, and remains exhausted on a repeated attempt with the same `Work`.
+With max_files=13, the second verified source is not delegated: the first completed file remains exact, the second destination and its private candidate are absent, and all original/staged files remain preserved.
+The corrected candidate passes locked/offline all-target check, strict all-target Clippy, all 21 public tests with none ignored or filtered, one compiled guide, strict documentation, and workspace format checks.
+The raw strict-Clippy style failure and its corrected rerun are retained under `m5-residual-repair/evidence/files-budget`; no warning allowance or test ceiling change was used.
+The earlier independent closure is not represented as acceptance of this new correction; affected closure and unsafe Root/owner activation remain blocked until review returns.
+
 ## Still required
 
 `crates/knowledge-package/OWNER.md` lists the unfinished calls. It does not close them.

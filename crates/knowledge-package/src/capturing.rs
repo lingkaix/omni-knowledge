@@ -31,10 +31,10 @@ pub fn capture(
         return Err(Error::Quota);
     }
     metadata::capture(capture, inputs, work)?;
-    let root = native::bind(capture.private_dir)?;
+    let root = native::bind(capture.private_dir, work)?;
     let final_name = format!("{}.zip", capture.operation_id);
     let partial_name = format!("{}.partial", capture.operation_id);
-    if native::exists(&root, &final_name)? || native::exists(&root, &partial_name)? {
+    if native::exists(&root, &final_name, work)? || native::exists(&root, &partial_name, work)? {
         return Err(Error::Conflict);
     }
     for input in inputs.iter() {
@@ -48,7 +48,7 @@ pub fn capture(
             return Err(Error::Invalid);
         }
     }
-    let file = native::file(&root, Path::new(&partial_name), true)?;
+    let file = native::file(&root, Path::new(&partial_name), true, work)?;
     let mut file = {
         // miniz's compressor tables/window plus one I/O window. STORED-only captures need no compressor.
         let encoder_bytes = if inputs.iter().any(|i| i.role == Role::Core) {
@@ -65,6 +65,7 @@ pub fn capture(
             let mut digested = Vec::with_capacity(inputs.len());
             let mut total = 0u64;
             for input in inputs.iter_mut() {
+                note_file(&mut cell.borrow_mut())?;
                 let method = method_for(input.role)?;
                 zip.start_file(
                     input.path.as_str(),
@@ -185,6 +186,7 @@ pub fn capture(
     file.seek(SeekFrom::Start(0)).map_err(|_| Error::Io)?;
     let verified = open_verified(&mut file, work)?;
     // Exclusive link, not rename-overwrite. Preserve any earlier generation at either name.
+    note_file(work)?;
     rustix::fs::linkat(
         &root,
         partial_name.as_str(),
@@ -195,7 +197,7 @@ pub fn capture(
     .map_err(|_| Error::Conflict)?;
     rustix::fs::unlinkat(&root, partial_name.as_str(), rustix::fs::AtFlags::empty())
         .map_err(|_| Error::Indeterminate)?;
-    let linked = native::link(&root, &final_name, capture.destination)?;
+    let linked = native::link(&root, &final_name, capture.destination, work)?;
     Ok(Captured {
         snapshot_id: verified.snapshot_id,
         private_path: capture.private_dir.join(final_name),

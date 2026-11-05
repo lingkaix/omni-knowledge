@@ -25,6 +25,12 @@ An old generation without this binding is refused and preserved, not migrated or
 ## Bounds
 
 Callers pass Core `Budget` and explicit format quotas. Zero closes the call.
+`Work.files` enforces Core's examined-object ceiling before native access, including unavailable objects.
+Each native root/component or file/marker observation consumes one unit; reusing a descriptor for a fresh verification or exact-copy pass consumes another unit, not one per read chunk or syscall.
+Recovery therefore counts markers, `MANIFEST`, and `PLAN`, not only restored payloads.
+Apply also checks that a copy unit remains before delegating to storage or history; `VerifiedSource::copy_to` admits its own pass before examining the descriptor or writing output.
+Exhaustion returns typed `Error::Quota` without increasing the counter beyond the supplied ceiling.
+The caller budget is not raised, reset, or replaced during delegation; earlier completed owner writes remain preserved.
 Declared uncompressed sizes are not allocation permission. Deflate output is counted from bytes actually produced.
 A single request larger than the whole call budget is `TooLarge`. Current exhaustion is `Waiting`.
 This crate adds no corpus cap and no second reservation counter.

@@ -228,7 +228,7 @@ pub struct Work<'a> {
     pub read_bytes: u64,
     /// Actual expanded payload bytes accepted so far.
     pub expanded: u64,
-    /// Archive members actually opened.
+    /// Object examinations admitted before native access, including unavailable objects and repeated verification/copy passes.
     pub files: u64,
     /// Live memory charged to this call, including scratch that has not dropped.
     live: Rc<Cell<u64>>,
@@ -722,8 +722,8 @@ pub fn v1_import_plan(
     }) {
         return Err(Error::Invalid);
     }
-    let root_fd = native::bind(root)?;
-    let mut manifest_file = native::file(&root_fd, Path::new("manifest.json"), false)?;
+    let root_fd = native::bind(root, work)?;
+    let mut manifest_file = native::file(&root_fd, Path::new("manifest.json"), false, work)?;
     let bytes = read_source(&mut manifest_file, work)?;
     if !std::str::from_utf8(&bytes)
         .unwrap_or("")
@@ -1169,6 +1169,7 @@ fn walk_v1(
         return Err(Error::Quota);
     }
     let _scratch = preallocate(work, 32_768 + 8192)?;
+    note_file(work)?;
     let mut entries = rustix::fs::Dir::read_from(root).map_err(|_| Error::Io)?;
     while let Some(entry) = entries.read() {
         gate(work)?;
@@ -1177,6 +1178,7 @@ fn walk_v1(
         if matches!(name, "." | ".." | ".git" | ".omni") {
             continue;
         }
+        note_file(work)?;
         let stat = rustix::fs::statat(root, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| Error::Io)?;
         let _path_scratch = preallocate(work, (prefix.as_os_str().len() + name.len() + 1) as u64)?;
@@ -1187,22 +1189,19 @@ fn walk_v1(
         }
         match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
             rustix::fs::FileType::Directory => {
-                let dir = native::directory(root, Path::new(name), false)?;
+                let dir = native::directory(root, Path::new(name), false, work)?;
                 walk_v1(&dir, &path, work, files, depth + 1)?;
             }
             rustix::fs::FileType::RegularFile => {
                 if text == "manifest.json" {
                     continue;
                 }
-                if files.len() as u64 >= work.bounds.quotas.max_entries
-                    || work.files >= work.bounds.budget.max_files
-                {
+                if files.len() as u64 >= work.bounds.quotas.max_entries {
                     return Err(Error::Quota);
                 }
-                work.files += 1;
                 charge_fresh(work, text.len() as u64 * 4 + 512, 0)?;
                 let relative = manifest::path(text)?;
-                let mut input = native::file(root, Path::new(name), false)?;
+                let mut input = native::file(root, Path::new(name), false, work)?;
                 let mut sha = Sha256::new();
                 let mut size = 0u64;
                 let mut buffer = [0u8; 8192];
@@ -1240,6 +1239,22 @@ pub(crate) fn gate(work: &Work<'_>) -> Result<(), Error> {
     if Instant::now() >= work.deadline {
         return Err(Error::Deadline);
     }
+    Ok(())
+}
+
+/// Refuse another object examination or delegation before any native access or copy effect.
+pub(crate) fn check_file(work: &Work<'_>) -> Result<(), Error> {
+    gate(work)?;
+    if work.files >= work.bounds.budget.max_files {
+        return Err(Error::Quota);
+    }
+    Ok(())
+}
+
+/// Admit one object examination, including an unavailable object, without exceeding the ceiling.
+pub(crate) fn note_file(work: &mut Work<'_>) -> Result<(), Error> {
+    check_file(work)?;
+    work.files = work.files.checked_add(1).ok_or(Error::Quota)?;
     Ok(())
 }
 
