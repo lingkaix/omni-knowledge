@@ -1,6 +1,14 @@
 //! Nonmutating workspace checks for folders, index freshness, and local dependencies.
 //! Freshness compares metadata, not source hashes; incomplete checks never report a current index.
 
+/// Format a process-account snapshot supplied by the single account owner.
+///
+/// `None` means that account is not bound. This does not read physical memory
+/// or substitute a default budget.
+pub fn format_process_account(account: Option<knowledge_daemon::AccountFacts>) -> String {
+    knowledge_daemon::format_account(account)
+}
+
 use crate::embedding::EmbeddingClient;
 use crate::runtime::{RuntimeStatus, detect_runtime};
 use crate::{CONFIG_FILE, Config, KnowledgeBase, now_ms, storage};
