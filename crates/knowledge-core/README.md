@@ -197,3 +197,48 @@ Native mode checks and descriptor confinement protect the admitted cooperative p
 Before/after checks detect observed substitutions; they cannot prove no adversary moved the root into a prohibited tree during a syscall.
 Never treat that limitation as permission to follow symlinks, delete unknown nodes, or publish through unvalidated roots.
 Use only disposable real local files for builder probes; lasting independent cache tests and consequential key review must precede integration.
+
+## Preparatory Cooperative Jobs
+
+The portable `jobs` module adds one volatile owned queue/reservation account under the storage owner's Bounded Jobs rule.
+It activates no caller, executor, filesystem operation, service authority, durable journal or cache retirement.
+Its [change record](../../docs/changes/2026-11-04-bounded-jobs.md) records necessity and remaining integration gates.
+All capacities and attempt ceilings are explicit caller choices; there are no default resource policies.
+The effective accounting/default-policy and sequencing decisions requested by the product-bound committee remain proposals, not norms selected here.
+
+`Queue::submit` copies borrowed UTF-8 metadata only after checking retained receipt/text capacities and new-job pending capacity.
+`max_records` bounds every operation receipt, including duplicate-key aliases; canonical jobs cannot outnumber those receipts.
+Text accounting includes each retained ID/key/digest string, including repeated canonical/proposed job IDs; fixed vector/record overhead is count-bounded, not measured heap/RSS.
+There is no capacity-sized preallocation, stale priority heap, unbounded event history or per-mount registry.
+Identical retained operation delivery is a no-op; identical-key work shares one job while each new operation/job alias consumes explicit receipt/text capacity.
+Reuse of a retained operation/job/key with different budget, reservation, priority, attempt bound or key intent returns Conflict rather than silently changing admitted work.
+Terminal keys also deduplicate; only explicit terminal `retire` forgets the whole job and all its aliases.
+Retirement frees only these volatile records, not bytes, pins, journals, processor output or external effects.
+
+`Key` binds stable host context/library/mount/source identity, verified source-byte version, immutable recipe and complete effective processor/dependency fingerprint.
+Use the existing cache `ProcessorIdentity::fingerprint` facts where applicable; the queue has no second hasher/processor catalog and cannot prove those facts current or admitted.
+Opaque IDs and a successful queue call never grant access.
+All current root/policy/residency/source/dependency admission remains with the trusted host/executor owners.
+
+`claim(now)` orders currently eligible work by pinned-before-normal and original FIFO within priority; blocked jobs remain queued and may be bypassed by eligible jobs.
+A claim atomically takes both explicit memory/temporary promises and a per-(context, library, mount) slot, or takes none.
+Home is a None mount; the trusted caller must use stable qualifiers consistently.
+These are simultaneous reservation counters, separate from actual process RAM, I/O/work bytes, retained cache/disk usage and the unchanged Core `Budget` maxima.
+Zero capacity never means unlimited; impossible per-job reservations refuse submission.
+
+Every claim is `Unsettled` until trusted actual executor settlement, including abandoned claims.
+Cancellation, explicit context-matched supersession and `request_expired(now)` request stop without releasing active reservations.
+The first cancellation reason stays recorded; actual completion may win a stop-request race.
+Claim drop does nothing; the claim retains its owner, and `claim.owner()` permits actual settlement after the original Queue handle drops.
+Losing a claim deliberately strands that unsettled record/reservation in this slice; there is no unsafe force-release/recovery bypass.
+A different instance/context or stale/duplicate claim cannot release resources twice.
+
+Only a stopped offline attempt may wait and later reconnect explicitly, within caller-selected finite attempts and available pending capacity.
+There is no automatic retry, backoff timer, polling loop, worker pool, preemption or kill; invalid models and other failures are terminal until host intervention.
+Monotonic deadlines are cooperative observations derived from the unchanged admitted max_millis, not installed child-process limits.
+Explicit supersession checks the same subject/context and different key, never lexicographic digest recency; it does not submit replacement work.
+
+This is one cooperative in-memory owner, not a durable operation store or restart idempotency claim.
+Creating another queue or observing empty counters after losing all owner handles does not establish that old workers stopped or authorize starting replacement capacity.
+The runtime owner must retain/drain accounting while workers can remain live; durable restart reconciliation and cache lifecycle remain separate unimplemented obligations.
+Independent public-API cases and consequential review must precede any actual caller/authority cutover; builder queue/thread smoke is not product-bound or M1 acceptance.
