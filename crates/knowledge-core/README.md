@@ -204,7 +204,7 @@ The portable `jobs` module adds one volatile owned queue/reservation account und
 It activates no caller, executor, filesystem operation, service authority, durable journal or cache retirement.
 Its [change record](../../docs/changes/2026-11-04-bounded-jobs.md) records necessity and remaining integration gates.
 All capacities and attempt ceilings are explicit caller choices; there are no default resource policies.
-The effective accounting/default-policy and sequencing decisions requested by the product-bound committee remain proposals, not norms selected here.
+The accepted [effective accounting policy](../../docs/specs/storage.md#effective-resource-accounting) governs actual integration; this portable slice does not install those defaults, physical bounds, status exposure, or caller activation.
 
 `Queue::submit` copies borrowed UTF-8 metadata only after checking retained receipt/text capacities and new-job pending capacity.
 `max_records` bounds every operation receipt, including duplicate-key aliases; canonical jobs cannot outnumber those receipts.
