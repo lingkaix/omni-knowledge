@@ -30,6 +30,14 @@ unsafe impl GlobalAlloc for Observed {
 #[global_allocator]
 static ALLOCATOR: Observed = Observed;
 
+fn fixture_representation() -> knowledge_search::RepresentationIdentity {
+    knowledge_search::RepresentationIdentity {
+        digest: "11".repeat(32),
+        processor: "22".repeat(32),
+        modality: knowledge_search::VectorModality::Text,
+    }
+}
+
 #[test]
 fn real_disk_segment_build_does_not_duplicate_the_float_corpus() {
     const M: u64 = 1024 * 1024;
@@ -78,6 +86,7 @@ fn real_disk_segment_build_does_not_duplicate_the_float_corpus() {
             let mut vector = vec![0.0; 1024];
             vector[number % 1024] = 1.0;
             VectorRow {
+                representation: fixture_representation(),
                 source_id: format!("source-{number}"),
                 source_digest: "d".repeat(64),
                 locator: "line:1".into(),

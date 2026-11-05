@@ -18,8 +18,9 @@ use std::{
     time::Instant,
 };
 pub use vectors::{
-    ModelIdentity, VectorBuildPlan, VectorEvidence, VectorMetric, VectorNormalization,
-    VectorResult, VectorRow, VectorStore, import_stored_segment,
+    ModelIdentity, RepresentationIdentity, VectorBuildPlan, VectorCandidate, VectorEvidence,
+    VectorMetric, VectorModality, VectorNormalization, VectorResult, VectorRow, VectorStore,
+    import_stored_segment,
 };
 
 /// A real non-forgeable Core lifetime. Clones retain the SAME promise, not independent spending credit.

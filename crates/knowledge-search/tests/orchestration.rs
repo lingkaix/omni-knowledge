@@ -63,6 +63,14 @@ fn search(
     search_lexical(root, store, "library", request)
 }
 
+fn fixture_representation() -> knowledge_search::RepresentationIdentity {
+    knowledge_search::RepresentationIdentity {
+        digest: "11".repeat(32),
+        processor: "22".repeat(32),
+        modality: knowledge_search::VectorModality::Text,
+    }
+}
+
 #[test]
 fn equal_text_hashes_stay_distinct_sources() {
     let root = tempfile::tempdir().unwrap();
@@ -220,6 +228,7 @@ fn complete_model_space_refuses_equal_dimension_provider_revision_or_normalizati
     let original = full_identity_json();
     let selected: ModelIdentity = serde_json::from_value(original.clone()).unwrap();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "source".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -260,6 +269,7 @@ fn full_model_space_requires_every_component_and_rejects_unknown_metric() {
 fn declared_l2_contract_rejects_bad_rows_and_queries_without_changing_current() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "source".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -288,6 +298,7 @@ fn paged_vector_metadata_reopens_a_large_corpus_under_a_small_reader_envelope() 
     let root = vector_root();
     let rows: Vec<_> = (0..10_000)
         .map(|n| VectorRow {
+            representation: fixture_representation(),
             source_id: format!("source-{n:05}-{}", "x".repeat(32)),
             source_digest: "dd".repeat(32),
             locator: "line:1".into(),
@@ -315,6 +326,109 @@ fn paged_vector_metadata_reopens_a_large_corpus_under_a_small_reader_envelope() 
 }
 
 #[test]
+fn written_row_dependencies_bind_representation_processor_and_modality() {
+    let root = vector_root();
+    let row = VectorRow {
+        representation: fixture_representation(),
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    };
+    let built = VectorStore::build(root.path(), &identity(), &[row], &grant(1024), None).unwrap();
+    let bytes = fs::read(root.path().join(built.generation()).join("rows.bin")).unwrap();
+    let count = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let metadata: serde_json::Value = serde_json::from_slice(&bytes[4..4 + count]).unwrap();
+    assert_eq!(
+        metadata["representation"]["digest"],
+        "11".repeat(32),
+        "row lacks the produced representation identity"
+    );
+    assert_eq!(metadata["representation"]["processor"], "22".repeat(32));
+    assert_eq!(metadata["representation"]["modality"], "text");
+}
+
+#[test]
+fn complete_dependency_filter_precedes_payload_and_evidence_distance() {
+    use std::os::unix::fs::FileExt;
+    let root = vector_root();
+    let mut old = fixture_representation();
+    old.processor = "33".repeat(32);
+    old.modality = knowledge_search::VectorModality::Image;
+    let rows = [
+        VectorRow {
+            source_id: "same-source".into(),
+            source_digest: "dd".repeat(32),
+            representation: old,
+            locator: "old-frame".into(),
+            vector: vec![1.0, 0.0],
+        },
+        VectorRow {
+            source_id: "same-source".into(),
+            source_digest: "dd".repeat(32),
+            representation: fixture_representation(),
+            locator: "current-frame".into(),
+            vector: vec![0.0, 1.0],
+        },
+    ];
+    let built = VectorStore::build(root.path(), &identity(), &rows, &grant(1024), None).unwrap();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join(built.generation()).join("segment.bin"))
+        .unwrap();
+    file.write_all_at(&f32::NAN.to_le_bytes(), 0).unwrap();
+    file.sync_all().unwrap();
+    let eligible = |row: knowledge_search::VectorCandidate<'_>| {
+        Ok(row.source_digest == "dd".repeat(32) && row.representation == &fixture_representation())
+    };
+    let result = built.query_rows(&[1.0, 0.0], 1, eligible).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].1, 0.0);
+    assert_eq!(result.evidence()[0].locator, "current-frame");
+    let mut locations = Vec::new();
+    result
+        .visit_rows(eligible, |e| {
+            locations.push(e.locator.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(locations, ["current-frame"]);
+}
+
+#[test]
+fn invalid_or_missing_representation_identity_cannot_publish() {
+    let root = vector_root();
+    let mut row = VectorRow {
+        source_id: "source".into(),
+        source_digest: "dd".repeat(32),
+        representation: fixture_representation(),
+        locator: "line:1".into(),
+        vector: vec![1.0, 0.0],
+    };
+    drop(
+        VectorStore::build(
+            root.path(),
+            &identity(),
+            std::slice::from_ref(&row),
+            &grant(1024),
+            None,
+        )
+        .unwrap(),
+    );
+    let previous = fs::read(root.path().join("CURRENT")).unwrap();
+    row.representation.processor.clear();
+    assert!(VectorStore::build(root.path(), &identity(), &[row], &grant(1024), None).is_err());
+    assert_eq!(fs::read(root.path().join("CURRENT")).unwrap(), previous);
+    assert!(
+        serde_json::from_value::<knowledge_search::RepresentationIdentity>(
+            serde_json::json!({"digest":"11".repeat(32),"modality":"text"})
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_value::<knowledge_search::RepresentationIdentity>(serde_json::json!({"digest":"11".repeat(32),"processor":"22".repeat(32),"modality":"unknown"})).is_err());
+}
+
+#[test]
 fn streaming_admission_refuses_before_advancing_the_real_producer_or_creating_a_root() {
     let root = vector_root();
     let destination = root.path().join("not-created");
@@ -322,6 +436,7 @@ fn streaming_admission_refuses_before_advancing_the_real_producer_or_creating_a_
     let producer = std::iter::from_fn(|| {
         called += 1;
         Some(Ok(VectorRow {
+            representation: fixture_representation(),
             source_id: "source".into(),
             source_digest: "dd".repeat(32),
             locator: "line:1".into(),
@@ -345,6 +460,7 @@ fn streaming_admission_refuses_before_advancing_the_real_producer_or_creating_a_
 fn incomplete_or_unfunded_row_stream_never_replaces_the_complete_pointer() {
     let root = vector_root();
     let row = VectorRow {
+        representation: fixture_representation(),
         source_id: "source".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -404,24 +520,28 @@ fn fragment_count_never_displaces_another_eligible_file_before_limit() {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let rows = vec![
         VectorRow {
+            representation: fixture_representation(),
             source_id: "a".into(),
             source_digest: "aa".repeat(32),
             locator: "line:1".into(),
             vector: vec![1.0, 0.0],
         },
         VectorRow {
+            representation: fixture_representation(),
             source_id: "a".into(),
             source_digest: "aa".repeat(32),
             locator: "line:2".into(),
             vector: vec![0.99, 0.1],
         },
         VectorRow {
+            representation: fixture_representation(),
             source_id: "a".into(),
             source_digest: "aa".repeat(32),
             locator: "line:3".into(),
             vector: vec![0.98, 0.2],
         },
         VectorRow {
+            representation: fixture_representation(),
             source_id: "b".into(),
             source_digest: "bb".repeat(32),
             locator: "line:1".into(),
@@ -442,6 +562,7 @@ fn distinct_fragment_evidence_streams_without_multiplying_the_file_rank() {
     let root = vector_root();
     let rows: Vec<_> = (1..=3)
         .map(|n| VectorRow {
+            representation: fixture_representation(),
             source_id: "a".into(),
             source_digest: "aa".repeat(32),
             locator: format!("line:{n}"),
@@ -465,6 +586,7 @@ fn distinct_fragment_evidence_streams_without_multiplying_the_file_rank() {
 fn actual_open_reader_keeps_its_generation_pinned_without_a_manual_marker() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "source".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -488,6 +610,7 @@ fn actual_open_reader_keeps_its_generation_pinned_without_a_manual_marker() {
 fn identical_bytes_in_a_replaced_segment_are_not_the_admitted_file() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "source".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -515,12 +638,14 @@ fn vector_query_skips_ineligible_rows_before_reading_them() {
     let root = vector_root();
     let rows = vec![
         VectorRow {
+            representation: fixture_representation(),
             source_id: "kept".into(),
             source_digest: "dd".repeat(32),
             locator: "line:1".into(),
             vector: vec![1.0, 0.0],
         },
         VectorRow {
+            representation: fixture_representation(),
             source_id: "hidden".into(),
             source_digest: "ee".repeat(32),
             locator: "line:2".into(),
@@ -549,6 +674,7 @@ fn vector_query_skips_ineligible_rows_before_reading_them() {
 fn reopen_refuses_a_different_model_identity() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -564,6 +690,7 @@ fn reopen_refuses_a_different_model_identity() {
 fn pin_keeps_the_previous_generation() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -588,6 +715,7 @@ fn pin_keeps_the_previous_generation() {
 fn stored_segment_import_checks_bytes_without_reading_a_zip() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -607,6 +735,7 @@ fn stored_segment_import_checks_bytes_without_reading_a_zip() {
 fn independent_real_vector_pins_do_not_unpin_each_other() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -631,6 +760,7 @@ fn vector_reader_consumes_shared_credit_and_reuses_only_after_result_destruction
     let root = vector_root();
     let untouched = root.path().join("not-created");
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),
@@ -656,6 +786,7 @@ fn vector_reader_consumes_shared_credit_and_reuses_only_after_result_destruction
 fn vector_retirement_preserves_unrecognized_generation_files() {
     let root = vector_root();
     let rows = vec![VectorRow {
+        representation: fixture_representation(),
         source_id: "kept".into(),
         source_digest: "dd".repeat(32),
         locator: "line:1".into(),

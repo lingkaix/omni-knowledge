@@ -46,10 +46,38 @@ pub struct ModelIdentity {
     pub preprocessing: String,
 }
 
+/// Original input modality; this never selects or authorizes a native processor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorModality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+/// Complete produced-representation data identity, not a source or execution grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepresentationIdentity {
+    pub digest: String,
+    pub processor: String,
+    pub modality: VectorModality,
+}
+/// Row facts for actual caller eligibility BEFORE distance/candidate limiting.
+/// The callback is not authority; native hosts retain their actual opaque owners.
+#[derive(Clone, Copy)]
+pub struct VectorCandidate<'a> {
+    pub source_id: &'a str,
+    pub source_digest: &'a str,
+    pub representation: &'a RepresentationIdentity,
+    pub locator: &'a str,
+}
 #[derive(Clone, Debug)]
 pub struct VectorRow {
     pub source_id: String,
     pub source_digest: String,
+    pub representation: RepresentationIdentity,
     pub locator: String,
     pub vector: Vec<f32>,
 }
@@ -72,10 +100,29 @@ struct Manifest {
 struct RowMeta {
     source_id: String,
     source_digest: String,
+    representation: RepresentationIdentity,
     locator: String,
     offset: u64,
     /// Hash of this exact row, allowing eligibility before any payload access.
     sha256: String,
+}
+
+impl RowMeta {
+    fn candidate(&self) -> VectorCandidate<'_> {
+        VectorCandidate {
+            source_id: &self.source_id,
+            source_digest: &self.source_digest,
+            representation: &self.representation,
+            locator: &self.locator,
+        }
+    }
+}
+fn valid_representation(identity: &RepresentationIdentity) -> bool {
+    [&identity.digest, &identity.processor].iter().all(|s| {
+        s.len() == 64
+            && s.bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    })
 }
 
 /// Native descriptor identity only; the enclosing native caller must additionally
@@ -401,6 +448,7 @@ impl VectorStore {
                 || row.source_id.is_empty()
                 || row.source_digest.len() != 64
                 || !row.source_digest.bytes().all(|b| b.is_ascii_hexdigit())
+                || !valid_representation(&row.representation)
                 || row.locator.is_empty()
             {
                 return Err(VectorError::Vector(row.source_id));
@@ -418,6 +466,7 @@ impl VectorStore {
             let meta = RowMeta {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 offset: count
                     .checked_mul(row_bytes)
@@ -440,7 +489,7 @@ impl VectorStore {
         let (segment, segment_sha256, segment_bytes) = payload.finish(&mut work, deadline)?;
         let (row_file, metadata_sha256, metadata_bytes) = table.finish(&mut work, deadline)?;
         let manifest = Manifest {
-            format_version: 2,
+            format_version: 3,
             identity: identity.clone(),
             rows: count,
             metadata_sha256,
@@ -589,6 +638,7 @@ impl VectorStore {
             Ok(VectorRow {
                 source_id: row.source_id.clone(),
                 source_digest: row.source_digest.clone(),
+                representation: row.representation.clone(),
                 locator: row.locator.clone(),
                 vector,
             })
@@ -618,6 +668,19 @@ impl VectorStore {
     ) -> Result<VectorResult, VectorError>
     where
         F: FnMut(&str) -> Result<bool, VectorError>,
+    {
+        self.query_rows(query, limit, |row| eligible(row.source_id))
+    }
+    /// Full dependency metadata is available BEFORE distance. Native callers bind it
+    /// to their current real source/representation/tag scope, never a bare ID grant.
+    pub fn query_rows<F>(
+        self,
+        query: &[f32],
+        limit: usize,
+        mut eligible: F,
+    ) -> Result<VectorResult, VectorError>
+    where
+        F: FnMut(VectorCandidate<'_>) -> Result<bool, VectorError>,
     {
         if !valid_vector(&self.manifest.identity, query) {
             return Err(VectorError::Vector("query".into()));
@@ -660,10 +723,11 @@ impl VectorStore {
                 || row.source_digest.len() != 64
                 || row.source_id.is_empty()
                 || row.locator.is_empty()
+                || !valid_representation(&row.representation)
             {
                 return Err(invalid("invalid paged row identity or order"));
             }
-            if !eligible(&row.source_id)? {
+            if !eligible(row.candidate())? {
                 continue;
             }
             self.native.check(&self.generation)?;
@@ -718,6 +782,7 @@ impl VectorStore {
             evidence.push(VectorEvidence {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 score,
             });
@@ -831,6 +896,7 @@ impl VectorStore {
 pub struct VectorEvidence {
     pub source_id: String,
     pub source_digest: String,
+    pub representation: RepresentationIdentity,
     pub locator: String,
     pub score: f32,
 }
@@ -893,9 +959,22 @@ impl VectorResult {
     /// caller rechecks actual source scope before delivery and pays for collection.
     pub fn visit_evidence(
         &self,
+        visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
+    ) -> Result<(), VectorError> {
+        self.visit_rows(|_| Ok(true), visit)
+    }
+    /// Re-admit each representation under current source/tag/dependency scope BEFORE
+    /// reading its payload or computing distance; collect only under separate actual credit.
+    pub fn visit_rows(
+        &self,
+        mut eligible: impl FnMut(VectorCandidate<'_>) -> Result<bool, VectorError>,
         mut visit: impl FnMut(&VectorEvidence) -> Result<(), VectorError>,
     ) -> Result<(), VectorError> {
-        let selected: BTreeSet<_> = self.ranked.iter().map(|(id, _)| id.as_str()).collect();
+        let selected: std::collections::BTreeMap<_, _> = self
+            .evidence
+            .iter()
+            .map(|hit| (hit.source_id.as_str(), hit))
+            .collect();
         let mut offset = 0;
         let mut bytes = vec![
             0;
@@ -915,7 +994,11 @@ impl VectorResult {
                 self.store.manifest.max_row_bytes,
             )?;
             self.store.native.check(&self.store.generation)?;
-            if !selected.contains(row.source_id.as_str()) {
+            if selected
+                .get(row.source_id.as_str())
+                .is_none_or(|winner| winner.source_digest != row.source_digest)
+                || !eligible(row.candidate())?
+            {
                 continue;
             }
             self.file
@@ -937,6 +1020,7 @@ impl VectorResult {
             visit(&VectorEvidence {
                 source_id: row.source_id,
                 source_digest: row.source_digest,
+                representation: row.representation,
                 locator: row.locator,
                 score: cosine(&self.query, &vector),
             })?;
@@ -1046,7 +1130,7 @@ fn check_manifest(
     if &manifest.identity != identity {
         return Err(VectorError::Identity("model identity mismatch".into()));
     }
-    if manifest.format_version != 2
+    if manifest.format_version != 3
         || manifest.segment_bytes
             != manifest
                 .rows
@@ -1071,6 +1155,8 @@ fn row_plan(rows: &[VectorRow]) -> Result<VectorBuildPlan, VectorError> {
         let strings = (row.source_id.len() as u64)
             .checked_add(row.source_digest.len() as u64)
             .and_then(|n| n.checked_add(row.locator.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.digest.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.processor.len() as u64))
             .ok_or_else(|| invalid("row size overflow"))?;
         let bound = strings
             .checked_mul(6)

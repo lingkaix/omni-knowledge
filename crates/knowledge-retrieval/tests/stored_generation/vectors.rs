@@ -6,6 +6,14 @@ use knowledge_search::{
     AccountGrant, ModelIdentity, VectorMetric, VectorNormalization, VectorRow, VectorStore,
 };
 
+fn fixture_representation() -> knowledge_search::RepresentationIdentity {
+    knowledge_search::RepresentationIdentity {
+        digest: "11".repeat(32),
+        processor: "22".repeat(32),
+        modality: knowledge_search::VectorModality::Text,
+    }
+}
+
 #[test]
 fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
     let cache = tempfile::tempdir().unwrap();
@@ -44,6 +52,7 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let rows: Vec<_> = (0..4096)
         .map(|n| VectorRow {
+            representation: fixture_representation(),
             source_id: if n % 2 == 0 {
                 "source-a".into()
             } else {
@@ -68,7 +77,8 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
         &rows,
         &AccountGrant::from_work(reserve(Reservation {
             memory_bytes: 4 * 1024 * 1024,
-            temporary_bytes: 4 * 1024 * 1024,
+            // Complete escaped metadata bound now includes two mandatory SHA identities.
+            temporary_bytes: 8 * 1024 * 1024,
         })),
         None,
     )
