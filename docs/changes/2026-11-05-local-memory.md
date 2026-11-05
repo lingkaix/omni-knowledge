@@ -48,7 +48,16 @@ LOCAL-S2-02 is the independent observer’s worker settlement. This commit does 
 The declared frame reservation is not rustix’s private getdents buffer.
 That buffer stays inside the directory stream and is not a second quota.
 
-## Remaining Proof
+## M1 Listing Follow-Through
+
+The later listing-path review found an unreserved first path allocation and a fourth simultaneous directory-path spelling.
+The M1 correction now measures prefix, separator and name with checked borrowed lengths before child_path constructs any String, including entries later excluded or unsupported.
+The full retained-entry charge still precedes snapshot copies.
+The separately reserved frame prefix is constructed before moving the original path into the entry, so only three path spellings coexist and all three are charged.
+No identity/path quota, budget increase, test/carrier/oracle change or native-buffer/RSS claim is introduced.
+This corrects the remaining declared variable-path bookkeeping; process-wide native-cost integration remains a distinct caller obligation under the adopted resource owner.
+
+## Historical Remaining Proof
 
 Independent OLD-fail / NEW-pass coverage of an oversized qualifier under a small finite budget, and of a positive budget below the initial frame, belongs to the test author.
 This commit’s Linux evidence is `cargo fmt --all -- --check`, `cargo check -p knowledge-local --locked --offline`, strict package Clippy, and `examples/local_read` printing `ok local-read-smoke`.

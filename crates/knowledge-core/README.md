@@ -18,9 +18,16 @@ Use `Account::submit` for typed TooLargeMemory/TooLargeStorage before verified-k
 Use `job_status` for a coherent native waiting reason and the current execution-owned portion; the frozen Snapshot retains admitted intent.
 `Account::queue()` is exactly the existing owner for claim/cancel/settle, not a parallel resource controller.
 `reserve(need, Origin::BeforeVerification)` reserves real read/hash/inspection work without constructing any verified digest or cache key; Startup and current Job origins cover the other actual costs.
+`generated_directory` duplicates the actual selected-volume descriptor for qualified generated writers; it does not authorize a source location or establish cache placement outside source trees.
+Native owners validate actual placement, qualify private namespaces, prepay generated writes and reconcile newly confirmed bytes against that same Account.
 Decision::Waiting(Memory) means current contention, not an impossible job or an instruction to spin; a whole-limit excess is a distinct typed refusal.
 
 `split_claim` atomically moves part of the already charged claim into a non-cloneable Holding; total charge never drops or doubles.
+`rejoin_claim` returns only a synchronous split loan to its exact original still-live owner/job/generation/key, without releasing aggregate charge.
+The synchronous owner must already have destroyed its temporary allocations and completed owned I/O; stale/foreign/pre-verification/ordinary-reserve holdings cannot be adopted as such a loan.
+A stale return conservatively keeps the holding charged, and a successful return makes the old holding stale.
+`Claim::stop_requested(expected_key)` checks its exact current queue/job/generation/full-key binding and observes cancellation, supersession, or deadline requests without releasing any charge.
+Stale or terminal claims fail; native executors check this seam before further controllable work instead of treating a still-owned reservation as permission to continue.
 Actual worker settlement releases only its remaining execution portion and its mount slot; live child/runtime/model/reader holdings stay charged independently.
 Holdings can be moved into the real resource owner and outlive execution; `grow` reserves before additional allocation, and `finish` requires actual resource settlement.
 Dropping or losing a holding releases nothing, because child/model/pin liveness is not inferred from a Rust capability disappearing.

@@ -4174,6 +4174,7 @@ name = "knowledge-local"
 version = "0.1.0"
 dependencies = [
  "knowledge-core",
+ "notify",
  "rustix 1.1.5",
  "sha2 0.10.9",
 ]
@@ -4213,6 +4214,23 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "knowledge-storage"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "knowledge-core",
+ "knowledge-history",
+ "knowledge-local",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "time",
+ "uuid",
 ]
 
 [[package]]
@@ -5329,8 +5347,10 @@ dependencies = [
  "gpui-component",
  "hex",
  "html2text",
+ "knowledge-core",
  "knowledge-daemon",
  "knowledge-processing",
+ "knowledge-storage",
  "libc",
  "mime_guess",
  "objc2",

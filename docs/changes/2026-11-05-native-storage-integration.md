@@ -1,0 +1,9 @@
+# Reviewed native storage integration
+
+Integrate M1 owner `a1144464a6970e608cbbc67f09ff2716d654ba40` with the existing package member, public admission/package controls and native fixture ports. Preserve the one Core account; additive `generated_directory`, exact-generation synchronous `rejoin_claim` and live `Claim::stop_requested` are owner APIs, not a second resource pool or permission from a pathname.
+
+Independent affected review closed the previous seven M1 findings (one S1 and six S2): current policy/path re-admission, preallocation and destruction-before-rejoin, cancellation/supersession, bounded growing-FD decode, cross-writer identity, replay continuity and immutable operation evidence. Canonical storage/history owners remain authoritative. The compiled storage caller contract is `crates/knowledge-storage/m1-interface.md`; callers still owe actual current read policy, exclusions and resource/write lifetimes.
+
+Owner receipts record 466 passing cases and one actual Linux native-watch `Exhausted` failure, not a full-suite pass. A separate owned empty-directory diagnostic successfully created an inotify instance, but adding a real watch failed with errno 28 (`ENOSPC`); its descriptor was closed. This is native capacity evidence, not product-watch qualification. No host limit change, skipped case or weakened assertion is authorized. Existing macOS FSEvents support and native/caller qualification remain open; the required native adapter is a separate active task, not silently waived by reconciliation or an Unsupported response.
+
+Merge workspace membership by union; retain the package dependency delta, independent public controls, corrected M2 confirmation and current native fixtures. Run the maintained gate on the merged source and retain any environmental or product RED separately. No full M1/M4/M6, physical-RSS, native-macOS or final product acceptance is inferred from source review, logical counters or these Linux receipts.

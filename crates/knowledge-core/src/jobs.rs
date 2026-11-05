@@ -243,6 +243,24 @@ pub struct Claim {
     deadline: Instant,
 }
 impl Claim {
+    /// Bind a private synchronous admission loan to its exact immutable claim generation.
+    pub(crate) fn generation_id(&self) -> u64 {
+        self.generation
+    }
+    /// Observe the exact live claim generation and full key before another executor step.
+    /// Returns its stop request without settling resources; stale, foreign-key or terminal claims fail.
+    /// A successful check is cooperative observation, not permission or proof of future liveness.
+    pub fn stop_requested(&self, expected: Key<'_>) -> Result<Option<Cancellation>, JobError> {
+        let inner = self.owner.lock()?;
+        let job = inner.get(self.job, expected)?;
+        if job.generation != Some(self.generation) {
+            return Err(JobError::StaleClaim);
+        }
+        match job.state {
+            State::Unsettled { cancellation } => Ok(cancellation),
+            _ => Err(JobError::StaleClaim),
+        }
+    }
     /// Return the canonical instance-local job number for host dispatch mapping.
     pub fn job(&self) -> u64 {
         self.job

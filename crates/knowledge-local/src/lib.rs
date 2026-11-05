@@ -3,13 +3,19 @@
 //! The adapter implements [`MountBackend`] with
 //! descriptor-relative no-follow metadata, listing, and full-digest range reads.
 //! It does not discover libraries, detect cloud or NAS residency, follow symlinks,
-//! write, watch, or authorize a caller. Read the crate guide before integrating it.
+//! write or authorize a caller. Optional caller-driven Linux watch hints never establish versions/absence.
+//! Read the crate guide before integrating it.
 //! Linux and macOS share this source. macOS execution is not claimed from a Linux build.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod monitor;
 mod native;
+mod stream;
+mod watch;
+pub use monitor::{Monitor, MonitorPolicy, TrackingMode, TrackingStatus};
+pub use watch::{HintState, HintWatch, WatchError};
 
 use knowledge_core::backend::{
     Availability, BackendError, BackendIdentity, Budget, ByteRange, Capabilities, Cursor,
@@ -43,6 +49,8 @@ const MAX_CHUNK: usize = 8192;
 pub enum LocalityPremise {
     /// The caller has already established that this selected directory is an ordinary local root.
     OrdinaryLocal,
+    /// The native owner explicitly selected an existing OS-mounted NAS root; credentials/mounting stay external.
+    OsMountedNas,
     /// The caller has not established that premise. No content probe is performed.
     NotEstablished,
 }
@@ -117,6 +125,8 @@ pub struct LocalMount<P: LocalReadPolicy> {
     library_id: String,
     mount_id: Option<String>,
     policy: P,
+    /// Actual selected native backend class, never inferred from path or portable declarations.
+    kind: BackendKind,
 }
 
 impl<P: LocalReadPolicy> LocalMount<P> {
@@ -146,14 +156,182 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             library_id,
             mount_id,
             policy,
+            kind: BackendKind::Local,
         })
     }
 
+    /// Bind one explicitly selected existing OS-mounted NAS without mounting/authenticating or assuming reliable events.
+    /// Every operation still requires OsMountedNas from the actual current native read owner.
+    pub fn open_os_mount(
+        path: &Path,
+        library_id: impl Into<String>,
+        mount_id: Option<String>,
+        policy: P,
+    ) -> Result<Self, LocalError> {
+        let mut mount = Self::open(path, library_id, mount_id, policy)?;
+        mount.kind = BackendKind::Nas;
+        Ok(mount)
+    }
+    /// Hash a complete actually admitted regular source before a verified source/job key exists.
+    /// The caller retains a SAME-account pre-verification holding through all input/result lifetimes.
+    /// No placeholder/locality guess or fabricated expected digest is needed; drift/refusal stays typed.
+    pub fn verify(
+        &self,
+        path: &RelativePath,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<ExpectedVersion, BackendError> {
+        admitted_budget(holding, budget)?;
+        let root = self.root()?;
+        let started = Instant::now();
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
+            Gate::Proceed(a) => a,
+            Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
+            Gate::Refuse(e) => return Err(e),
+        };
+        if outside(path.as_str(), &admission.outside) {
+            return Err(BackendError::Unavailable(Unavailable::Denied));
+        }
+        if !metadata_fits(path.as_str(), budget) || expired(started, budget.max_millis) {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let (parent, name) = open_parent(&root, path)?;
+        let observed = native::observe(&parent, &name).map_err(map_native)?;
+        if observed.kind != native::NodeKind::File {
+            return Err(kind_error(observed.kind));
+        }
+        let charged = (path.as_str().len() as u64)
+            .checked_add(observed.size)
+            .ok_or(BackendError::BudgetExhausted)?;
+        if charged > budget.max_bytes || budget.max_files == 0 {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let meta = stat_charge(path.as_str(), &observed, &self.library_id, &self.mount_id)
+            .and_then(|n| n.checked_add(DIGEST_TEXT))
+            .ok_or(BackendError::BudgetExhausted)?;
+        if meta >= budget.max_memory_bytes {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let snapshot = snapshot_from(self, path, &observed);
+        let mut hash_budget = budget;
+        hash_budget.max_memory_bytes -= meta;
+        let (_, digest) = hash_file(
+            &parent,
+            &name,
+            &observed,
+            ByteRange::new(0, 1).map_err(|_| BackendError::InvalidRequest)?,
+            hash_budget,
+            started,
+            false,
+        )?;
+        let after = native::observe(&parent, &name).map_err(map_native)?;
+        if !same_content(&snapshot, &after) {
+            return Err(BackendError::Unavailable(Unavailable::Changed));
+        }
+        if live(self, &admission)? == Live::Cancelled {
+            return Err(BackendError::Unavailable(Unavailable::Unknown));
+        }
+        Ok(ExpectedVersion { digest, snapshot })
+    }
+    /// Inspect real link multiplicity under current admission before using file identity as rename evidence.
+    /// Multiple/changed/unknown links cannot select one annotation identity among ambiguous paths.
+    pub fn link_count(
+        &self,
+        path: &RelativePath,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<u64, BackendError> {
+        use std::os::unix::fs::MetadataExt;
+        admitted_budget(holding, budget)?;
+        let before = self.stat(path, budget)?;
+        let root = self.root()?;
+        let (parent, name) = open_parent(&root, path)?;
+        let file = native::open_regular(&parent, &name).map_err(map_native)?;
+        let links = file.metadata().map_err(|_| BackendError::Io)?.nlink();
+        if before != self.stat(path, budget)? {
+            return Err(BackendError::Unavailable(Unavailable::Changed));
+        }
+        Ok(links)
+    }
+    /// Enumerate only after the actual process account has prepaid the declared working-memory ceiling.
+    pub fn list_admitted(
+        &self,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<Enumeration, BackendError> {
+        admitted_budget(holding, budget)?;
+        self.list(None, budget)
+    }
+    /// Check actual descriptor ancestry before placing generated state outside this selected source tree.
+    /// This is a placement fact only; it grants neither cache ownership nor source read permission.
+    pub fn contains_directory(
+        &self,
+        directory: &File,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<bool, BackendError> {
+        admitted_budget(holding, budget)?;
+        let _ = self.read_scope(budget, holding)?;
+        let target = self.root_identity()?;
+        let mut dir = directory.try_clone().map_err(|_| BackendError::Io)?;
+        let started = Instant::now();
+        loop {
+            if expired(started, budget.max_millis) {
+                return Err(BackendError::BudgetExhausted);
+            }
+            let (d, i, k) = native::identity_of(&dir).map_err(map_native)?;
+            if k != native::NodeKind::Directory {
+                return Err(BackendError::InvalidRequest);
+            }
+            if (d, i) == target {
+                return Ok(true);
+            }
+            let parent = native::open_directory(&dir, "..").map_err(map_native)?;
+            let (pd, pi, _) = native::identity_of(&parent).map_err(map_native)?;
+            if (pd, pi) == (d, i) {
+                return Ok(false);
+            }
+            dir = parent;
+        }
+    }
+    /// Fingerprint actual current native read revision/exclusions for a scoped durable scan boundary.
+    /// This correlation string is NOT a source digest, approval token or permission to skip source checks.
+    pub fn read_scope(
+        &self,
+        budget: Budget,
+        holding: &knowledge_core::admission::Holding,
+    ) -> Result<String, BackendError> {
+        admitted_budget(holding, budget)?;
+        self.root()?;
+        let a = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
+            Gate::Proceed(a) => a,
+            Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
+            Gate::Refuse(e) => return Err(e),
+        };
+        let mut h = Sha256::new();
+        h.update(a.revision.to_le_bytes());
+        h.update([matches!(a.locality, LocalityPremise::OsMountedNas) as u8]);
+        for p in &a.outside {
+            h.update((p.as_str().len() as u64).to_le_bytes());
+            h.update(p.as_str().as_bytes());
+        }
+        Ok(format!("{:x}", h.finalize()))
+    }
+    /// Measure owned qualifier-copy costs before a native consumer allocates its context projection.
+    pub fn context_bytes(&self) -> Option<u64> {
+        (self.library_id.len() as u64)
+            .checked_add(self.mount_id.as_ref().map_or(0, |m| m.len() as u64))?
+            .checked_add(128)
+    }
+    /// Return this selected adapter's data qualifier; actual root/read admission is still checked per call.
+    pub fn context(&self) -> BackendIdentity {
+        self.backend_identity()
+    }
     fn backend_identity(&self) -> BackendIdentity {
         BackendIdentity {
             library_id: self.library_id.clone(),
             mount_id: self.mount_id.clone(),
-            backend: BackendKind::Local,
+            backend: self.kind,
         }
     }
 
@@ -190,7 +368,7 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
     fn list(&self, cursor: Option<&Cursor>, budget: Budget) -> Result<Enumeration, BackendError> {
         reject_cursor(cursor)?;
         let root = self.root()?;
-        let admission = match gate(&self.policy, &self.library_id, &self.mount_id)? {
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
             Gate::Cancel => {
                 return Ok(partial(
                     Vec::new(),
@@ -220,7 +398,7 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
     fn stat(&self, path: &RelativePath, budget: Budget) -> Result<StatObservation, BackendError> {
         let root = self.root()?;
         let started = Instant::now();
-        let admission = match gate(&self.policy, &self.library_id, &self.mount_id)? {
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
             Gate::Proceed(admission) => admission,
             Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
             Gate::Refuse(error) => return Err(error),
@@ -270,7 +448,7 @@ impl<P: LocalReadPolicy> MountBackend for LocalMount<P> {
         }
         let root = self.root()?;
         let started = Instant::now();
-        let admission = match gate(&self.policy, &self.library_id, &self.mount_id)? {
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
             Gate::Proceed(admission) => admission,
             Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
             Gate::Refuse(error) => return Err(error),
@@ -433,6 +611,8 @@ fn copy_overlap(retained: &mut [u8], just_read: &[u8], position: u64, range_off:
     retained[dst..dst + len].copy_from_slice(&just_read[src..src + len]);
 }
 
+/// Enumerate current admitted entries with borrowed-name path admission before any owned path copy.
+/// Partial results retain accepted entries; frame/entry accounting covers every coexisting path spelling.
 fn walk<P: LocalReadPolicy>(
     mount: &LocalMount<P>,
     root: &File,
@@ -503,6 +683,17 @@ fn walk<P: LocalReadPolicy>(
                         progress(examined, bytes_read, started),
                     ));
                 };
+                // Even excluded/unsupported entries must not allocate their temporary path first.
+                if child_path_len(prefix, text)
+                    .and_then(|bytes| try_reserve(memory, bytes, budget.max_memory_bytes))
+                    .is_none()
+                {
+                    return Ok(partial(
+                        entries,
+                        EnumerationStop::BudgetExhausted,
+                        progress(examined, bytes_read, started),
+                    ));
+                }
                 let relative = child_path(prefix, text);
                 let Ok(path) = RelativePath::new(relative) else {
                     return Ok(partial(
@@ -609,14 +800,13 @@ fn walk<P: LocalReadPolicy>(
                             return stop_or_err(entries, examined, bytes_read, started, error);
                         }
                     };
-                    entries.push(ListedEntry {
-                        path: path.clone(),
-                        kind,
-                        stat,
-                    });
+                    // Two retained entry/snapshot paths plus this pre-reserved frame prefix.
+                    // Move the original into the entry: never create a fourth simultaneous spelling.
+                    let frame_prefix = path.as_str().to_owned();
+                    entries.push(ListedEntry { path, kind, stat });
                     stack.push(Frame {
                         iter: child_iter,
-                        prefix: path.as_str().to_string(),
+                        prefix: frame_prefix,
                         dir: child,
                     });
                 } else {
@@ -625,6 +815,21 @@ fn walk<P: LocalReadPolicy>(
             }
         }
     }
+}
+
+/// Validate an actual unsettled process holding before allocating under a public backend budget.
+fn admitted_budget(
+    holding: &knowledge_core::admission::Holding,
+    budget: Budget,
+) -> Result<(), BackendError> {
+    knowledge_core::admission::Account::current().map_err(|_| BackendError::InvalidRequest)?;
+    let remaining = holding
+        .remaining()
+        .map_err(|_| BackendError::InvalidRequest)?;
+    if budget.max_memory_bytes == 0 || budget.max_memory_bytes > remaining.memory_bytes {
+        return Err(BackendError::BudgetExhausted);
+    }
+    Ok(())
 }
 
 fn deliver_list<P: LocalReadPolicy>(
@@ -659,7 +864,12 @@ fn live<P: LocalReadPolicy>(
     before: &Admission,
 ) -> Result<Live, BackendError> {
     let _ = mount.root()?;
-    match gate(&mount.policy, &mount.library_id, &mount.mount_id)? {
+    match gate(
+        &mount.policy,
+        &mount.library_id,
+        &mount.mount_id,
+        mount.kind,
+    )? {
         Gate::Proceed(after) if same_admission(before, &after) => Ok(Live::Current),
         Gate::Proceed(_) => Err(BackendError::Unavailable(Unavailable::Changed)),
         Gate::Cancel => Ok(Live::Cancelled),
@@ -741,7 +951,7 @@ fn duplicate_dir(dir: &File) -> Result<File, BackendError> {
 
 struct Admission {
     revision: u64,
-    ordinary: bool,
+    locality: LocalityPremise,
     outside: Vec<RelativePath>,
 }
 
@@ -755,6 +965,7 @@ fn gate<P: LocalReadPolicy>(
     policy: &P,
     library_id: &str,
     mount_id: &Option<String>,
+    kind: BackendKind,
 ) -> Result<Gate, BackendError> {
     match policy.decide() {
         ReadDecision::Cancel => Ok(Gate::Cancel),
@@ -774,14 +985,18 @@ fn gate<P: LocalReadPolicy>(
             {
                 return Ok(Gate::Refuse(BackendError::InvalidRequest));
             }
-            if admission.locality != LocalityPremise::OrdinaryLocal {
+            if !matches!(
+                (kind, admission.locality),
+                (BackendKind::Local, LocalityPremise::OrdinaryLocal)
+                    | (BackendKind::Nas, LocalityPremise::OsMountedNas)
+            ) {
                 return Ok(Gate::Refuse(BackendError::Unavailable(
                     Unavailable::Unknown,
                 )));
             }
             Ok(Gate::Proceed(Admission {
                 revision: admission.revision,
-                ordinary: true,
+                locality: admission.locality,
                 outside: admission.outside_scope,
             }))
         }
@@ -790,7 +1005,7 @@ fn gate<P: LocalReadPolicy>(
 
 fn same_admission(left: &Admission, right: &Admission) -> bool {
     left.revision == right.revision
-        && left.ordinary == right.ordinary
+        && left.locality == right.locality
         && same_scopes(&left.outside, &right.outside)
 }
 
@@ -821,7 +1036,7 @@ fn same_bound_backend<P: LocalReadPolicy>(
     mount: &LocalMount<P>,
     backend: &BackendIdentity,
 ) -> bool {
-    backend.backend == BackendKind::Local
+    backend.backend == mount.kind
         && backend.library_id == mount.library_id
         && backend.mount_id == mount.mount_id
 }
@@ -1008,6 +1223,16 @@ fn decimal_eq(text: &str, value: u64) -> bool {
     text.as_bytes() == &buf[cursor..]
 }
 
+/// Measure the next UTF-8 path from borrowed components before allocation; overflow refuses admission.
+fn child_path_len(prefix: &str, name: &str) -> Option<u64> {
+    prefix
+        .len()
+        .checked_add(name.len())?
+        .checked_add(usize::from(!prefix.is_empty()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+/// Construct an owned relative spelling only after child_path_len fits the current reservation.
 fn child_path(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()

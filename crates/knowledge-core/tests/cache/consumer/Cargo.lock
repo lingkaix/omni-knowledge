@@ -23,6 +23,7 @@ version = "0.0.0"
 dependencies = [
  "knowledge-core",
  "libc",
+ "rustix",
  "sha2",
 ]
 

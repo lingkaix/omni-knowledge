@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/knowledge-processing", "crates/omni-service", "crates/knowledge-daemon", "crates/knowledge-history", "crates/knowledge-package"]
+members = [".", "vendor/retrieval-kernel", "crates/knowledge-core", "crates/knowledge-local", "crates/knowledge-processing", "crates/omni-service", "crates/knowledge-daemon", "crates/knowledge-history", "crates/knowledge-package", "crates/knowledge-storage"]
 resolver = "3"
 
 [package]
@@ -28,6 +28,8 @@ path = "src/bin/omni-knowledge-gui.rs"
 required-features = ["gui"]
 
 [dependencies]
+knowledge-core = { path = "crates/knowledge-core" }
+knowledge-storage = { path = "crates/knowledge-storage" }
 knowledge-processing = { path = "crates/knowledge-processing" }
 anyhow = "1"
 knowledge-daemon = { path = "crates/knowledge-daemon" }
