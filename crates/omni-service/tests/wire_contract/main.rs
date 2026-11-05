@@ -5,6 +5,7 @@
 
 mod bounds;
 mod goldens;
+mod integers;
 mod regressions;
 mod results;
 mod support;
