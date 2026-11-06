@@ -717,7 +717,7 @@ fn run_command(
 }
 
 /// Existing private regression seam: actual tools use precisely the same admitted runner.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn run_bounded(
     command: Command,
     timeout: Duration,
@@ -758,7 +758,7 @@ fn fd_path(file: &File) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::admission::AdmitError;
