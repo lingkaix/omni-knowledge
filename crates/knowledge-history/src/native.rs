@@ -425,9 +425,9 @@ impl Runtime {
 
 #[cfg(test)]
 std::thread_local! {static TEST_EXIT_BEFORE_DRAIN:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};static TEST_EMPTY_SIGNALS:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};}
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) struct QueuedExitFixture;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl QueuedExitFixture {
     pub fn start() -> Self {
         TEST_EMPTY_SIGNALS.with(|v| v.set(0));
@@ -438,7 +438,7 @@ impl QueuedExitFixture {
         TEST_EMPTY_SIGNALS.with(|v| v.get())
     }
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl Drop for QueuedExitFixture {
     fn drop(&mut self) {
         TEST_EXIT_BEFORE_DRAIN.with(|v| v.set(false));
