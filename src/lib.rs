@@ -4800,6 +4800,24 @@ mod native_kernel_builder_tests {
     /// Actual funded opaque extraction retains its source/Claim/paid value and returns credit only after the last reader.
     #[test]
     fn native_extraction_owns_complete_claim_and_paid_result_lifetime() {
+        // The unchanged oracle compares exact process-account credit before/after settlement.
+        // Parallel native tests cannot share that premise: they legitimately grow/release loans.
+        if std::env::var_os("OMNI_EXTRACTION_OWNERSHIP_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","native_kernel_builder_tests::native_extraction_owns_complete_claim_and_paid_result_lifetime","--nocapture"])
+                .env("OMNI_EXTRACTION_OWNERSHIP_CHILD","1").output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "the actual ownership fixture must execute"
+            );
+            assert!(
+                output.status.success(),
+                "actual ownership child: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use knowledge_core::{
             backend::Budget,
             data::ContentDigest,

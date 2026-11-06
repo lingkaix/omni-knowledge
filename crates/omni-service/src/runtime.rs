@@ -9,7 +9,10 @@ use crate::{
 };
 use knowledge_core::admission::{Account, Decision, Holding, Origin};
 use knowledge_core::jobs::Reservation;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 /// Hostcall responsibility, not a second command registry or public wire operation.
@@ -324,15 +327,71 @@ impl Drop for StatusStream<'_> {
 
 /// An actual frame-lifetime charge from Core, not another transport admission controller.
 pub(crate) struct FrameResources {
-    holding: std::sync::Mutex<Holding>,
+    // Actual native pins die before this scope's resource credit, including poison/unwind drops.
     checks: std::sync::Mutex<Vec<crate::authority::DeliveryCheck>>,
+    pub(crate) budget: Arc<FrameBudget>,
+}
+/// Shared command-data lifetime, separately retained from scope-specific native result pins.
+/// This is ONE actual Core holding, not a pool, refund mechanism or authority object.
+pub(crate) struct FrameBudget {
+    state: std::sync::Mutex<FrameBudgetState>,
+}
+struct FrameBudgetState {
+    holding: Option<Holding>,
+    /// None preserves ordinary transport admission. Some spends only the prepaid affine loan.
+    unspent: Option<u64>,
 }
 impl FrameResources {
+    /// Consume an already admitted SAME-claim loan before copying scope data/native inspection.
+    pub(crate) fn prepaid(
+        holding: Holding,
+        scope_bytes: u64,
+    ) -> std::result::Result<Self, ErrorCode> {
+        let remaining = holding
+            .remaining()
+            .map_err(|_| ErrorCode::BudgetExhausted)?;
+        let unspent = remaining
+            .memory_bytes
+            .checked_sub(scope_bytes)
+            .ok_or(ErrorCode::BudgetExhausted)?;
+        Ok(Self {
+            checks: std::sync::Mutex::new(Vec::new()),
+            budget: Arc::new(FrameBudget {
+                state: std::sync::Mutex::new(FrameBudgetState {
+                    holding: Some(holding),
+                    unspent: Some(unspent),
+                }),
+            }),
+        })
+    }
+    /// Take only an exclusively owned prepaid scope loan. Actual callback buffers/FD pins die
+    /// first; the caller then destroys the remaining Permit fields before exact-claim rejoin.
+    pub(crate) fn take_prepaid(&mut self) -> Option<Holding> {
+        let budget = Arc::get_mut(&mut self.budget)?;
+        let state = budget
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.unspent?;
+        drop(std::mem::take(
+            self.checks
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ));
+        state.holding.take()
+    }
     pub(crate) fn grow(&self, bytes: u64) -> std::result::Result<(), ErrorCode> {
-        match self
+        let mut state = self.budget.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if let Some(unspent) = &mut state.unspent {
+            *unspent = unspent
+                .checked_sub(bytes)
+                .ok_or(ErrorCode::BudgetExhausted)?;
+            return Ok(());
+        }
+        match state
             .holding
-            .lock()
-            .map_err(|_| ErrorCode::Internal)?
+            .as_mut()
+            .ok_or(ErrorCode::Internal)?
             .grow(Reservation {
                 memory_bytes: bytes,
                 temporary_bytes: 0,
@@ -371,13 +430,22 @@ impl FrameResources {
     }
 }
 impl Drop for FrameResources {
-    /// Payload and host execution have settled before the owning Delivery releases this resource.
+    /// Version/result pins end with their scope, even while shared command bytes remain alive.
     fn drop(&mut self) {
-        // Captured native pins/FDs and their actual state checks die before their aggregate charge.
-        if let Ok(checks) = self.checks.get_mut() {
-            checks.clear();
-        }
-        if let Ok(holding) = self.holding.get_mut() {
+        self.checks
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+impl Drop for FrameBudget {
+    /// The last actual command/scope owner ends its ONE real holding after its paid bytes die.
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holding) = &mut state.holding {
             let _ = holding.finish();
         }
     }
@@ -396,8 +464,13 @@ fn reserve_frame() -> std::result::Result<FrameResources, ErrorCode> {
         .map_err(|_| ErrorCode::BudgetExhausted)?
     {
         Decision::Ready(holding) => Ok(FrameResources {
-            holding: std::sync::Mutex::new(holding),
             checks: std::sync::Mutex::new(Vec::new()),
+            budget: Arc::new(FrameBudget {
+                state: std::sync::Mutex::new(FrameBudgetState {
+                    holding: Some(holding),
+                    unspent: None,
+                }),
+            }),
         }),
         Decision::Waiting(_) => Err(ErrorCode::Busy),
     }
