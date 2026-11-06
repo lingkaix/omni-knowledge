@@ -370,3 +370,69 @@ fn stale_collector_cannot_settle_newer_owner_or_its_concurrent_unwind() {
         "actual owner-bound outcomes (probe, lock, scratch, registered, blocked, slot): {outcomes:?}"
     );
 }
+
+/// Actual exact owned exit plus queued bytes is neither EOF nor a reason to signal an empty group.
+#[test]
+fn actual_exited_group_drains_queued_output_without_empty_group_signal() {
+    let version = ContentDigest::new(digest(b"actual-exit-before-queued-drain")).unwrap();
+    let key = Key {
+        context: "actual-queued-native-exit",
+        library: "native",
+        mount: None,
+        source: "owned-sh-pipe",
+        version: &version,
+        recipe: &version,
+        processor: &version,
+    };
+    let queue = Queue::new(Limits {
+        max_pending: 1,
+        max_records: 1,
+        max_descriptor_bytes: 4096,
+        per_mount: 1,
+        memory_bytes: 128 << 20,
+        temporary_bytes: 128 << 20,
+    })
+    .unwrap();
+    queue
+        .submit(Submission {
+            operation_id: "queued-native-exit",
+            job_id: "queued-native-exit",
+            key,
+            budget: Budget {
+                max_files: 4,
+                max_bytes: 131072,
+                max_millis: 10000,
+                max_memory_bytes: 64 << 20,
+            },
+            reservation: Reservation {
+                memory_bytes: 64 << 20,
+                temporary_bytes: 64 << 20,
+            },
+            priority: Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    let claim = queue.claim(Instant::now()).unwrap().unwrap();
+    let runtime = native::Runtime::default();
+    let timing = native::QueuedExitFixture::start();
+    let mut command = Command::new("/bin/sh");
+    command.env_clear().args(["-c", "printf x; printf y >&2"]);
+    let output = runtime.execute(command, b"", &Call::new(&claim).unwrap());
+    // Always complete actual native collection before deciding the signal oracle.
+    assert!(
+        runtime.pending().unwrap().is_none(),
+        "an unresolved actual owner is not settlement"
+    );
+    assert_eq!(
+        timing.empty_signals(),
+        0,
+        "an exact exited/empty group with queued output must be drained, not signalled"
+    );
+    let output = output.unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"x");
+    assert_eq!(output.stderr, b"y");
+    drop(output);
+    drop(timing);
+    queue.settle(&claim, key, Outcome::Completed).unwrap();
+}

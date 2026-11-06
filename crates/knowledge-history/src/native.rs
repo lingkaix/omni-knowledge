@@ -305,6 +305,13 @@ impl Runtime {
             .and_then(|_| stdin.as_ref().map(nonblocking).transpose().map(|_| ()));
         let result = (|| -> Result<(), Error> {
             setup.map_err(|e| trace_io("pipe-setup", e))?;
+            #[cfg(test)]
+            if TEST_EXIT_BEFORE_DRAIN.with(|v| v.get()) {
+                while !exited(identity.pid)? {
+                    call.check()?;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
             loop {
                 call.check()?;
                 match group_sample(identity) {
@@ -356,9 +363,9 @@ impl Runtime {
                         signal(identity).map_err(|e| trace_io("live-group-signal", e))?;
                         return Err(Error::Recovery);
                     }
-                    if !out_done || !err_done {
-                        signal(identity).map_err(|e| trace_io("pipe-group-signal", e))?;
-                    }
+                    // Exact leader exit and no live group members do NOT prove pipe EOF.
+                    // Keep the same foreground owner draining queued bytes; signalling this
+                    // empty/zombie group is unnecessary and may return EPERM on Darwin.
                     if sample.live == 0 && out_done && err_done {
                         break;
                     }
@@ -416,6 +423,28 @@ impl Runtime {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {static TEST_EXIT_BEFORE_DRAIN:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};static TEST_EMPTY_SIGNALS:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};}
+#[cfg(test)]
+pub(crate) struct QueuedExitFixture;
+#[cfg(test)]
+impl QueuedExitFixture {
+    pub fn start() -> Self {
+        TEST_EMPTY_SIGNALS.with(|v| v.set(0));
+        TEST_EXIT_BEFORE_DRAIN.with(|v| v.set(true));
+        Self
+    }
+    pub fn empty_signals(&self) -> usize {
+        TEST_EMPTY_SIGNALS.with(|v| v.get())
+    }
+}
+#[cfg(test)]
+impl Drop for QueuedExitFixture {
+    fn drop(&mut self) {
+        TEST_EXIT_BEFORE_DRAIN.with(|v| v.set(false));
+    }
+}
+
 /// Numeric native-origin evidence only; do not expose paths, arguments or Git stderr.
 fn trace_io(stage: &'static str, error: io::Error) -> Error {
     if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
@@ -443,7 +472,15 @@ fn nonblocking(pipe: &impl std::os::fd::AsFd) -> io::Result<()> {
 /// Drain a bounded batch per observation tick; output cannot grow the preallocated vector past its promise.
 fn drain(reader: &mut impl Read, output: &mut Vec<u8>, cap: usize) -> Result<bool, Error> {
     let mut bytes = [0u8; 8192];
-    for _ in 0..8 {
+    #[cfg(test)]
+    let batch = if TEST_EXIT_BEFORE_DRAIN.with(|v| v.get()) {
+        1
+    } else {
+        8
+    };
+    #[cfg(not(test))]
+    let batch = 8;
+    for _ in 0..batch {
         let remaining = cap.saturating_sub(output.len());
         let bound = bytes.len().min(remaining.saturating_add(1));
         match reader.read(&mut bytes[..bound]) {
@@ -498,6 +535,13 @@ fn checked_leader_exit(identity: ProcessIdentity) -> io::Result<bool> {
 /// Signal only the captured live leader or its exact owned, still-unreaped exit.
 fn signal(identity: ProcessIdentity) -> io::Result<()> {
     checked_leader_exit(identity)?;
+    #[cfg(test)]
+    if TEST_EXIT_BEFORE_DRAIN.with(|v| v.get())
+        && exited(identity.pid)?
+        && group_sample(identity)?.live == 0
+    {
+        TEST_EMPTY_SIGNALS.with(|v| v.set(v.get() + 1));
+    }
     let pid =
         Pid::from_raw(identity.pid as i32).ok_or_else(|| io::Error::other("invalid native PID"))?;
     match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
