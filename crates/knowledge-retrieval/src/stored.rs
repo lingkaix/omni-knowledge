@@ -1,7 +1,9 @@
 //! Funded native readers over verified package ranges, without unpacking or a second engine.
 mod directory;
+mod held;
 use crate::{Control, Error, KernelAdapter, Query, SearchResult, Work};
 pub use directory::{StoredDirectory, StoredDirectoryPlan};
+pub use held::HeldRangeReaders;
 use knowledge_package::{Bounds, FrozenArchive, IndexRequirements, Method};
 use retrieval_kernel::{ByteDirectory, SourceGeneration};
 use std::collections::BTreeMap;
@@ -213,7 +215,8 @@ impl StoredGeneration {
             ranges,
             control: control.clone(),
             read_limit: None,
-            _work: Mutex::new(work),
+            reads: ReadLiveness::new(plan.index_bytes.checked_mul(4).ok_or(Error::Reservation)?),
+            _work: Arc::new(Mutex::new(work)),
         });
         let components = Arc::new(ArchiveDirectory {
             backing: backing.clone(),
@@ -312,7 +315,8 @@ struct Backing {
     ranges: BTreeMap<String, AdmittedRange>,
     control: Control,
     read_limit: Option<u64>,
-    _work: Mutex<Work>,
+    reads: Arc<ReadLiveness>,
+    _work: Arc<Mutex<Work>>,
 }
 impl Backing {
     /// Reject current-source/policy/stop changes before and after all native range access.
@@ -402,6 +406,7 @@ impl FileHandle for RangeHandle {
             .offset
             .checked_add(range.start as u64)
             .ok_or_else(|| io::Error::other("range overflow"))?;
+        let loan = self.backing.reads.acquire(range.len() as u64)?;
         let mut bytes = vec![0; range.len()];
         let mut read = 0;
         while read < bytes.len() {
@@ -423,9 +428,71 @@ impl FileHandle for RangeHandle {
             self.backing.check()?;
         }
         self.backing.check()?;
-        Ok(OwnedBytes::new(bytes))
+        Ok(OwnedBytes::new(RetainedBytes {
+            bytes,
+            _loan: loan,
+            _backing: self.backing.clone(),
+        }))
     }
 }
+// The immutable Vec allocation never moves or reallocates after construction. Dropping bytes
+// precedes descriptor/currentness/one-account Work destruction, including OwnedBytes::slice clones.
+struct RetainedBytes {
+    bytes: Vec<u8>,
+    _loan: ReadLoan,
+    _backing: Arc<Backing>,
+}
+impl std::ops::Deref for RetainedBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+// This only bounds simultaneous bytes within the existing PREPAID holding. It reserves,
+// finishes and refunds nothing on Core; dropping a loan returns local liveness, not credit.
+struct ReadLiveness {
+    limit: u64,
+    live: std::sync::atomic::AtomicU64,
+}
+impl ReadLiveness {
+    fn new(limit: u64) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            live: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+    fn acquire(self: &Arc<Self>, bytes: u64) -> io::Result<ReadLoan> {
+        self.live
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |old| old.checked_add(bytes).filter(|n| *n <= self.limit),
+            )
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "paid native range bytes are still held",
+                )
+            })?;
+        Ok(ReadLoan {
+            owner: self.clone(),
+            bytes,
+        })
+    }
+}
+struct ReadLoan {
+    owner: Arc<ReadLiveness>,
+    bytes: u64,
+}
+impl Drop for ReadLoan {
+    fn drop(&mut self) {
+        self.owner
+            .live
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+// SAFETY: moves/clones of the holder never move its Vec allocation; no mutable accessor exists.
+unsafe impl ownedbytes::StableDeref for RetainedBytes {}
 /// Classify a bounded native source refusal without treating it as an empty successful result.
 fn kernel_io(_: impl std::fmt::Display) -> retrieval_kernel::Error {
     retrieval_kernel::Error {

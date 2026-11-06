@@ -9,7 +9,9 @@ use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
     NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
-    NativeRefreshJob, NativeRefreshScopeError,
+    NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
+    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::{
     admission::Holding,

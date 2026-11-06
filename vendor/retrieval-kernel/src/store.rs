@@ -7,14 +7,16 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use tantivy::schema::{Field, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions};
+use tantivy::schema::{
+    FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
+};
 use tantivy::{Index, TantivyDocument};
 
 /// Output-changing machinery is part of every derived generation identity.
 /// The retained upstream lock is provenance, not the downstream dependency lock.
 /// See VENDOR.md for the required consuming-generation identity binding.
 pub(crate) fn machinery() -> String {
-    digest(format!("schema=5;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../upstream/openkit-b67cd0f2.Cargo.lock"))).as_bytes())
+    digest(format!("schema=6;eligible-source-statistics=v1;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../upstream/openkit-b67cd0f2.Cargo.lock"))).as_bytes())
 }
 /// Identity-only phase-1 processor; changes require fresh representations.
 pub(crate) const PROCESSOR: &str = "identity-markdown-v1";
@@ -778,7 +780,7 @@ impl Fields {
 /// One schema with separate analyzer fields, never separate ranking implementations.
 pub(crate) fn schema() -> (Schema, Fields) {
     let mut b = Schema::builder();
-    let document = b.add_u64_field("document", STORED);
+    let document = b.add_u64_field("document", STORED | INDEXED | FAST);
     let ordinal = b.add_u64_field("ordinal", STORED);
     let start = b.add_u64_field("start", STORED);
     let end = b.add_u64_field("end", STORED);

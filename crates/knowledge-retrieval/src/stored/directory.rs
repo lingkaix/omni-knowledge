@@ -155,7 +155,12 @@ impl StoredDirectory {
                 ranges,
                 control: control.clone(),
                 read_limit: Some(plan.read_window_bytes),
-                _work: Mutex::new(work),
+                reads: super::ReadLiveness::new(
+                    plan.read_window_bytes
+                        .checked_mul(4)
+                        .ok_or(Error::Reservation)?,
+                ),
+                _work: Arc::new(Mutex::new(work)),
             }),
         })
     }

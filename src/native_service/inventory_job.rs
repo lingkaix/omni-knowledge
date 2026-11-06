@@ -5,6 +5,9 @@ use super::*;
 use crate::native_service::source::{refused_error, selected_context};
 pub use corpus::{
     NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
+    NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
+    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};
@@ -28,7 +31,7 @@ impl std::fmt::Debug for NativeRefreshScopeError {
 }
 impl std::fmt::Display for NativeRefreshScopeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("native Refresh source setup and owning scope cleanup refused")
+        f.write_str("native funded source setup and owning scope cleanup refused")
     }
 }
 impl std::error::Error for NativeRefreshScopeError {

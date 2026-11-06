@@ -1,0 +1,37 @@
+# Complete-tuple and current-source Query foundations (not application activation)
+
+This PRIVATE implementation is a prerequisite, not M4–M6/product READY. The existing application still uses its resident snapshot.vectors/Vec<ScopeView> compatibility path. Full query orchestration, all methods/filters, source-complete partition fusion, comprehensive recovery/retirement, startup/watch activation, actual selected WeMM quality/multimodal, M5/M6 and installed/native physical acceptance remain required.
+
+## Actual owners and one selection
+
+The producer seals bounded header/member/inventory/source/catalog frames under an actual library/original-root-qualified native namespace. Separate volume-parent and namespace FDs remain checked. One actual writer PID/FD and expected CURRENT owner perform CAS, sync, one whole-tuple pointer switch, phase recording before fallible durability effects, foreground owning recovery and stable adoption. Zero-row vector preparation does not fabricate an empty vector component. Component CURRENTs do not select a library tuple.
+
+NativeTupleRead requires an actual Query/Owner/selected-root lease and prepaid8MiB metadata. It acquires the whole-generation READERS pin BEFORE opening a header or components. Bounded checks cover whole consuming identity, coverage, model metadata and actual FD versions/member manifest. A pinned older tuple need not follow a later CURRENT; its aggregate pin protects unopened siblings. No query mkdir/reconcile/new Refresh/lane or payload query is implied by opening metadata.
+
+SourcePart retains the original SAME M3-verified FD's full8-field version. An opaque held part, a separate current actual M1 row, Query scope and actual current original FD bind cached identity/digest without whole-NAS synchronous rehash. A real same-inode append followed by stat-first Pending/null-version discovery cannot certify old payload. Paths, decoded DTOs, digests and stored stat arrays alone are not authority.
+
+## Kernel eligibility and real range bytes
+
+Schema6 adds the SAME Tantivy numeric source predicate, exact eligible posting/doc/token statistics and a zero-score candidate gate. Excluded/omitted sources do not affect coverage/languages/BM25 statistics; no eligible source opens no index/statistics. Full-visible mature scoring/analyzers remain unchanged. Original50/current52/seven ordered overlays replay exactly; the seventh patch and current hashes are in VENDOR/PROVENANCE. There is no second tokenizer/scorer/index or corpus cap.
+
+HeldRangeReaders reuses the mature currentness-checked native range engine. Immutable OwnedBytes and slices retain the actual FD/source/whole-tuple pin/ONE Work, not only a handle or length. Its local liveness counter restricts already prepaid bytes, never reserves/refunds Core credit. Exclusive into_work returns the exact original lifetime; live consumers return the actual owner. new_owning returns actual Work even on deadline/bad-quote refusal. ownedbytes0.9 was already pinned; no new package or mmap/unsafe IO is introduced. StableDeref covers only an immutable Vec allocation.
+
+## One actual Query and retained bounded partition primitive
+
+NativeTupleQuery retains the actual sealed Query, exact selected-library set, root/M1/model owners and an actual aggregate descriptor/key. Equal request bytes are not the SAME opaque SDK invocation. It submits to the existing sole Core scheduler. The descriptor is a job SUBJECT, not an original source UUID/digest or read grant.
+
+A source gets a fresh SAME-Claim SDK scope BEFORE copying/FD inspection; exact actual M1 owner and producer receipt remain independently checked. The real Claim is retained through the scope callback. A weak opaque origin link additionally rejects another Claim owner; it is neither authority nor a numeric job-id substitute. Finish destroys data/FD owners before affine SDK scope rejoin, preserving actual owning refusals.
+
+NativeQueryStage atomically splits ONE combined mature query128MiB plus existing4×window+64KiB range peak from that SAME actual Claim. Callers cannot substitute separate global BeforeVerification work for kernel costs. Stage/source/M1/metadata costs must all be included in the parent's complete admission plan. Its adapters open FD-qualified selected generation members and eligible saved representation ranges through SAME SourceGeneration/HeldRangeReaders, never component CURRENT or display-path fallback. This is an eligible-view partition primitive, not a source-complete library controller. The current public body entry consumes only BM25/keywords actually requested by that sealed Query; it does not claim completed tags/exact/regex/semantic orchestration.
+
+Results retain actual original FDs, aggregate pin, query/read credit and Claim through last controllable access/delivery. A live result or byte owner refuses into_loans with the actual stage. After consumers die, exact combined/source/page loans rejoin without a global release/reserve gap. Cancellation revokes final result access; cleanup does not require permission for another effect. No unknown child/thread/IO settlement, output delivery or whole-job completion is inferred from an intermediate return.
+
+## Observed controls and scope of evidence
+
+Actual OLD score parity0.34810978vs0.39556292, omitted coverage2vs1 and empty-view access each FAIL; NEW exact score and filtered Jieba/Lindera parity plus kernel52/strict PASS. Pin-order, original-version, eager-original-hash, byte-owner/liveness and exact page-credit/real-Claim/source-scope controls have deciding negative controls, with compile-only attempts explicitly NONDECIDING.
+
+The real producer/Refresh is settled before the independent cold Query. That Query prepays its own complete peak, then applies FULL remaining memory AND storage pressure via actual Ready, resampling only actual Waiting under its original deadline. It traverses real current M1/source, selected tuple, native FDs, mature range bytes and BM25, retains the result, observes cancellation and returns the actual exclusive loans. No fake backend, fabricated source UUID, global credit gap or ceiling raise is used.
+
+A first measured body operation took59.087s:23577 duplicate full guards consumed58.805s. Removing only identical repeated SDK/range checks gave20.590s; avoiding recursive repetition of checks which the actual source Permit/opaque dependencies already perform gave4.284s. Actual root/policy/path/M1/original FD/model and live Claim/key/budget/ORIGINAL deadline checks remain. No guard TTL or cached permission boolean is used. Replacing the real cancellation predicate with true while retaining owners makes the actual test FAIL; returning range-factory credit before owning refusal makes its actual test FAIL0vs327680 reserved bytes. Full many-source performance and all-method delivery are still unproven.
+
+Raw REDs remain evidence: first arbitrary source had a complete/no-match result for alpha, not an index failure; the fixture now selects the actual sealed known-alpha receipt/partition. An earlier independent Query was attempted while the previous settled Refresh fixture pressure remained owned; its exact Waiting reason was not retained and is not retrospectively diagnosed. Delimiting the completed Refresh pressure does not weaken the later FULL Query pressure. A rejected foreign row's legitimate2MiB metadata refund is performed before that Query pressure boundary, not mislabelled a late reservation. Full affected/frozen-source/native qualification remains independent of these primitive cases.

@@ -210,17 +210,17 @@
     {
       "path": "src/query.rs",
       "upstream_sha256": "d5cf0f0bedc7483f66708d52ebdc6430d0fc723dc181d623d6e2f0536c83754c",
-      "vendored_sha256": "2958690cdb91f7eac07ea74d45bb5d9f51ddb88b206d2f464db5c3b02de86111"
+      "vendored_sha256": "7cbd4fbee8bdec17d365b6715362824f900b3cc0687c4fdc9dcc38e2b512219d"
     },
     {
       "path": "src/store.rs",
       "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
-      "vendored_sha256": "1338b3ba6c1753c12ec92bd7c18fa4e4301e2adb8993648951c678d2d1368b47"
+      "vendored_sha256": "5fac3e9c7cf5a73d372b87ddb6dc826678019d5d962dfcaa0132034104d98b72"
     },
     {
       "path": "src/tests.rs",
       "upstream_sha256": "874aa9b42ad6b6d0fd6b4b733e9c2278dcf9cce8a717912fcb175e6e5ca1f88a",
-      "vendored_sha256": "18f0ae95a622dd201c7657a14d9f3029179ad0c4ef86dc429e03574e3744bd30"
+      "vendored_sha256": "5e170deae48687bc9bf33566af47c3d12561d1decd5c26f2565e5209692795c4"
     },
     {
       "path": "src/text.rs",

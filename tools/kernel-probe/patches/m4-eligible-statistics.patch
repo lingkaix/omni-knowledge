@@ -1,0 +1,416 @@
+diff --git a/src/query.rs b/src/query.rs
+index 089e839..a89acd0 100644
+--- a/src/query.rs
++++ b/src/query.rs
+@@ -94,12 +94,8 @@ impl QueryContext<'_> {
+             result
+                 .generations
+                 .insert(view.scope.clone(), pin.id.clone());
+-            result.coverage.admitted_objects += (pin.manifest.documents.len()
+-                + pin.manifest.unavailable_objects)
+-                .max(view.documents.len() + view.unavailable_objects);
+-            let unavailable = view
+-                .unavailable_objects
+-                .max(pin.manifest.unavailable_objects);
++            result.coverage.admitted_objects += view.documents.len() + view.unavailable_objects;
++            let unavailable = view.unavailable_objects;
+             if unavailable > 0 {
+                 result.coverage.inventory_complete = false;
+                 result.coverage.stopped_work += unavailable;
+@@ -120,10 +116,11 @@ impl QueryContext<'_> {
+                 live.keys().filter(|k| !indexed.contains(**k)).count();
+             let mut usable = BTreeSet::new();
+             for (number, record) in pin.manifest.documents.iter().enumerate() {
+-                if live
+-                    .get(&record.document.key)
+-                    .is_none_or(|d| d.identity() != record.document)
+-                {
++                // Omitted/ineligible is not a stale admitted revision or public count.
++                let Some(current) = live.get(&record.document.key) else {
++                    continue;
++                };
++                if current.identity() != record.document {
+                     result.coverage.stale_revisions += 1;
+                     continue;
+                 }
+@@ -482,6 +479,153 @@ pub(crate) fn validate_query(query: &Query) -> Result<Option<RegexMatcher>> {
+         })?;
+     Ok(Some(matcher))
+ }
++/// SAME Tantivy statistics over admitted native chunks; no second scorer/index/tokenizer.
++/// Masks are one bounded scope's metadata (existing FRAME_BYTES), never a corpus-wide table.
++struct EligibleStatistics<'a> {
++    searcher: &'a tantivy::Searcher,
++    masks: Vec<Vec<bool>>,
++    documents: u64,
++    tokens: std::cell::RefCell<BTreeMap<tantivy::schema::Field, u64>>,
++    budget: &'a Budget,
++}
++impl<'a> EligibleStatistics<'a> {
++    fn new(
++        searcher: &'a tantivy::Searcher,
++        field: tantivy::schema::Field,
++        usable: &BTreeSet<usize>,
++        source_count: usize,
++        budget: &'a Budget,
++    ) -> Result<Self> {
++        let mut masks = Vec::new();
++        let mut documents = 0;
++        let mut mask_bytes = 0usize;
++        let schema = searcher.schema();
++        let name = schema.get_field_name(field);
++        for segment in searcher.segment_readers() {
++            budget.check()?;
++            let column = segment.fast_fields().u64(name).map_err(io_error)?;
++            let mut mask = Vec::new();
++            for doc in 0..segment.max_doc() {
++                budget.check()?;
++                let number = column
++                    .first(doc)
++                    .ok_or_else(|| error("unavailable", "native chunk has no source identity"))?;
++                let number = usize::try_from(number).map_err(io_error)?;
++                if number >= source_count {
++                    return Err(error(
++                        "unavailable",
++                        "native chunk source identity exceeds committed inventory",
++                    ));
++                }
++                mask_bytes = mask_bytes.checked_add(1).ok_or_else(|| {
++                    error("resource-limited", "scope eligibility metadata overflow")
++                })?;
++                if mask_bytes > FRAME_BYTES {
++                    return Err(error(
++                        "resource-limited",
++                        "scope eligibility metadata exceeds existing frame budget",
++                    ));
++                }
++                let keep = !segment.is_deleted(doc) && usable.contains(&number);
++                documents += u64::from(keep);
++                mask.push(keep);
++            }
++            masks.push(mask);
++        }
++        Ok(Self {
++            searcher,
++            masks,
++            documents,
++            tokens: std::cell::RefCell::new(BTreeMap::new()),
++            budget,
++        })
++    }
++    fn check(&self) -> tantivy::Result<()> {
++        self.budget.check().map_err(|_| {
++            tantivy::TantivyError::InvalidArgument("admitted statistics stopped".into())
++        })
++    }
++    fn count(
++        &self,
++        mut postings: tantivy::postings::SegmentPostings,
++        mask: &[bool],
++        frequencies: bool,
++    ) -> tantivy::Result<u64> {
++        use tantivy::DocSet;
++        use tantivy::postings::Postings;
++        let mut count = 0u64;
++        let mut checked = 0u8;
++        while postings.doc() != tantivy::TERMINATED {
++            if checked == 0 {
++                self.check()?;
++            }
++            checked = (checked + 1) % 16;
++            if mask.get(postings.doc() as usize).copied().unwrap_or(false) {
++                let n = if frequencies {
++                    u64::from(postings.term_freq())
++                } else {
++                    1
++                };
++                count = count.checked_add(n).ok_or_else(|| {
++                    tantivy::TantivyError::InvalidArgument("admitted statistics overflow".into())
++                })?;
++            }
++            postings.advance();
++        }
++        self.check()?;
++        Ok(count)
++    }
++}
++impl tantivy::query::Bm25StatisticsProvider for EligibleStatistics<'_> {
++    fn total_num_docs(&self) -> tantivy::Result<u64> {
++        self.check()?;
++        Ok(self.documents)
++    }
++    fn total_num_tokens(&self, field: tantivy::schema::Field) -> tantivy::Result<u64> {
++        self.check()?;
++        if let Some(n) = self.tokens.borrow().get(&field) {
++            return Ok(*n);
++        }
++        let mut total = 0u64;
++        for (segment, mask) in self.searcher.segment_readers().iter().zip(&self.masks) {
++            let index = segment.inverted_index(field)?;
++            let mut terms = index.terms().stream()?;
++            while terms.advance() {
++                self.check()?;
++                let postings = index
++                    .read_postings_from_terminfo(terms.value(), IndexRecordOption::WithFreqs)?;
++                let n = self.count(postings, mask, true)?;
++                total = total.checked_add(n).ok_or_else(|| {
++                    tantivy::TantivyError::InvalidArgument("admitted token totals overflow".into())
++                })?;
++            }
++        }
++        self.tokens.borrow_mut().insert(field, total);
++        self.check()?;
++        Ok(total)
++    }
++    fn doc_freq(&self, term: &Term) -> tantivy::Result<u64> {
++        self.check()?;
++        let mut total = 0u64;
++        for (segment, mask) in self.searcher.segment_readers().iter().zip(&self.masks) {
++            if let Some(postings) = segment
++                .inverted_index(term.field())?
++                .read_postings(term, IndexRecordOption::Basic)?
++            {
++                total = total
++                    .checked_add(self.count(postings, mask, false)?)
++                    .ok_or_else(|| {
++                        tantivy::TantivyError::InvalidArgument(
++                            "admitted document frequency overflow".into(),
++                        )
++                    })?;
++            }
++        }
++        self.check()?;
++        Ok(total)
++    }
++}
++
+ /// Build an ordinary any-term query; source language fields use their own matching analyzer.
+ fn lexical(
+     kernel: &QueryContext<'_>,
+@@ -492,6 +636,9 @@ fn lexical(
+     result: &mut SearchResult,
+     budget: &Budget,
+ ) -> Result<()> {
++    if usable.is_empty() {
++        return Ok(());
++    }
+     let index = match &pin.provider {
+         Some(provider) => Index::open(crate::directory::IndexDirectory(
+             provider.components.clone(),
+@@ -532,7 +679,9 @@ fn lexical(
+         .manifest
+         .documents
+         .iter()
+-        .map(|r| r.language.as_str())
++        .enumerate()
++        .filter(|(number, _)| usable.contains(number))
++        .map(|(_, r)| r.language.as_str())
+         .collect();
+     for language in languages {
+         let (body, title) = fields.language(language);
+@@ -589,19 +738,52 @@ fn lexical(
+         .try_into()
+         .map_err(io_error)?;
+     let searcher = reader.searcher();
+-    let count = usize::try_from(searcher.num_docs()).map_err(io_error)?;
++    let statistics = if usable.len() < pin.manifest.documents.len() {
++        Some(EligibleStatistics::new(
++            &searcher,
++            fields.document,
++            usable,
++            pin.manifest.documents.len(),
++            budget,
++        )?)
++    } else {
++        None
++    };
++    let count = usize::try_from(
++        statistics
++            .as_ref()
++            .map_or_else(|| searcher.num_docs(), |stats| stats.documents),
++    )
++    .map_err(io_error)?;
+     if count == 0 {
+         return Ok(());
+     }
+     let mut best: BTreeMap<usize, Hit> = BTreeMap::new();
+     for (literal_term, search_query) in queries {
+         budget.check()?;
+-        let candidates = searcher
+-            .search(
++        let candidates = if let Some(statistics) = &statistics {
++            let source_filter = tantivy::query::TermSetQuery::new(
++                usable
++                    .iter()
++                    .map(|number| Term::from_field_u64(fields.document, *number as u64)),
++            );
++            let source_filter = tantivy::query::ConstScoreQuery::new(Box::new(source_filter), 0.0);
++            let admitted = BooleanQuery::new(vec![
++                (Occur::Must, search_query),
++                (Occur::Must, Box::new(source_filter)),
++            ]);
++            searcher.search_with_statistics_provider(
++                &admitted,
++                &TopDocs::with_limit(count).order_by_score(),
++                statistics,
++            )
++        } else {
++            searcher.search(
+                 search_query.as_ref(),
+                 &TopDocs::with_limit(count).order_by_score(),
+             )
+-            .map_err(io_error)?;
++        }
++        .map_err(|e| budget.check().err().unwrap_or_else(|| io_error(e)))?;
+         for (score, address) in candidates {
+             budget.check()?;
+             let chunk: TantivyDocument = searcher.doc(address).map_err(io_error)?;
+diff --git a/src/store.rs b/src/store.rs
+index 26d7b94..2c771e4 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -7,14 +7,16 @@ use std::collections::BTreeSet;
+ use std::fs::{self, File, OpenOptions};
+ use std::io::{Read, Seek, SeekFrom, Write};
+ use std::path::{Path, PathBuf};
+-use tantivy::schema::{Field, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions};
++use tantivy::schema::{
++    FAST, Field, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
++};
+ use tantivy::{Index, TantivyDocument};
+ 
+ /// Output-changing machinery is part of every derived generation identity.
+ /// The retained upstream lock is provenance, not the downstream dependency lock.
+ /// See VENDOR.md for the required consuming-generation identity binding.
+ pub(crate) fn machinery() -> String {
+-    digest(format!("schema=5;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../upstream/openkit-b67cd0f2.Cargo.lock"))).as_bytes())
++    digest(format!("schema=6;eligible-source-statistics=v1;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks={CHUNK_BYTES};score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary={DICTIONARY_SHA256};lock={}", digest(include_bytes!("../../upstream/openkit-b67cd0f2.Cargo.lock"))).as_bytes())
+ }
+ /// Identity-only phase-1 processor; changes require fresh representations.
+ pub(crate) const PROCESSOR: &str = "identity-markdown-v1";
+@@ -778,7 +780,7 @@ impl Fields {
+ /// One schema with separate analyzer fields, never separate ranking implementations.
+ pub(crate) fn schema() -> (Schema, Fields) {
+     let mut b = Schema::builder();
+-    let document = b.add_u64_field("document", STORED);
++    let document = b.add_u64_field("document", STORED | INDEXED | FAST);
+     let ordinal = b.add_u64_field("ordinal", STORED);
+     let start = b.add_u64_field("start", STORED);
+     let end = b.add_u64_field("end", STORED);
+diff --git a/src/tests.rs b/src/tests.rs
+index 35be26e..955f375 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -2329,3 +2329,112 @@ fn source_representation_bounds_are_independent_of_original_size() {
+         "invalid-request"
+     );
+ }
++
++/// Identical eligible content has identical mature BM25 scores despite denied neighbour chunks.
++/// This is numerical privacy parity, NOT production mixing of independent partition score lists.
++#[test]
++fn eligible_subset_statistics_equal_identical_eligible_corpus() {
++    let f = Fixture::new();
++    let a = f.text("admitted-a", "alpha beta alpha\n");
++    let b = f.text("excluded-b", &"alpha private neighbour ".repeat(400));
++    let only = f.view("only-eligible", vec![a.clone()]);
++    let shared = f.view("mixed-scope", vec![a.clone(), b]);
++    f.kernel.publish(only.clone(), None).unwrap();
++    f.kernel.publish(shared, None).unwrap();
++    let expected = f.search(Mode::Lexical, "alpha", vec![only], 10);
++    let actual = f.search(
++        Mode::Lexical,
++        "alpha",
++        vec![f.view("mixed-scope", vec![a])],
++        10,
++    );
++    assert_eq!(actual.hits.len(), 1);
++    assert_eq!(expected.hits.len(), 1);
++    assert!(
++        (actual.hits[0].score.unwrap() - expected.hits[0].score.unwrap()).abs() < 0.000001,
++        "excluded neighbours cannot alter admitted BM25 statistics: actual={:?} expected={:?}",
++        actual.hits[0].score,
++        expected.hits[0].score
++    );
++}
++/// Partial eligible views retain exact existing Jieba/Lindera token-count/scoring semantics.
++#[test]
++fn eligible_cjk_subset_preserves_mature_scores() {
++    for (language, body, query) in [
++        ("ja", "検索機能を改善しました。", "検索 改善"),
++        ("zh", "我们完成了测试，并修复了缺陷。", "测试 修复"),
++    ] {
++        let f = Fixture::new();
++        let mut a = f.text("admitted-a", body);
++        a.language = Some(language.into());
++        let mut b = f.text(
++            "excluded-b",
++            &format!("{query} private neighbour ").repeat(400),
++        );
++        b.language = Some(language.into());
++        let only = f.view("eligible-only", vec![a.clone()]);
++        f.kernel.publish(only.clone(), None).unwrap();
++        f.kernel
++            .publish(f.view("mixed-scope", vec![a.clone(), b]), None)
++            .unwrap();
++        let baseline = f.search(Mode::Lexical, query, vec![only], 10);
++        let selected = f.search(
++            Mode::Lexical,
++            query,
++            vec![f.view("mixed-scope", vec![a])],
++            10,
++        );
++        assert_eq!(selected.hits.len(), 1);
++        assert_eq!(baseline.hits.len(), 1);
++        assert!(
++            (selected.hits[0].score.unwrap() - baseline.hits[0].score.unwrap()).abs() < 0.000001,
++            "{language} selected={:?} baseline={:?}",
++            selected.hits[0].score,
++            baseline.hits[0].score
++        );
++    }
++}
++/// An omitted/ineligible row is not a stale admitted revision and cannot inflate public coverage.
++#[test]
++fn eligible_subset_coverage_excludes_omitted_rows() {
++    let f = Fixture::new();
++    let a = f.text("admitted-a", "alpha beta\n");
++    let b = f.text("excluded-b", "private omitted body\n");
++    let all = f.view("mixed-scope", vec![a.clone(), b]);
++    f.kernel.publish(all, None).unwrap();
++    for mode in [Mode::Lexical, Mode::Exact, Mode::Regex] {
++        let result = f.search(
++            mode,
++            "alpha",
++            vec![f.view("mixed-scope", vec![a.clone()])],
++            10,
++        );
++        assert_eq!(result.coverage.admitted_objects, 1);
++        assert_eq!(result.coverage.stale_revisions, 0);
++        assert_eq!(result.hits.len(), 1);
++    }
++}
++/// Actual native boundary observer: no eligible body means no index/statistics open at all.
++#[test]
++fn empty_eligible_view_never_opens_statistics() {
++    let f = Fixture::new();
++    let a = f.text("excluded-a", "alpha private body\n");
++    f.kernel
++        .publish(f.view("mixed-scope", vec![a]), None)
++        .unwrap();
++    take_access();
++    let result = f.search(
++        Mode::Lexical,
++        "alpha",
++        vec![f.view("mixed-scope", vec![])],
++        10,
++    );
++    let seen = take_access();
++    assert!(
++        !seen.iter().any(|(kind, _)| kind == "statistics"),
++        "ineligible index statistics were opened: {seen:?}"
++    );
++    assert_eq!(result.coverage.admitted_objects, 0);
++    assert_eq!(result.coverage.stale_revisions, 0);
++    assert!(result.hits.is_empty());
++}

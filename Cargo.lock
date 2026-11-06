@@ -4239,6 +4239,7 @@ dependencies = [
  "knowledge-package",
  "knowledge-search",
  "omni-service",
+ "ownedbytes",
  "retrieval-kernel",
  "rustix 1.1.5",
  "serde_json",

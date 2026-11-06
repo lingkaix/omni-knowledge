@@ -1172,6 +1172,18 @@ mod admitted {
         hash.update(include_bytes!("embedding.rs"));
         hash.update(include_bytes!("native_service/inventory_corpus.rs"));
         hash.update(include_bytes!("native_service/inventory_corpus_vectors.rs"));
+        hash.update(include_bytes!("native_service/inventory_corpus_tuple.rs"));
+        hash.update(include_bytes!(
+            "native_service/inventory_corpus_selection.rs"
+        ));
+        hash.update(include_bytes!("native_service/inventory_corpus_reader.rs"));
+        hash.update(include_bytes!("native_service/inventory_corpus_query.rs"));
+        hash.update(include_bytes!(
+            "native_service/inventory_corpus_partition.rs"
+        ));
+        hash.update(include_bytes!(
+            "../crates/knowledge-retrieval/src/stored/held.rs"
+        ));
         hash.update(processor_identity().as_bytes());
         hash.update(std::env::consts::OS.as_bytes());
         hash.update(std::env::consts::ARCH.as_bytes());
@@ -2759,8 +2771,10 @@ pub mod native_service {
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
         NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
-        NativeInventory, NativeInventoryPage, NativeObservedSource, NativeRefreshJob,
-        NativeRefreshScopeError,
+        NativeInventory, NativeInventoryPage, NativeObservedSource, NativePartitionResult,
+        NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition, NativeQuerySource,
+        NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeRefreshJob,
+        NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

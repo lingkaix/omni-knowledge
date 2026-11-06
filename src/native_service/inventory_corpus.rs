@@ -16,6 +16,20 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[path = "inventory_corpus_query.rs"]
+mod query;
+pub use query::{
+    NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
+    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeTupleQuery,
+};
+#[path = "inventory_corpus_reader.rs"]
+mod reader;
+#[path = "inventory_corpus_selection.rs"]
+mod selection;
+pub use reader::NativeTupleRead;
+#[path = "inventory_corpus_tuple.rs"]
+mod tuple;
 #[path = "inventory_corpus_vectors.rs"]
 mod vectors;
 
@@ -38,9 +52,12 @@ pub enum NativeCorpusProgress {
     VectorsPrepared { rows: u64 },
     /// Actual existing credit immediately before a tape/catalog append; DATA, never a grant.
     WriteAdmitted { bytes: u64, available: u64 },
+    /// The actual same-library writer lease is contended; this foreground owner remains live.
+    WriterWaiting,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SourcePart {
+    original_version: [u64; 8],
     page_offset: u64,
     slot: usize,
     embedding_rows: u64,
@@ -59,6 +76,27 @@ struct Shard {
     page_offset: u64,
     parts: Vec<SourcePart>,
 }
+struct Stage {
+    temporary: Option<tempfile::TempDir>,
+    path: PathBuf,
+}
+impl Stage {
+    fn new(temporary: tempfile::TempDir) -> Self {
+        Self {
+            path: temporary.path().to_owned(),
+            temporary: Some(temporary),
+        }
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+    // Only the actual durable selector owner calls this, never a path/phase DTO.
+    fn adopt(&mut self) {
+        if let Some(actual) = self.temporary.take() {
+            let _ = actual.keep();
+        }
+    }
+}
 struct Files {
     tape: Arc<File>,
     sources: File,
@@ -66,9 +104,10 @@ struct Files {
     inventory: File,
     directory: File,
     parent: File,
+    volume_parent: File,
     parent_identity: (u64, u64),
     parent_path: PathBuf,
-    stage: tempfile::TempDir,
+    stage: Stage,
 }
 impl Files {
     fn check(&self) -> Result<()> {
@@ -78,8 +117,9 @@ impl Files {
             "generated parent changed"
         );
         let actual = Account::current()?.generated_directory()?.metadata()?;
+        let volume = self.volume_parent.metadata()?;
         anyhow::ensure!(
-            (actual.dev(), actual.ino()) == self.parent_identity,
+            (actual.dev(), actual.ino()) == (volume.dev(), volume.ino()),
             "different generated volume owner"
         );
         let held = self.directory.metadata()?;
@@ -103,6 +143,10 @@ pub struct NativeCorpusDraft {
     provider: Option<FundedTextProvider>,
     vectors: Option<Arc<knowledge_search::PreparedVectors>>,
     vectors_done: bool,
+    tuple: Option<tuple::Seal>,
+    selection: Option<selection::Selection>,
+    #[cfg(test)]
+    test_fail_after_switch: bool,
     sealed_files: Option<[[u64; 8]; 4]>,
     coverage: NativeCorpusCoverage,
     source_errors: Arc<Mutex<Vec<anyhow::Error>>>,
@@ -191,6 +235,10 @@ impl NativeRefreshJob {
             provider: None,
             vectors: None,
             vectors_done: false,
+            tuple: None,
+            selection: None,
+            #[cfg(test)]
+            test_fail_after_switch: false,
             sealed_files: None,
             coverage: NativeCorpusCoverage::default(),
             source_errors: Arc::new(Mutex::new(Vec::with_capacity(64))),
@@ -242,6 +290,12 @@ impl NativeCorpusDraft {
                     "prepared actual corpus descriptors changed"
                 );
             }
+            if let Some(tuple) = &self.tuple {
+                tuple.check(files)?;
+            }
+        }
+        if let Some(selection) = &self.selection {
+            selection.check(self)?;
         }
         Ok(())
     }
@@ -287,9 +341,23 @@ impl NativeCorpusDraft {
             now.is_dir() && (now.dev(), now.ino()) == (m.dev(), m.ino()),
             "path is not the actual selected generated directory"
         );
+        let volume_parent = parent;
+        self.selection = Some(selection::Selection::open(self)?);
+        let selected = self
+            .selection
+            .as_ref()
+            .context("actual library tuple namespace")?;
+        let parent = selected.directory()?;
+        let parent_path = selected.path(path);
+        let m = parent.metadata()?;
+        let named = std::fs::symlink_metadata(&parent_path)?;
+        anyhow::ensure!(
+            named.is_dir() && (named.dev(), named.ino()) == (m.dev(), m.ino()),
+            "tuple namespace path is not its actual directory"
+        );
         let stage = tempfile::Builder::new()
             .prefix("native-corpus-")
-            .tempdir_in(path)?;
+            .tempdir_in(&parent_path)?;
         let directory = File::open(stage.path())?;
         let create = |name: &str| -> Result<File> {
             Ok(File::from(rustix::fs::openat(
@@ -314,9 +382,10 @@ impl NativeCorpusDraft {
             inventory,
             directory,
             parent,
+            volume_parent,
             parent_identity: (m.dev(), m.ino()),
-            parent_path: path.to_owned(),
-            stage,
+            parent_path,
+            stage: Stage::new(stage),
         });
         self.check()
     }
@@ -462,6 +531,9 @@ impl NativeCorpusDraft {
     pub fn into_job(
         mut self,
     ) -> std::result::Result<(Arc<NativeRefreshJob>, Claim), NativeCorpusError> {
+        if let Err(cause) = self.resolve_publication() {
+            return Err(self.error(cause));
+        }
         if self
             .vectors
             .as_ref()
@@ -486,7 +558,9 @@ impl NativeCorpusDraft {
         self.page.take();
         self.provider.take();
         self.vectors.take();
+        self.tuple.take();
         self.files.take();
+        self.selection.take();
         self.work.take();
         match self.claim.take() {
             Some(claim) => Ok((self.job.clone(), claim)),
@@ -513,6 +587,89 @@ impl NativeCorpusDraft {
             Ok(()) => Ok(self),
             Err(cause) => Err(self.error(cause)),
         }
+    }
+    /// Seal ONE immutable lexical/vector/source/model tuple with bounded descriptor-held IO.
+    /// This is preparation only: no whole selection, response completion or implicit settlement.
+    pub fn prepare_tuple(
+        mut self,
+        mut progress: impl FnMut(NativeCorpusProgress),
+    ) -> std::result::Result<Self, NativeCorpusError> {
+        if self.tuple.is_some() {
+            let checked = (|| {
+                self.check()?;
+                self.tuple
+                    .as_ref()
+                    .expect("actual tuple")
+                    .verify_members(self.files.as_ref().context("actual tuple files")?, || {
+                        self.check()
+                    })
+            })();
+            return match checked {
+                Ok(()) => Ok(self),
+                Err(cause) => Err(self.error(cause)),
+            };
+        }
+        match tuple::prepare(&mut self, &mut progress) {
+            Ok(seal) => {
+                self.tuple = Some(seal);
+                Ok(self)
+            }
+            Err(cause) => Err(self.error(cause)),
+        }
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_tuple_header(&self) -> Result<serde_json::Value> {
+        self.check()?;
+        Ok(serde_json::to_value(
+            &self
+                .tuple
+                .as_ref()
+                .context("actual prepared tuple")?
+                .header_data,
+        )?)
+    }
+    /// Select only the complete sealed tuple under the actual same-library writer lease/CAS.
+    /// Unknown post-switch durability returns this actual foreground owner; no component selects alone.
+    pub fn select_tuple(
+        mut self,
+        mut progress: impl FnMut(NativeCorpusProgress),
+    ) -> std::result::Result<Self, NativeCorpusError> {
+        let mut state = match self.selection.take() {
+            Some(state) => state,
+            None => return Err(self.error(anyhow::anyhow!("actual selector owner unavailable"))),
+        };
+        let result = state.select(&mut self, &mut progress);
+        self.selection = Some(state);
+        match result {
+            Ok(()) => Ok(self),
+            Err(cause) => Err(self.error(cause)),
+        }
+    }
+    fn resolve_publication(&mut self) -> Result<()> {
+        let Some(mut state) = self.selection.take() else {
+            return Ok(());
+        };
+        let result = if state.phase == selection::Phase::Switched {
+            state.recover(self)
+        } else {
+            state.discard_candidate()
+        };
+        self.selection = Some(state);
+        result
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_switch_fault(&mut self) {
+        self.test_fail_after_switch = true;
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_selected_pointer(&self) -> Result<serde_json::Value> {
+        self.check()?;
+        Ok(serde_json::to_value(
+            self.selection
+                .as_ref()
+                .context("actual selection")?
+                .selected_pointer()?,
+        )?)
     }
     fn write_checkpoint(&self, input: Option<&NativeIndexInput>) -> Result<()> {
         if let Some(input) = input {
@@ -835,7 +992,8 @@ impl NativeCorpusDraft {
         let extraction = input.extraction()?;
         let text = input.text()?;
         let source = input.source()?;
-        let raw_size = source.file()?.metadata()?.len();
+        let original_version = stamp(source.file()?)?;
+        let raw_size = original_version[2];
         let source_id = input.source_id()?;
         let source_digest = input.source_digest()?;
         let representation = input.representation()?;
@@ -914,6 +1072,7 @@ impl NativeCorpusDraft {
                 locator: Some(hint.to_owned()),
             };
             let part = SourcePart {
+                original_version,
                 page_offset,
                 slot,
                 embedding_rows: text_windows(chunk).filter(|s| !s.trim().is_empty()).count() as u64,
@@ -1059,6 +1218,10 @@ impl NativeCorpusDraft {
 }
 impl Drop for NativeCorpusDraft {
     fn drop(&mut self) {
+        // A possibly switched pointer is actual foreground work, never a static residue then exit.
+        while self.resolve_publication().is_err() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
         // All producers here are synchronous/collected. Actual still-borrowed scopes stay foreground-owned.
         while self.cleanup_scopes().is_err() {
             std::thread::sleep(Duration::from_millis(250));
@@ -1080,7 +1243,9 @@ impl Drop for NativeCorpusDraft {
         self.page.take();
         self.provider.take();
         self.vectors.take();
+        self.tuple.take();
         self.files.take();
+        self.selection.take();
         self.work.take();
         if let Some(claim) = self.claim.take() {
             let _ = Account::current().and_then(|a| {

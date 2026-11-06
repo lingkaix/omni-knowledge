@@ -2329,3 +2329,112 @@ fn source_representation_bounds_are_independent_of_original_size() {
         "invalid-request"
     );
 }
+
+/// Identical eligible content has identical mature BM25 scores despite denied neighbour chunks.
+/// This is numerical privacy parity, NOT production mixing of independent partition score lists.
+#[test]
+fn eligible_subset_statistics_equal_identical_eligible_corpus() {
+    let f = Fixture::new();
+    let a = f.text("admitted-a", "alpha beta alpha\n");
+    let b = f.text("excluded-b", &"alpha private neighbour ".repeat(400));
+    let only = f.view("only-eligible", vec![a.clone()]);
+    let shared = f.view("mixed-scope", vec![a.clone(), b]);
+    f.kernel.publish(only.clone(), None).unwrap();
+    f.kernel.publish(shared, None).unwrap();
+    let expected = f.search(Mode::Lexical, "alpha", vec![only], 10);
+    let actual = f.search(
+        Mode::Lexical,
+        "alpha",
+        vec![f.view("mixed-scope", vec![a])],
+        10,
+    );
+    assert_eq!(actual.hits.len(), 1);
+    assert_eq!(expected.hits.len(), 1);
+    assert!(
+        (actual.hits[0].score.unwrap() - expected.hits[0].score.unwrap()).abs() < 0.000001,
+        "excluded neighbours cannot alter admitted BM25 statistics: actual={:?} expected={:?}",
+        actual.hits[0].score,
+        expected.hits[0].score
+    );
+}
+/// Partial eligible views retain exact existing Jieba/Lindera token-count/scoring semantics.
+#[test]
+fn eligible_cjk_subset_preserves_mature_scores() {
+    for (language, body, query) in [
+        ("ja", "検索機能を改善しました。", "検索 改善"),
+        ("zh", "我们完成了测试，并修复了缺陷。", "测试 修复"),
+    ] {
+        let f = Fixture::new();
+        let mut a = f.text("admitted-a", body);
+        a.language = Some(language.into());
+        let mut b = f.text(
+            "excluded-b",
+            &format!("{query} private neighbour ").repeat(400),
+        );
+        b.language = Some(language.into());
+        let only = f.view("eligible-only", vec![a.clone()]);
+        f.kernel.publish(only.clone(), None).unwrap();
+        f.kernel
+            .publish(f.view("mixed-scope", vec![a.clone(), b]), None)
+            .unwrap();
+        let baseline = f.search(Mode::Lexical, query, vec![only], 10);
+        let selected = f.search(
+            Mode::Lexical,
+            query,
+            vec![f.view("mixed-scope", vec![a])],
+            10,
+        );
+        assert_eq!(selected.hits.len(), 1);
+        assert_eq!(baseline.hits.len(), 1);
+        assert!(
+            (selected.hits[0].score.unwrap() - baseline.hits[0].score.unwrap()).abs() < 0.000001,
+            "{language} selected={:?} baseline={:?}",
+            selected.hits[0].score,
+            baseline.hits[0].score
+        );
+    }
+}
+/// An omitted/ineligible row is not a stale admitted revision and cannot inflate public coverage.
+#[test]
+fn eligible_subset_coverage_excludes_omitted_rows() {
+    let f = Fixture::new();
+    let a = f.text("admitted-a", "alpha beta\n");
+    let b = f.text("excluded-b", "private omitted body\n");
+    let all = f.view("mixed-scope", vec![a.clone(), b]);
+    f.kernel.publish(all, None).unwrap();
+    for mode in [Mode::Lexical, Mode::Exact, Mode::Regex] {
+        let result = f.search(
+            mode,
+            "alpha",
+            vec![f.view("mixed-scope", vec![a.clone()])],
+            10,
+        );
+        assert_eq!(result.coverage.admitted_objects, 1);
+        assert_eq!(result.coverage.stale_revisions, 0);
+        assert_eq!(result.hits.len(), 1);
+    }
+}
+/// Actual native boundary observer: no eligible body means no index/statistics open at all.
+#[test]
+fn empty_eligible_view_never_opens_statistics() {
+    let f = Fixture::new();
+    let a = f.text("excluded-a", "alpha private body\n");
+    f.kernel
+        .publish(f.view("mixed-scope", vec![a]), None)
+        .unwrap();
+    take_access();
+    let result = f.search(
+        Mode::Lexical,
+        "alpha",
+        vec![f.view("mixed-scope", vec![])],
+        10,
+    );
+    let seen = take_access();
+    assert!(
+        !seen.iter().any(|(kind, _)| kind == "statistics"),
+        "ineligible index statistics were opened: {seen:?}"
+    );
+    assert_eq!(result.coverage.admitted_objects, 0);
+    assert_eq!(result.coverage.stale_revisions, 0);
+    assert!(result.hits.is_empty());
+}

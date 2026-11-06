@@ -7,6 +7,11 @@ use knowledge_core::{
     jobs::{Claim, Key, Priority, Submission, Submitted},
 };
 use knowledge_processing::funding::Funding;
+use std::sync::Arc;
+#[cfg(test)]
+thread_local! {static TEST_HASH_READS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};}
+
+type CachedOriginalCheck = Arc<dyn Fn(&File) -> Result<()> + Send + Sync>;
 
 /// An actual selected source descriptor, policy/version guard and prepaid native delivery lifetime.
 /// Keep this carrier (or its Delivery) until the last controllable output write settles.
@@ -21,6 +26,18 @@ pub struct NativeSource {
     permit: Permit,
 }
 impl NativeSource {
+    // Remaining actual source fields die before the returned scope can be explicitly rejoined.
+    pub(in crate::native_service) fn into_query_scope(self) -> Permit {
+        self.permit
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_query_scope_clone(&self) -> Permit {
+        self.permit.clone()
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_hash_read_calls() -> u64 {
+        TEST_HASH_READS.with(std::cell::Cell::get)
+    }
     /// Validate this concrete processing effect against the actual sealed admitted request,
     /// never a status/browse permit, caller boolean or naked source ID.
     pub(super) fn indexed_extract_scope(&self, claim: &Claim, max_bytes: usize) -> Result<()> {
@@ -90,6 +107,76 @@ impl NativeSource {
     ) -> Result<Self> {
         Self::open_controlled(library, path, permit, budget, || Ok(()))
     }
+    /// Native Query-only cache dependency check: no body hash, extraction or provider contact.
+    /// The private caller supplies an opaque pinned producer-part guard, never public DTO authority.
+    pub(super) fn open_cached_query(
+        library: &wire::Id,
+        permit: &Permit,
+        observed: super::inventory::NativeObservedSource,
+        original_version: [u64; 8],
+        digest: ContentDigest,
+        dependency: CachedOriginalCheck,
+    ) -> Result<Self> {
+        observed.check_permit(permit)?;
+        anyhow::ensure!(
+            matches!(permit.admitted_command().map_err(refused_error)?,wire::Command::Query{query}if query.library_ids.contains(library)),
+            "actual Query required for cached source eligibility"
+        );
+        anyhow::ensure!(
+            observed.observation().stat.backend.library_id == library.as_str(),
+            "foreign cached source observation"
+        );
+        permit
+            .reserve_result(
+                128 * 1024
+                    + (library.as_str().len() + observed.observation().stat.path.as_str().len())
+                        as u64
+                        * 16,
+            )
+            .map_err(refused_error)?;
+        let path = wire::RelativePath::new(observed.observation().stat.path.as_str())?;
+        permit.check_path(library, &path).map_err(refused_error)?;
+        let file = permit
+            .with_root(library, |root| LibraryHost::open_root(root, path.as_str()))
+            .map_err(refused_error)?;
+        let before = file.metadata()?;
+        let actual = [
+            before.dev(),
+            before.ino(),
+            before.len(),
+            before.mtime() as u64,
+            before.mtime_nsec() as u64,
+            before.ctime() as u64,
+            before.ctime_nsec() as u64,
+            before.nlink(),
+        ];
+        anyhow::ensure!(
+            before.is_file() && actual == original_version,
+            "cached source original version is stale; no synchronous query rehash"
+        );
+        observed.check_file(&file)?;
+        dependency(&file)?;
+        LibraryHost::track_version(library, path.as_str(), &file, &before, permit)
+            .map_err(refused_error)?;
+        let context = selected_context(library, permit)?;
+        let file = Arc::new(file);
+        let checked = file.clone();
+        permit
+            .retain_check(Arc::new(move || dependency(&checked).is_ok()))
+            .map_err(refused_error)?;
+        let identity = wire::Id::new(observed.source_id())?;
+        Self {
+            file,
+            library: library.clone(),
+            path,
+            context,
+            source: identity.as_str().to_owned(),
+            wire_source: identity,
+            version: digest,
+            permit: permit.clone(),
+        }
+        .bind_observed(observed)
+    }
     pub(super) fn open_claim(
         library: &wire::Id,
         path: &wire::RelativePath,
@@ -152,6 +239,8 @@ impl NativeSource {
                 bail!("native verification deadline elapsed");
             }
             permit.check_path(library, path).map_err(refused_error)?;
+            #[cfg(test)]
+            TEST_HASH_READS.with(|calls| calls.set(calls.get() + 1));
             let count = file.read_at(&mut buffer, offset)?;
             if count == 0 {
                 break;
@@ -237,7 +326,8 @@ impl NativeSource {
     pub fn context(&self) -> &str {
         &self.context
     }
-    /// Complete digest read from the actual held source, with current-version checks.
+    /// Complete SAME-FD verified digest: current hash, or opaque producer receipt whose exact
+    /// original FD/version is still current. Cached Query eligibility never rehashes whole sources.
     pub fn version(&self) -> &ContentDigest {
         &self.version
     }

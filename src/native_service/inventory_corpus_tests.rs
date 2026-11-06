@@ -1,5 +1,7 @@
 //! Actual native whole-source producer under SAME one Claim; not tuple/product acceptance.
 use super::*;
+#[path = "inventory_corpus_query_tests.rs"]
+mod query_job;
 use std::io::Read;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 struct ContractFixture {
@@ -396,7 +398,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     assert!(
         !records
             .iter()
-            .any(|r| r["document"]["key"]["source_id"] == denied["source_id"]),
+            .any(|r| r["document"]["key"]["id"] == denied["source_id"]),
         "unreadable metadata cannot become an invented representation/vector source"
     );
     assert_eq!(catalog.len() as u64, shards);
@@ -543,6 +545,80 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     } else {
         draft
     };
+    let draft = draft
+        .prepare_tuple(|_| {})
+        .unwrap_or_else(|e| panic!("actual whole tuple seal: {:#}", e.cause()));
+    let header = draft.test_tuple_header().unwrap();
+    assert_eq!(
+        header["coverage"]["observations"],
+        draft.coverage().observations
+    );
+    assert_eq!(header["coverage"]["unavailable"], 1);
+    assert_eq!(header["coverage"]["tombstones"], 1);
+    assert_eq!(header["sources"], count);
+    assert_eq!(header["shards"], shards);
+    assert_eq!(header["model"].is_null(), !embeddings);
+    assert_eq!(header["vector_generation"].is_null(), !embeddings);
+    assert_eq!(header["vector_rows"], if embeddings { rows } else { 0 });
+    let members = frames(file_at(draft.staging_directory().unwrap(), "members.rows"));
+    assert_eq!(members.len() as u64, header["members"].as_u64().unwrap());
+    assert!(
+        members.iter().any(|m| m["name"] == "inventory.rows"
+            && m["sha256"].as_str().is_some_and(|s| s.len() == 64))
+    );
+    assert!(members.iter().any(|m| {
+        m["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("kernel/") && n.ends_with("manifest.json"))
+    }));
+    let aggregate_pin = file_at(draft.staging_directory().unwrap(), "READERS");
+    assert!(
+        fs2::FileExt::try_lock_exclusive(&aggregate_pin).is_err(),
+        "actual aggregate reader pin protects not-yet-opened components"
+    );
+    drop(aggregate_pin);
+    assert!(
+        rustix::fs::statat(
+            draft.staging_directory().unwrap(),
+            "CURRENT",
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW
+        )
+        .is_err(),
+        "a prepared whole tuple still cannot independently select library CURRENT"
+    );
+    drop(members);
+    drop(header);
+    let mut draft = draft;
+    if mode == "normal" {
+        draft.test_switch_fault();
+    }
+    let selected = draft.select_tuple(|_| {});
+    let draft = if mode == "normal" {
+        let error = match selected {
+            Err(error) => error,
+            Ok(_) => {
+                panic!("post-switch uncertainty must return the actual owning publication phase")
+            }
+        };
+        assert!(format!("{:#}", error.cause()).contains("post-switch"));
+        assert_eq!(account.status().unwrap().queue.unsettled, 1);
+        let (draft, _cause) = error.into_parts();
+        draft
+            .select_tuple(|_| {})
+            .unwrap_or_else(|e| panic!("actual foreground publication recovery: {:#}", e.cause()))
+    } else {
+        selected.unwrap_or_else(|e| panic!("actual whole selector publication: {:#}", e.cause()))
+    };
+    let pointer = draft.test_selected_pointer().unwrap();
+    assert_eq!(pointer["format"], 1);
+    assert!(
+        pointer["stage"]
+            .as_str()
+            .unwrap()
+            .starts_with("native-corpus-")
+    );
+    assert_eq!(pointer["header_sha256"].as_str().unwrap().len(), 64);
+    drop(pointer);
     let mut draft = draft;
     let loan = if mode == "normal" {
         draft.test_retained_scope().unwrap()
@@ -554,6 +630,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         .unwrap()
         .execution
         .memory_bytes;
+    let mutation_directory = draft.staging_directory().unwrap().try_clone().unwrap();
     let (job, claim) = draft.into_job().unwrap();
     assert_eq!(
         account
@@ -571,11 +648,208 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     );
     account
         .queue()
-        .settle(&claim, job.key(), knowledge_core::jobs::Outcome::Failed)
+        .settle(&claim, job.key(), knowledge_core::jobs::Outcome::Completed)
         .unwrap();
     drop(job);
+    // The Refresh pressure oracle ends after actual aggregate settlement. The independent
+    // cold Query below prepays its own complete peak, then applies its own FULL pressure.
+    pressure.finish().unwrap();
+    let query_command=wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"actual-cold-tuple-query","command":{"op":"query","query":{"library_ids":[service.library_id().as_str()],"keywords":["alpha"],"methods":["files","bm25"],"required_tags":[],"case_sensitive":false,"limit":10,"budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"},"image_query":null}}})).unwrap()).unwrap().command;
+    let query_permit = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
+    let reader = service
+        .open_corpus_tuple(&owner, query_permit, ready(NativeTupleRead::requirement()))
+        .unwrap();
+    let reopened = reader.test_header().unwrap();
+    assert_eq!(
+        reader.test_unpinned_header_opens(),
+        0,
+        "actual aggregate pin must precede every native header open, not only the returned reader"
+    );
+    assert_eq!(reopened["sources"], count);
+    assert_eq!(reopened["coverage"]["unavailable"], 1);
+    assert_eq!(reopened["coverage"]["tombstones"], 1);
+    assert!(
+        !reader.test_aggregate_exclusive().unwrap(),
+        "actual reopened aggregate pin protects components which this Query has not opened"
+    );
+    assert_eq!(
+        account.status().unwrap().queue.unsettled,
+        0,
+        "readonly tuple open cannot fabricate a Refresh/job"
+    );
+    let source_permit = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
+    let mut query_scratch = holding(4 * 1024 * 1024, 0);
+    let query_inventory = service
+        .inventory_for_query(
+            &owner,
+            &source_permit,
+            "wiki",
+            reopened["scan"].as_str().unwrap(),
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &query_scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    let first_path = reader.test_part_path(0).unwrap();
+    let actual = observed(&query_inventory, &first_path);
+    let original_id = actual.source_id().to_owned();
+    let before_hash = NativeSource::test_hash_read_calls();
+    let (cached_source, _next) = reader
+        .current_source_at(&service, &source_permit, actual, 0)
+        .unwrap()
+        .unwrap();
+    cached_source.check().unwrap();
+    assert_eq!(
+        NativeSource::test_hash_read_calls(),
+        before_hash,
+        "current Query eligibility must use actual pinned original FD version, not synchronously hash source bodies"
+    );
+    query_job::run(
+        &service,
+        &owner,
+        &source_permit,
+        reopened["scan"].as_str().unwrap(),
+        "raw/one.md",
+        &query_inventory,
+    );
+    // A real same-inode edit followed by actual stat-first M1 discovery leaves no verified
+    // new digest. The opaque producer FD version must reject it without a query-time rehash.
+    {
+        let mut edit = fs::OpenOptions::new()
+            .append(true)
+            .open(source_root.join(&first_path))
+            .unwrap();
+        std::io::Write::write_all(&mut edit, b"\nactual changed original\n").unwrap();
+        edit.sync_all().unwrap();
+    }
+    let stat_command=wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"actual-stat-first-current","command":{"op":"refresh","library_id":service.library_id().as_str(),"mount_ids":[],"verification":"stat_first","embeddings":false,"budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"},"operation_id":"actual-stat-first-current"}})).unwrap()).unwrap().command;
+    let stat_permit = service.native_scope(&session, &stat_command, None).unwrap();
+    let mut stat_scratch = holding(4 * 1024 * 1024, 16 * 1024 * 1024);
+    let (stat_inventory, stat_report) = service
+        .reconcile_inventory(
+            &owner,
+            stat_permit,
+            "wiki",
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &stat_scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    assert!(stat_report.complete);
+    let current = observed(&stat_inventory, &first_path);
+    assert_eq!(
+        current.source_id(),
+        original_id,
+        "real same-inode edit retains actual independently tracked M1 source UUID"
+    );
+    assert_eq!(
+        current.observation().verification,
+        knowledge_storage::Verification::Pending
+    );
+    assert!(
+        current.observation().version.is_none(),
+        "real stat-first changed original cannot invent a verified new digest"
+    );
+    let current_query = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
+    let before_stale_hash = NativeSource::test_hash_read_calls();
+    assert!(
+        reader
+            .current_source_at(&service, &current_query, current, 0)
+            .is_err(),
+        "a current M1 metadata row with changed original version cannot certify old cached payload"
+    );
+    assert_eq!(
+        NativeSource::test_hash_read_calls(),
+        before_stale_hash,
+        "stale Query dependency must not synchronously hash the changed original"
+    );
+    drop(current_query);
+    drop(stat_inventory);
+    drop(stat_report);
+    stat_scratch.finish().unwrap();
+    // Explicit fixture actor replaces an equal-byte cache header, not a Query write capability.
+    let original = File::from(
+        rustix::fs::openat(
+            &mutation_directory,
+            "tuple.json",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let mut equal = vec![0; original.metadata().unwrap().len() as usize];
+    std::os::unix::fs::FileExt::read_exact_at(&original, &mut equal, 0).unwrap();
+    rustix::fs::renameat(
+        &mutation_directory,
+        "tuple.json",
+        &mutation_directory,
+        "fixture-original-header",
+    )
+    .unwrap();
+    let mut replacement = File::from(
+        rustix::fs::openat(
+            &mutation_directory,
+            "tuple.json",
+            rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+        )
+        .unwrap(),
+    );
+    std::io::Write::write_all(&mut replacement, &equal).unwrap();
+    replacement.sync_all().unwrap();
+    assert!(
+        reader.check().is_err(),
+        "equal-byte replacement cannot resurrect the held aggregate header owner"
+    );
+    let new_permit = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
+    assert!(
+        service
+            .open_corpus_tuple(&owner, new_permit, ready(NativeTupleRead::requirement()))
+            .is_err(),
+        "cold reader cannot accept equal-byte foreign header identity"
+    );
+    assert!(
+        cached_source.check().is_err(),
+        "current Query source must retain aggregate metadata dependency checks"
+    );
+    drop(cached_source);
+    drop(query_inventory);
+    drop(source_permit);
+    drop(first_path);
+    query_scratch.finish().unwrap();
+    drop(replacement);
+    drop(original);
+    drop(equal);
+    drop(mutation_directory);
+    drop(reopened);
+    drop(reader);
     drop(fixture);
     drop(facts);
     test_metadata.finish().unwrap();
-    pressure.finish().unwrap();
 }
