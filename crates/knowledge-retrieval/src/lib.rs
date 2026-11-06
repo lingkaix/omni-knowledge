@@ -7,6 +7,8 @@
 mod stored;
 /// Package-owned verification ceilings for native callers, not admission or permission grants.
 pub use knowledge_package::{Bounds as ArchiveBounds, Quotas as ArchiveQuotas};
+/// Typed refusal from the ONE kernel's generic native Directory interface.
+pub use retrieval_kernel::Error as KernelError;
 pub use retrieval_kernel::{ByteDirectory, SourceGeneration, consumer_machinery};
 pub use stored::{
     ArchiveSource, StoredDirectory, StoredDirectoryPlan, StoredGeneration, StoredIdentity,

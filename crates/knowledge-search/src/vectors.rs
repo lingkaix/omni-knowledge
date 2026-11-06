@@ -490,18 +490,10 @@ impl VectorStore {
             return Err(invalid("invalid row metadata frame plan"));
         }
         let header = identity_bound(identity)?;
-        let memory = plan
-            .max_row_bytes
-            .checked_mul(10)
-            .and_then(|n| n.checked_add(row_bytes.checked_mul(4)?))
-            .and_then(|n| n.checked_add(header.checked_mul(8)?))
-            .and_then(|n| n.checked_add(65536))
-            .ok_or_else(|| invalid("complete working plan overflow"))?;
-        let storage = bytes
-            .checked_add(plan.metadata_bytes)
-            .and_then(|n| n.checked_add(header))
-            .and_then(|n| n.checked_add(65536))
-            .ok_or_else(|| invalid("complete storage plan overflow"))?;
+        let knowledge_core::jobs::Reservation {
+            memory_bytes: memory,
+            temporary_bytes: storage,
+        } = plan.requirement(identity)?;
         before_work(grant, memory, deadline).map_err(VectorError::Grant)?;
         grant.covers(memory, storage).map_err(VectorError::Grant)?;
         let mut work = grant.take().map_err(VectorError::Grant)?;
@@ -1299,30 +1291,23 @@ fn check_manifest(
 }
 
 fn row_plan(rows: &[VectorRow]) -> Result<VectorBuildPlan, VectorError> {
-    let mut metadata_bytes = 0u64;
-    let mut max_row_bytes = 1u64;
+    let mut plan = VectorBuildPlan {
+        rows: 0,
+        metadata_bytes: 0,
+        max_row_bytes: 1,
+    };
     for row in rows {
-        let strings = (row.source_id.len() as u64)
-            .checked_add(row.source_digest.len() as u64)
-            .and_then(|n| n.checked_add(row.locator.len() as u64))
-            .and_then(|n| n.checked_add(row.representation.digest.len() as u64))
-            .and_then(|n| n.checked_add(row.representation.processor.len() as u64))
-            .ok_or_else(|| invalid("row size overflow"))?;
-        let bound = strings
-            .checked_mul(6)
-            .and_then(|n| n.checked_add(384))
-            .ok_or_else(|| invalid("row size overflow"))?;
-        metadata_bytes = metadata_bytes
-            .checked_add(bound)
-            .and_then(|n| n.checked_add(4))
-            .ok_or_else(|| invalid("metadata size overflow"))?;
-        max_row_bytes = max_row_bytes.max(bound);
+        plan.include(
+            VectorCandidate {
+                source_id: &row.source_id,
+                source_digest: &row.source_digest,
+                representation: &row.representation,
+                locator: &row.locator,
+            },
+            1,
+        )?;
     }
-    Ok(VectorBuildPlan {
-        rows: rows.len() as u64,
-        metadata_bytes,
-        max_row_bytes,
-    })
+    Ok(plan)
 }
 
 fn create_component(path: &Path) -> Result<File, VectorError> {

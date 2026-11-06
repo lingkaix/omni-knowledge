@@ -1,5 +1,5 @@
 diff --git c/src/store.rs w/src/store.rs
-index 8164010..1e2fc7e 100644
+index 8164010..26d7b94 100644
 --- c/src/store.rs
 +++ w/src/store.rs
 @@ -5,7 +5,7 @@ use fs2::FileExt;
@@ -143,19 +143,24 @@ index 8164010..1e2fc7e 100644
                  {
                      let mut now = TextFile::new(open_source(&self.source, path)?, None)?;
                      let (actual_digest, actual_size) = digest_reader(&mut now, budget)?;
-@@ -580,6 +634,11 @@ impl Kernel {
+@@ -580,6 +634,16 @@ impl Kernel {
                  Ok(())
              })();
              if let Err(e) = process {
 +                // Native input integrity/currentness failures preserve the prior generation;
 +                // they are not silently successful partial native publication.
-+                if self.source_bytes.is_some() {
++                if self.source_bytes.is_some()
++                    && matches!(
++                        &record.document.content,
++                        Content::Text { .. } | Content::Representation { .. }
++                    )
++                {
 +                    return Err(e);
 +                }
                  // A failed derived write cannot be committed as incomplete per-document coverage.
                  if e.code == "conflict" || e.message == FILESYSTEM_GROWTH_REFUSED {
                      return Err(e);
-@@ -662,6 +721,7 @@ impl Kernel {
+@@ -662,6 +726,7 @@ impl Kernel {
          fs::rename(&stage_path, &final_path).map_err(io_error)?;
          sync_dir(&scope_path)?;
          checkpoint("before-pointer")?;

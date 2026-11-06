@@ -13,6 +13,76 @@ pub struct VectorBuildPlan {
     pub max_row_bytes: u64,
 }
 
+impl VectorBuildPlan {
+    /// Accumulate the existing escaped metadata bound before a producer is advanced.
+    /// Candidate/count facts grant nothing. A streaming host supplies the longest actual locator.
+    pub fn include(
+        &mut self,
+        row: super::VectorCandidate<'_>,
+        count: u64,
+    ) -> Result<(), VectorError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let strings = (row.source_id.len() as u64)
+            .checked_add(row.source_digest.len() as u64)
+            .and_then(|n| n.checked_add(row.locator.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.digest.len() as u64))
+            .and_then(|n| n.checked_add(row.representation.processor.len() as u64))
+            .ok_or_else(|| invalid("row size overflow"))?;
+        let bound = strings
+            .checked_mul(6)
+            .and_then(|n| n.checked_add(384))
+            .ok_or_else(|| invalid("row size overflow"))?;
+        let rows = self
+            .rows
+            .checked_add(count)
+            .ok_or_else(|| invalid("row count overflow"))?;
+        let metadata_bytes = bound
+            .checked_add(4)
+            .and_then(|n| n.checked_mul(count))
+            .and_then(|n| self.metadata_bytes.checked_add(n))
+            .ok_or_else(|| invalid("metadata size overflow"))?;
+        self.rows = rows;
+        self.metadata_bytes = metadata_bytes;
+        self.max_row_bytes = self.max_row_bytes.max(bound);
+        Ok(())
+    }
+    /// The SAME complete quote used by the existing vector writer, before buffers, IO or next().
+    pub fn requirement(
+        &self,
+        identity: &super::ModelIdentity,
+    ) -> Result<knowledge_core::jobs::Reservation, VectorError> {
+        super::validate_identity(identity)?;
+        if self.max_row_bytes == 0 || self.max_row_bytes > u32::MAX as u64 {
+            return Err(invalid("invalid row metadata frame plan"));
+        }
+        let row_bytes = (identity.dimension as u64)
+            .checked_mul(4)
+            .ok_or_else(|| invalid("row length overflow"))?;
+        let bytes = row_bytes
+            .checked_mul(self.rows)
+            .ok_or_else(|| invalid("segment size overflow"))?;
+        let header = super::identity_bound(identity)?;
+        let memory_bytes = self
+            .max_row_bytes
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(row_bytes.checked_mul(4)?))
+            .and_then(|n| n.checked_add(header.checked_mul(8)?))
+            .and_then(|n| n.checked_add(65536))
+            .ok_or_else(|| invalid("complete working plan overflow"))?;
+        let temporary_bytes = bytes
+            .checked_add(self.metadata_bytes)
+            .and_then(|n| n.checked_add(header))
+            .and_then(|n| n.checked_add(65536))
+            .ok_or_else(|| invalid("complete storage plan overflow"))?;
+        Ok(knowledge_core::jobs::Reservation {
+            memory_bytes,
+            temporary_bytes,
+        })
+    }
+}
+
 /// Exact retained native FD or the ONE kernel's already admitted component handle.
 pub(super) enum Component {
     Native(File),

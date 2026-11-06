@@ -565,37 +565,10 @@ fn hex_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Read-only mirror of immutable Root 819's private consuming identity. Calling its native
-/// constructor instead would create directories/start runtime. Producer parity is exercised
-/// by every actual-index status test; retain this mirror only until a read-only seam exists.
+/// Use the producer's SAME pure static-byte identity calculator. This does not construct a
+/// kernel, create directories or initialize runtime; a mirrored recipe can silently diverge.
 fn consumer_identity() -> String {
-    let mut hash = Sha256::new();
-    hash.update(include_bytes!("../Cargo.lock"));
-    hash.update(include_bytes!("../vendor/retrieval-kernel/PROVENANCE.json"));
-    hash.update(include_bytes!("lib.rs"));
-    hash.update(include_bytes!("embedding.rs"));
-    hash.update(crate::admitted::processor_identity().as_bytes());
-    hash.update(std::env::consts::OS.as_bytes());
-    hash.update(std::env::consts::ARCH.as_bytes());
-    hash.update(std::mem::size_of::<usize>().to_le_bytes());
-    hash.update([
-        cfg!(target_env = "musl") as u8,
-        cfg!(target_env = "gnu") as u8,
-        cfg!(target_env = "msvc") as u8,
-        cfg!(target_endian = "big") as u8,
-        cfg!(debug_assertions) as u8,
-        cfg!(target_feature = "sse2") as u8,
-        cfg!(target_feature = "avx") as u8,
-        cfg!(target_feature = "avx2") as u8,
-        cfg!(target_feature = "fma") as u8,
-        cfg!(target_feature = "neon") as u8,
-    ]);
-    hash.update(if cfg!(feature = "gui") {
-        b"gui".as_slice()
-    } else {
-        b"headless".as_slice()
-    });
-    hex::encode(hash.finalize())
+    crate::admitted::build_identity()
 }
 
 /// The pinned kernel's schema/settings/dictionary/upstream-lock compatibility recipe, without

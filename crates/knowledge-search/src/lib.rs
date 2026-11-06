@@ -19,8 +19,8 @@ use std::{
 };
 pub use vectors::{
     ModelIdentity, PreparedComponent, PreparedVectors, RepresentationIdentity, VectorBuildPlan,
-    VectorCandidate, VectorEvidence, VectorMetric, VectorModality, VectorNormalization,
-    VectorResult, VectorRow, VectorStore, import_stored_segment,
+    VectorCandidate, VectorError, VectorEvidence, VectorMetric, VectorModality,
+    VectorNormalization, VectorResult, VectorRow, VectorStore, import_stored_segment,
 };
 
 /// A real non-forgeable Core lifetime. Clones retain the SAME promise, not independent spending credit.

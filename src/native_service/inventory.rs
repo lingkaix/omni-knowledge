@@ -7,7 +7,10 @@ mod tests;
 use super::source::refused_error;
 use super::*;
 pub(super) use job::RefreshCause;
-pub use job::{NativeRefreshJob, NativeRefreshScopeError};
+pub use job::{
+    NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress, NativeRefreshJob,
+    NativeRefreshScopeError,
+};
 use knowledge_core::{
     admission::Holding,
     backend::{Availability, Budget},
@@ -319,7 +322,7 @@ impl NativeLibraryService {
                     .map(|p| knowledge_core::data::RelativePath::new(p.as_str()).map_err(refused))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 // Canonical native bookkeeping is never original content or a source identity.
-                for path in [".omni", ".git"] {
+                for path in [".omni", ".git", "journal"] {
                     outside_scope
                         .push(knowledge_core::data::RelativePath::new(path).map_err(refused)?);
                 }
