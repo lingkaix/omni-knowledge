@@ -8,8 +8,8 @@ use super::source::refused_error;
 use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
-    NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress, NativeRefreshJob,
-    NativeRefreshScopeError,
+    NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
+    NativeRefreshJob, NativeRefreshScopeError,
 };
 use knowledge_core::{
     admission::Holding,

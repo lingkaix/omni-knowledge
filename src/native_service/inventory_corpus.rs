@@ -63,6 +63,7 @@ struct Files {
     tape: Arc<File>,
     sources: File,
     catalog: File,
+    inventory: File,
     directory: File,
     parent: File,
     parent_identity: (u64, u64),
@@ -102,7 +103,8 @@ pub struct NativeCorpusDraft {
     provider: Option<FundedTextProvider>,
     vectors: Option<Arc<knowledge_search::PreparedVectors>>,
     vectors_done: bool,
-    sealed_files: Option<[[u64; 8]; 3]>,
+    sealed_files: Option<[[u64; 8]; 4]>,
+    coverage: NativeCorpusCoverage,
     source_errors: Arc<Mutex<Vec<anyhow::Error>>>,
     refusals: Arc<Mutex<Vec<wire::authority::ScopeRejoinError>>>,
     sources: u64,
@@ -112,6 +114,16 @@ pub struct NativeCorpusDraft {
     lexical_done: bool,
     // All actual data/FD/client/page objects above die BEFORE this metadata/write-window loan.
     work: Option<Work>,
+}
+/// Actual selected-scope M1 metadata coverage; never original bytes, authority or whole-tuple readiness.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct NativeCorpusCoverage {
+    /// Actual current-scope M1 observations serialized without inventing digest facts.
+    pub observations: u64,
+    /// Nondeleted observations actually classified unavailable by M1.
+    pub unavailable: u64,
+    /// Actual current-scan M1 tombstones, never materialized as fake byte sources.
+    pub tombstones: u64,
 }
 /// A failure owns its actual draft and Claim. No static residue or abandoned operation is created.
 pub struct NativeCorpusError {
@@ -180,6 +192,7 @@ impl NativeRefreshJob {
             vectors: None,
             vectors_done: false,
             sealed_files: None,
+            coverage: NativeCorpusCoverage::default(),
             source_errors: Arc::new(Mutex::new(Vec::with_capacity(64))),
             refusals: Arc::new(Mutex::new(Vec::with_capacity(64))),
             sources: 0,
@@ -223,7 +236,8 @@ impl NativeCorpusDraft {
                     [
                         stamp(&files.tape)?,
                         stamp(&files.sources)?,
-                        stamp(&files.catalog)?
+                        stamp(&files.catalog)?,
+                        stamp(&files.inventory)?
                     ] == expected,
                     "prepared actual corpus descriptors changed"
                 );
@@ -292,10 +306,12 @@ impl NativeCorpusDraft {
         let tape = Arc::new(create("representations.data")?);
         let sources = create("sources.rows")?;
         let catalog = create("lexical.rows")?;
+        let inventory = create("inventory.rows")?;
         self.files = Some(Files {
             tape,
             sources,
             catalog,
+            inventory,
             directory,
             parent,
             parent_identity: (m.dev(), m.ino()),
@@ -304,7 +320,11 @@ impl NativeCorpusDraft {
         });
         self.check()
     }
-    /// Real counts from consumed source stages; neither this nor a lexical draft is tuple readiness.
+    /// Exact persisted current-scope observations, including honest unavailable/tombstone facts.
+    pub fn coverage(&self) -> NativeCorpusCoverage {
+        self.coverage
+    }
+    /// Real consumed source/shard/vector-row counts, not tuple readiness.
     pub fn counts(&self) -> (u64, u64, u64) {
         (self.sources, self.shards, self.rows)
     }
@@ -328,7 +348,7 @@ impl NativeCorpusDraft {
     pub(in crate::native_service) fn test_retained_scope(&mut self) -> Result<u64> {
         self.check()?;
         let account = Account::current()?;
-        let funding = account.split_claim(
+        let mut funding = account.split_claim(
             self.actual_claim()?,
             self.job.key(),
             Reservation {
@@ -342,8 +362,31 @@ impl NativeCorpusDraft {
             max_millis: 60000,
             max_memory_bytes: PAGE_MEMORY,
         };
-        let page = Arc::new(self.job.page(0, budget, funding)?);
-        let observed = page.sources().next().context("actual source row")?;
+        let mut offset = 0;
+        let (page, observed) = loop {
+            let page = Arc::new(self.job.page(offset, budget, funding)?);
+            let observed = page
+                .sources()
+                .find(|source| !metadata_only(source.observation()));
+            if let Some(observed) = observed {
+                break (page, observed);
+            }
+            let next = page.next_offset();
+            let complete = page.complete();
+            let page = Arc::try_unwrap(page).map_err(|page| {
+                self.page = Some(page);
+                anyhow::anyhow!("actual test page still owned")
+            })?;
+            funding = page.into_funding().map_err(|page| {
+                self.page = Some(Arc::new(page));
+                anyhow::anyhow!("actual test metadata still owned")
+            })?;
+            if complete || next <= offset {
+                funding.finish()?;
+                bail!("actual source row");
+            }
+            offset = next;
+        };
         let before = account
             .job_status(self.actual_claim()?.job(), self.job.key())?
             .execution
@@ -576,6 +619,7 @@ impl NativeCorpusDraft {
                 page.issue().is_none(),
                 "corpus requires complete actual inventory replay"
             );
+            self.persist_inventory_page(&page, progress)?;
             let next = page.next_offset();
             let complete = page.complete();
             let mut parts = Vec::with_capacity(64);
@@ -583,6 +627,11 @@ impl NativeCorpusDraft {
             let mut encoded = 0usize;
             for (slot, observed) in page.sources().enumerate() {
                 self.check()?;
+                // An actual failed M1 verification is a discoverable metadata outcome, not permission
+                // to invent an original digest or retry a denied body through M3/provider contact.
+                if metadata_only(observed.observation()) {
+                    continue;
+                }
                 let size = observed.observation().stat.size_bytes;
                 self.source_bytes = self
                     .source_bytes
@@ -698,14 +747,73 @@ impl NativeCorpusDraft {
         self.files.as_ref().expect("files").tape.sync_all()?;
         self.files.as_ref().expect("files").sources.sync_all()?;
         self.files.as_ref().expect("files").catalog.sync_all()?;
+        self.files.as_ref().expect("files").inventory.sync_all()?;
         let files = self.files.as_ref().expect("files");
         self.sealed_files = Some([
             stamp(&files.tape)?,
             stamp(&files.sources)?,
             stamp(&files.catalog)?,
+            stamp(&files.inventory)?,
         ]);
         self.lexical_done = true;
         self.check()
+    }
+    fn persist_inventory_page(
+        &mut self,
+        page: &NativeInventoryPage,
+        progress: &mut impl FnMut(NativeCorpusProgress),
+    ) -> Result<()> {
+        for row in &page.page.replay.observations {
+            self.check()?;
+            let inventory = &page.page.inventory;
+            if row.scan != inventory.scan
+                || row.root != inventory.root
+                || row.stat.backend != inventory.mount.context()
+            {
+                continue;
+            }
+            let path = row.stat.path.as_str();
+            if inventory.policy.0.read.outside_scope.iter().any(|p| {
+                path == p.as_str()
+                    || path
+                        .strip_prefix(p.as_str())
+                        .is_some_and(|tail| tail.starts_with('/'))
+            }) {
+                continue;
+            }
+            let wire::Command::Refresh { library_id, .. } =
+                self.job.permit.admitted_command().map_err(refused_error)?
+            else {
+                bail!("actual Refresh metadata intent required")
+            };
+            self.job
+                .permit
+                .check_path(library_id, &wire::RelativePath::new(path)?)
+                .map_err(refused_error)?;
+            anyhow::ensure!(
+                self.coverage.observations < self.actual_claim()?.budget().max_files,
+                "aggregate metadata observation budget exhausted"
+            );
+            let bytes = frame_bytes(row)?;
+            self.wait_growth(bytes.len() as u64, None, progress)?;
+            let file = &mut self.files.as_mut().expect("files").inventory;
+            let before = file.metadata()?.len();
+            let result = file.write_all(&bytes);
+            let after = file.metadata()?.len();
+            self.work.as_mut().expect("work").written(
+                after
+                    .checked_sub(before)
+                    .context("inventory size regressed")?,
+            )?;
+            result?;
+            self.coverage.observations += 1;
+            if row.change == ChangeKind::Deleted {
+                self.coverage.tombstones += 1;
+            } else if metadata_only(row) {
+                self.coverage.unavailable += 1;
+            }
+        }
+        Ok(())
     }
     fn finish_processing(&mut self, processing: NativeProcessing) -> Result<()> {
         if let Err(error) = self.job.finish_source(processing, self.actual_claim()?) {
@@ -986,6 +1094,10 @@ impl Drop for NativeCorpusDraft {
             });
         }
     }
+}
+fn metadata_only(row: &Observation) -> bool {
+    row.availability != Availability::Available
+        || matches!(row.verification, knowledge_storage::Verification::Failed(_))
 }
 fn stamp(file: &File) -> Result<[u64; 8]> {
     let m = file.metadata()?;

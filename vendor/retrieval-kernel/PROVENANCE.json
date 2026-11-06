@@ -265,7 +265,7 @@
     {
       "path": "src/owned.rs",
       "upstream_sha256": null,
-      "vendored_sha256": "e787824415c40773ceae455679d9d272c41b95de9e9c6d9e1883b9b0762a377d"
+      "vendored_sha256": "f19096ad2433a5118b4c67ae3716899d39fbf28a80143dd6909be0ca3de76bcb"
     },
     {
       "path": "tests/native_rss.rs",

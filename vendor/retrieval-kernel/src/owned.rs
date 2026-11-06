@@ -5,7 +5,9 @@
 use knowledge_core::admission::{Account, Configuration, Decision, Holding, Origin, Scheduling};
 use knowledge_core::jobs::Reservation;
 use retrieval_kernel::{Error, Result};
-use std::fs::{self, File};
+use std::fs;
+#[cfg(any(target_os = "linux", test))]
+use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
