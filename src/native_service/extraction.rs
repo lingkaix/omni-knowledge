@@ -625,15 +625,17 @@ fn indexed_facts(
         hash.update(chunk);
     }
     processing.check(claim)?;
-    let key = processing.key();
+    // The aggregate scheduler input is a real metadata descriptor, NOT the original
+    // source. Representation dependencies come from the SAME actual verified source FD.
+    let (source, version, processor) = processing.source_facts();
     Ok((
         knowledge_search::RepresentationIdentity {
             digest: hex::encode(hash.finalize()),
-            processor: key.processor.as_str().to_owned(),
+            processor: processor.as_str().to_owned(),
             modality: knowledge_search::VectorModality::Text,
         },
-        key.source.to_owned(),
-        key.version.as_str().to_owned(),
+        source.to_owned(),
+        version.as_str().to_owned(),
     ))
 }
 
@@ -654,6 +656,10 @@ impl<T> NativeAdmitted<T> {
     /// Returns the SAME source for delivery; staging outputs grant no user-visible publication authority.
     pub fn complete(mut self) -> std::result::Result<NativeSource, NativeAdmittedError<T>> {
         let result = (|| -> Result<()> {
+            self.processing
+                .as_ref()
+                .expect("native processing owner")
+                .check_independent_completion()?;
             self.value()?;
             self.collect()?;
             let processing = self.processing.as_ref().expect("native processing owner");

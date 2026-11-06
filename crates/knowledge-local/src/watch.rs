@@ -86,7 +86,7 @@ pub struct HintWatch<'a, P: LocalReadPolicy> {
     holding: Holding,
     /// Exact funded helper lifetime, including its held root descriptor and callback context.
     #[cfg(target_os = "macos")]
-    mac: mac::Lease,
+    mac: Box<mac::Lease>,
     /// Original finite polling/work maxima.
     #[cfg(target_os = "linux")]
     budget: Budget,

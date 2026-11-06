@@ -69,6 +69,10 @@ impl NativeEmbeddingSelection {
         );
         Ok(())
     }
+    pub(super) fn check_permit(&self, permit: &Permit) -> Result<()> {
+        self.check()?;
+        self.0.lease.check_permit(permit).map_err(refused_error)
+    }
     pub(super) fn check_source(&self, source: &NativeSource) -> Result<()> {
         self.check()?;
         source.check_model_selection(&self.0.lease)

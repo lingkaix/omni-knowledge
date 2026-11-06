@@ -88,6 +88,35 @@ impl NativeSource {
         permit: &Permit,
         budget: Budget,
     ) -> Result<Self> {
+        Self::open_controlled(library, path, permit, budget, || Ok(()))
+    }
+    pub(super) fn open_claim(
+        library: &wire::Id,
+        path: &wire::RelativePath,
+        permit: &Permit,
+        budget: Budget,
+        claim: &Claim,
+        expected: Key<'_>,
+    ) -> Result<Self> {
+        Self::open_controlled(library, path, permit, budget, || {
+            anyhow::ensure!(
+                std::time::Instant::now() < claim.deadline(),
+                "aggregate Refresh deadline elapsed"
+            );
+            if let Some(stop) = claim.stop_requested(expected)? {
+                return Err(admitted::Stopped(stop).into());
+            }
+            Ok(())
+        })
+    }
+    fn open_controlled(
+        library: &wire::Id,
+        path: &wire::RelativePath,
+        permit: &Permit,
+        budget: Budget,
+        control: impl Fn() -> Result<()>,
+    ) -> Result<Self> {
+        control()?;
         if budget.max_files == 0 || budget.max_memory_bytes < 256 * 1024 || budget.max_millis == 0 {
             bail!("native verification budget exhausted");
         }
@@ -110,30 +139,7 @@ impl NativeSource {
         }
         LibraryHost::track_version(library, path.as_str(), &file, &before, permit)
             .map_err(refused_error)?;
-        let context = permit
-            .with_selected_context(library, |root, policy, revision| {
-                use std::fmt::Write;
-                struct Sink(Sha256);
-                impl std::fmt::Write for Sink {
-                    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-                        self.0.update(s.as_bytes());
-                        Ok(())
-                    }
-                }
-                let info = root.metadata().map_err(refused)?;
-                let mut sink = Sink(Sha256::new());
-                write!(
-                    &mut sink,
-                    "native-read-v1:{}:{}:{}:{policy:?}",
-                    info.dev(),
-                    info.ino(),
-                    revision
-                )
-                .map_err(|_| wire::ErrorCode::Internal)?;
-                sink.0.update(current_marker(root)?);
-                Ok(hex::encode(sink.0.finalize()))
-            })
-            .map_err(refused_error)?;
+        let context = selected_context(library, permit)?;
         // read_at keeps the original FD position unchanged; every controlled refill checks policy,
         // root namespace, the held version AND its current descriptor-relative name.
         use std::os::unix::fs::FileExt;
@@ -141,6 +147,7 @@ impl NativeSource {
         let mut offset = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
+            control()?;
             if std::time::Instant::now() >= deadline {
                 bail!("native verification deadline elapsed");
             }
@@ -157,6 +164,7 @@ impl NativeSource {
                 bail!("native source changed during verification");
             }
         }
+        control()?;
         permit.check().map_err(refused_error)?;
         if offset != before.len() {
             bail!("native source changed during verification");
@@ -290,6 +298,7 @@ impl NativeSource {
         fingerprint.update(include_bytes!("held.rs"));
         fingerprint.update(include_bytes!("models.rs"));
         fingerprint.update(include_bytes!("inventory.rs"));
+        fingerprint.update(include_bytes!("inventory_job.rs"));
         fingerprint.update(include_bytes!("../../crates/knowledge-local/src/lib.rs"));
         fingerprint.update(include_bytes!(
             "../../crates/knowledge-storage/src/tracking.rs"
@@ -313,8 +322,36 @@ impl NativeSource {
             source: self,
             recipe,
             processor,
+            refresh: None,
         })
     }
+}
+/// Shared actual selected-root context; callers prepay metadata before native inspection.
+pub(super) fn selected_context(library: &wire::Id, permit: &Permit) -> Result<String> {
+    permit
+        .with_selected_context(library, |root, policy, revision| {
+            use std::fmt::Write;
+            struct Sink(Sha256);
+            impl std::fmt::Write for Sink {
+                fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                    self.0.update(s.as_bytes());
+                    Ok(())
+                }
+            }
+            let info = root.metadata().map_err(refused)?;
+            let mut sink = Sink(Sha256::new());
+            write!(
+                &mut sink,
+                "native-read-v1:{}:{}:{}:{policy:?}",
+                info.dev(),
+                info.ino(),
+                revision
+            )
+            .map_err(|_| wire::ErrorCode::Internal)?;
+            sink.0.update(current_marker(root)?);
+            Ok(hex::encode(sink.0.finalize()))
+        })
+        .map_err(refused_error)
 }
 pub(super) fn refused_error(code: wire::ErrorCode) -> anyhow::Error {
     anyhow::anyhow!("native source refused: {code:?}")
@@ -325,6 +362,7 @@ pub(super) fn refused_error(code: wire::ErrorCode) -> anyhow::Error {
 pub struct NativeProcessing {
     recipe: ContentDigest,
     processor: ContentDigest,
+    refresh: Option<std::sync::Arc<super::inventory::RefreshCause>>,
     // Source owns the native context/FD and aggregate holding: drop it AFTER all paid key fields.
     source: NativeSource,
 }
@@ -344,12 +382,60 @@ pub struct NativeJobPlan<'a> {
     pub max_attempts: u64,
 }
 impl NativeProcessing {
+    pub(super) fn bind_refresh_cause(
+        &mut self,
+        cause: std::sync::Arc<super::inventory::RefreshCause>,
+    ) {
+        self.refresh = Some(cause);
+    }
+    pub(super) fn check_independent_completion(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.refresh.is_none(),
+            "one source cannot complete an aggregate Refresh; retain the actual job through whole tuple settlement"
+        );
+        Ok(())
+    }
+    pub(super) fn source_facts(&self) -> (&str, &ContentDigest, &ContentDigest) {
+        (&self.source.source, &self.source.version, &self.processor)
+    }
+    pub(super) fn into_refresh_scope(
+        self,
+        cause: &std::sync::Arc<super::inventory::RefreshCause>,
+    ) -> (Permit, bool) {
+        let matches = self
+            .refresh
+            .as_ref()
+            .is_some_and(|actual| std::sync::Arc::ptr_eq(actual, cause));
+        // All paid source/key/cause data dies before the consuming SDK scope rejoin.
+        let Self {
+            recipe,
+            processor,
+            refresh,
+            source,
+        } = self;
+        drop((recipe, processor, refresh));
+        let NativeSource {
+            file,
+            library,
+            path,
+            context,
+            source,
+            wire_source,
+            version,
+            permit,
+        } = source;
+        drop((file, library, path, context, source, wire_source, version));
+        (permit, matches)
+    }
     /// Borrow the same actual FD/current-policy carrier through execution and delivery.
     pub fn source(&self) -> &NativeSource {
         &self.source
     }
     /// Actual complete queue key, with native root context/library/path identity and source digest.
     pub fn key(&self) -> Key<'_> {
+        if let Some(cause) = &self.refresh {
+            return cause.key();
+        }
         Key {
             context: &self.source.context,
             library: self.source.library.as_str(),
@@ -363,6 +449,10 @@ impl NativeProcessing {
     /// Submit a visible real job EVEN WHEN another job is queued/running. Core preserves the
     /// impossible-need/contention distinction; this never invents a pending/waiting grant/string.
     pub fn submit(&self, plan: NativeJobPlan<'_>) -> Result<Submitted> {
+        anyhow::ensure!(
+            self.refresh.is_none(),
+            "aggregate Refresh owns submission; never submit per-source child jobs"
+        );
         self.source.check()?;
         Ok(Account::current()?.submit(Submission {
             operation_id: plan.operation_id,
@@ -383,6 +473,9 @@ impl NativeProcessing {
     /// spends only via native split_claim; no independent debit or metadata-as-permission fallback.
     pub fn funding<'a>(&'a self, claim: &'a mut Claim) -> Result<Funding<'a>> {
         self.source.check()?;
+        if let Some(cause) = &self.refresh {
+            cause.check()?;
+        }
         if let Some(stop) = claim.stop_requested(self.key())? {
             return Err(admitted::Stopped(stop).into());
         }
@@ -396,6 +489,9 @@ impl NativeProcessing {
     /// Recheck native source/policy and exact current claim before a controlled executor boundary.
     pub fn check(&self, claim: &Claim) -> Result<()> {
         self.source.check()?;
+        if let Some(cause) = &self.refresh {
+            cause.check()?;
+        }
         if let Some(stop) = claim.stop_requested(self.key())? {
             return Err(admitted::Stopped(stop).into());
         }

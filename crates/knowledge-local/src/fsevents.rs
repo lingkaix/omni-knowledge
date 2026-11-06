@@ -121,7 +121,10 @@ impl<P: LocalReadPolicy> LocalMount<P> {
                 .ok_or(WatchError::Budget)?,
             ..budget
         };
-        let mut lease = Lease {
+        // The existing fully prepaid 512-KiB parent envelope covers this one fixed owner.
+        // Allocate BEFORE spawning: monitor/direct watch share it, with no late allocation
+        // after native callbacks start. Keeps the affine monitor enum small on Darwin.
+        let mut lease = Box::new(Lease {
             child: None,
             output: None,
             helper: resolve_helper(helper)?,
@@ -135,7 +138,7 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             budget: runtime_budget,
             deadline,
             unknown: false,
-        };
+        });
         let mut child = Command::new(&lease.helper)
             .arg(runtime_budget.max_memory_bytes.to_string())
             .arg(budget.max_millis.to_string())

@@ -1,9 +1,13 @@
 //! Native M1 inventory consumption. Journal DTOs cannot construct these opaque source carriers.
+#[path = "inventory_job.rs"]
+mod job;
 #[cfg(test)]
 #[path = "inventory_tests.rs"]
 mod tests;
 use super::source::refused_error;
 use super::*;
+pub(super) use job::RefreshCause;
+pub use job::{NativeRefreshJob, NativeRefreshScopeError};
 use knowledge_core::{
     admission::Holding,
     backend::{Availability, Budget},
