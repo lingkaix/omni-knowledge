@@ -208,6 +208,23 @@ impl NativeIndexInput {
     pub fn source(&self) -> Result<&NativeSource> {
         self.owner.source()
     }
+    /// Finish a read-only M3 stage without settling the enclosing actual job. Destroy every copied
+    /// index fact/payload first, then rejoin actual M3/metadata loans to the SAME still-live Claim.
+    /// The returned processing owner still retains the SAME actual source descriptor and scope.
+    pub fn finish_stage(
+        self,
+    ) -> std::result::Result<(NativeProcessing, Claim), NativeExtractionError> {
+        let Self {
+            representation,
+            source_id,
+            source_digest,
+            owner,
+        } = self;
+        drop(representation);
+        drop(source_id);
+        drop(source_digest);
+        owner.finish_read_stage()
+    }
     /// Finish only after consumer buffers/artifacts and their split work have settled.
     /// Destroy these metadata allocations BEFORE their actual M3/native owner releases credit.
     pub fn complete(self) -> std::result::Result<NativeSource, NativeExtractionError> {
@@ -578,12 +595,17 @@ fn indexed_value(
         },
     )?;
     inputs.resources.push(metadata);
+    processing.check(claim)?;
+    let mut funding = knowledge_processing::funding::Funding::ClaimStage {
+        claim,
+        expected: processing.key(),
+    };
     knowledge_processing::extract::extract_file_funded(
         processing.source().file()?,
         processing.source().hint(),
         max_bytes,
         child_rss_bytes,
-        &mut processing.funding(claim)?,
+        &mut funding,
     )
 }
 
@@ -658,9 +680,38 @@ impl<T> NativeAdmitted<T> {
             }),
         }
     }
+    /// Return a completed read-only stage to its enclosing owner, not a fabricated completion.
+    fn finish_read_stage(
+        mut self,
+    ) -> std::result::Result<(NativeProcessing, Claim), NativeAdmittedError<T>> {
+        let result = (|| -> Result<()> {
+            self.value()?;
+            self.inputs.check()?;
+            anyhow::ensure!(
+                self.inputs.sources.is_empty()
+                    && self.inputs.leases.is_empty()
+                    && self.inputs._scratch.is_none(),
+                "read stage has unresolved extra native inputs"
+            );
+            self.collect_with(true)
+        })();
+        match result {
+            Ok(()) => Ok((
+                self.processing.take().expect("native processing owner"),
+                self.claim.take().expect("native claim owner"),
+            )),
+            Err(cause) => Err(NativeAdmittedError {
+                cause,
+                owner: Box::new(self),
+            }),
+        }
+    }
     /// Collect real unknown work, destroy complete/stopped output records, then finish only dead costs.
     /// Unknown generated-write deltas remain charged; artifact names are not reconciliation receipts.
     fn collect(&mut self) -> Result<()> {
+        self.collect_with(false)
+    }
+    fn collect_with(&mut self, rejoin: bool) -> Result<()> {
         if !self.child_collected
             && let Some(pending) = self.pending.as_mut()
             && let Some(child) =
@@ -721,8 +772,33 @@ impl<T> NativeAdmitted<T> {
             if !*writes_known && holding.remaining()?.temporary_bytes != 0 {
                 anyhow::bail!("native generated-write delta remains unresolved");
             }
-            holding.finish()?;
+            if rejoin {
+                Account::current()?.rejoin_claim(
+                    holding,
+                    self.claim.as_ref().expect("native claim owner"),
+                    self.processing
+                        .as_ref()
+                        .expect("native processing owner")
+                        .key(),
+                )?;
+            } else {
+                holding.finish()?;
+            }
             self.retained.pop();
+        }
+        if rejoin {
+            // The caller destroyed NativeIndexInput's metadata and actual Extraction above.
+            while let Some(holding) = self.inputs.resources.last_mut() {
+                Account::current()?.rejoin_claim(
+                    holding,
+                    self.claim.as_ref().expect("native claim owner"),
+                    self.processing
+                        .as_ref()
+                        .expect("native processing owner")
+                        .key(),
+                )?;
+                self.inputs.resources.pop();
+            }
         }
         Ok(())
     }

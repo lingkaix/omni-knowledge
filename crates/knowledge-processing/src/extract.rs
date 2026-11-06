@@ -149,7 +149,7 @@ pub fn extract_file_funded(
     let bytes = read_fd(file, capacity).with_context(|| format!("Read {}", hint.display()))?;
     if bytes.len() > metadata.len() as usize {
         drop(bytes);
-        credits.input.release_now()?;
+        credits.release_input()?;
         return Ok(Admitted {
             value: metadata_only(
                 &detected,
@@ -189,12 +189,9 @@ pub fn extract_file_funded(
         parse_loaded(&detected, &extension, &bytes, max_bytes)?
     };
     drop(bytes);
-    credits.input.release_now()?;
-    let retained = if extraction.text.is_empty() && extraction.warnings.is_empty() {
-        Vec::new()
-    } else {
-        credits.retained()
-    };
+    credits.release_input()?;
+    let retained =
+        credits.retained_for(!extraction.text.is_empty() || !extraction.warnings.is_empty());
     Ok(Admitted {
         value: extraction,
         retained,
@@ -543,7 +540,7 @@ pub fn preview_file_funded(
         String::from_utf8(capture.bytes).context("Preview worker returned invalid UTF-8")?;
     drop(legacy_text);
     drop(bytes);
-    credits.input.release_now()?;
+    credits.release_input()?;
     let retained = credits.retained();
     Ok(Admitted { value, retained })
 }

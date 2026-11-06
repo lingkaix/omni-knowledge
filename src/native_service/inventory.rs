@@ -23,6 +23,27 @@ use std::sync::Arc;
 pub struct NativeInventory {
     owner: Arc<InventoryOwner>,
 }
+/// Drop only after the owner's actual metadata/FD fields. Holding itself deliberately does not
+/// auto-release: this small guard finishes known-settled synchronous inventory ownership only.
+struct InventoryCredit(Option<Holding>);
+impl std::ops::Deref for InventoryCredit {
+    type Target = Holding;
+    fn deref(&self) -> &Holding {
+        self.0.as_ref().expect("owned inventory credit")
+    }
+}
+impl InventoryCredit {
+    fn into_holding(mut self) -> Holding {
+        self.0.take().expect("owned inventory credit")
+    }
+}
+impl Drop for InventoryCredit {
+    fn drop(&mut self) {
+        if let Some(holding) = &mut self.0 {
+            let _ = holding.finish();
+        }
+    }
+}
 struct InventoryOwner {
     store: Store<InventoryPolicy>,
     mount: LocalMount<InventoryPolicy>,
@@ -32,7 +53,7 @@ struct InventoryOwner {
     check_budget: Budget,
     // Current opaque owner epoch and actual context credit survive every dependent page/source.
     // Never retain a Permit here: a source's delivery checks may retain this inventory.
-    _funding: Holding,
+    _funding: InventoryCredit,
 }
 #[derive(Clone)]
 struct InventoryPolicy(Arc<PolicyOwner>);
@@ -66,7 +87,7 @@ pub struct NativeInventoryPage {
 struct PageOwner {
     replay: Replay,
     inventory: Arc<InventoryOwner>,
-    _funding: Holding,
+    _funding: InventoryCredit,
 }
 /// An actual row read from the selected M1 journal, not a caller-manufactured ID/stat DTO.
 /// Its stable asset identity is still DATA; opening requires a separate current native read permit.
@@ -90,7 +111,27 @@ impl NativeInventoryPage {
     /// Consume the page once; old scans/tombstones never become current producer inputs.
     /// Metadata remains shared/paid rather than copied into a resident corpus table.
     pub fn into_sources(self) -> impl Iterator<Item = NativeObservedSource> {
-        let page = self.page;
+        Self::source_rows(self.page)
+    }
+    /// Stream borrowed-page handles while retaining the page object for affine funding recovery.
+    /// Returned row handles still own the SAME actual paid metadata, not copies or DTO grants.
+    pub fn sources(&self) -> impl Iterator<Item = NativeObservedSource> {
+        Self::source_rows(self.page.clone())
+    }
+    /// Recover this ONE actual holding without global release/reserve, only after every row/source
+    /// dependent is gone. Refusal returns the owning page unchanged. No credit refund/pool exists.
+    pub fn into_funding(self) -> std::result::Result<Holding, Self> {
+        let owner = Arc::try_unwrap(self.page).map_err(|page| Self { page })?;
+        let PageOwner {
+            replay,
+            inventory,
+            _funding,
+        } = owner;
+        drop(replay);
+        drop(inventory);
+        Ok(_funding.into_holding())
+    }
+    fn source_rows(page: Arc<PageOwner>) -> impl Iterator<Item = NativeObservedSource> {
         (0..page.replay.observations.len()).filter_map(move |row| {
             let observation = &page.replay.observations[row];
             (observation.scan == page.inventory.scan
@@ -143,6 +184,7 @@ impl NativeInventory {
         budget: Budget,
         funding: Holding,
     ) -> Result<NativeInventoryPage> {
+        let funding = InventoryCredit(Some(funding));
         anyhow::ensure!(
             funding.remaining()?.memory_bytes
                 >= budget
@@ -186,6 +228,7 @@ impl NativeLibraryService {
         context_funding: Holding,
         preflight: &Preflight<'_>,
     ) -> Result<(NativeInventory, Reconciled)> {
+        let context_funding = InventoryCredit(Some(context_funding));
         anyhow::ensure!(
             context_funding.remaining()?.memory_bytes >= 1024 * 1024,
             "native inventory context is not prepaid"

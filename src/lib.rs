@@ -303,7 +303,7 @@ mod admitted {
             Funding::BeforeVerification => {
                 ready(Account::current()?.reserve(need, Origin::BeforeVerification)?)?
             }
-            Funding::Claim { claim, expected } => {
+            Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } => {
                 Account::current()?.split_claim(claim, *expected, need)?
             }
         })
@@ -317,7 +317,7 @@ mod admitted {
     ) -> Result<()> {
         match funding {
             Funding::BeforeVerification => ready(held.grow(extra)?),
-            Funding::Claim { claim, expected } => {
+            Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } => {
                 let old = held.remaining()?;
                 let total = Reservation {
                     memory_bytes: old
@@ -363,7 +363,8 @@ mod admitted {
     impl std::error::Error for Stopped {}
     pub(super) fn funded_checkpoint(funding: &Funding<'_>) -> Result<()> {
         checkpoint()?;
-        if let Funding::Claim { claim, expected } = funding
+        if let Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } =
+            funding
             && let Some(stop) = claim.stop_requested(*expected)?
         {
             return Err(Stopped(stop).into());
@@ -437,7 +438,7 @@ mod admitted {
                     funded_checkpoint(funding)?;
                     let actual_length = entry.metadata()?.len();
                     let length = actual_length.min(MAX_TEXT_BYTES as u64);
-                    if matches!(funding, Funding::Claim { .. }) {
+                    if matches!(funding, Funding::Claim { .. } | Funding::ClaimStage { .. }) {
                         let relative = entry
                             .path()
                             .strip_prefix(&kb.root)?
@@ -800,7 +801,7 @@ mod admitted {
                             temporary_bytes: 0,
                         })?,
                 )?,
-                Funding::Claim { .. } => {
+                Funding::Claim { .. } | Funding::ClaimStage { .. } => {
                     funded_checkpoint(funding)?;
                     let mut remaining = memory
                         .copy_remaining
@@ -818,7 +819,7 @@ mod admitted {
         for holding in &mut retained {
             let result = match funding {
                 Funding::BeforeVerification => holding.finish(),
-                Funding::Claim { claim, expected } => {
+                Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } => {
                     Account::current()?.rejoin_claim(holding, claim, *expected)
                 }
             };
@@ -1369,11 +1370,15 @@ mod admitted {
                 Funding::BeforeVerification => {
                     ready(Work::reserve(need, Origin::BeforeVerification)?)?
                 }
-                Funding::Claim { claim, expected } => Work::split_claim(claim, *expected, need)?,
+                Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } => {
+                    Work::split_claim(claim, *expected, need)?
+                }
             };
             let expected = kernel.generation(&view.scope)?;
             let generation = kernel.publish(view, expected, &mut work, &control())?;
-            if let Funding::Claim { claim, expected } = funding {
+            if let Funding::Claim { claim, expected } | Funding::ClaimStage { claim, expected } =
+                funding
+            {
                 work.rejoin(claim, *expected)?;
             }
             generations.insert(scope, generation);
@@ -4800,6 +4805,24 @@ mod native_kernel_builder_tests {
     /// Actual funded opaque extraction retains its source/Claim/paid value and returns credit only after the last reader.
     #[test]
     fn native_extraction_owns_complete_claim_and_paid_result_lifetime() {
+        // The unchanged oracle compares exact process-account credit before/after settlement.
+        // Parallel native tests cannot share that premise: they legitimately grow/release loans.
+        if std::env::var_os("OMNI_EXTRACTION_OWNERSHIP_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","native_kernel_builder_tests::native_extraction_owns_complete_claim_and_paid_result_lifetime","--nocapture"])
+                .env("OMNI_EXTRACTION_OWNERSHIP_CHILD","1").output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "the actual ownership fixture must execute"
+            );
+            assert!(
+                output.status.success(),
+                "actual ownership child: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use knowledge_core::{
             backend::Budget,
             data::ContentDigest,

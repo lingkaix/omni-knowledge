@@ -228,6 +228,7 @@ impl NativeAuthority {
             write,
             human,
             resources: None,
+            command_funding: None,
         };
         permit.check()?;
         Ok(permit)
@@ -374,6 +375,21 @@ pub struct Permit {
     write: bool,
     human: bool,
     resources: Option<Arc<crate::runtime::FrameResources>>,
+    // Actual shared command bytes outlive the parent scope, without retaining its result pins.
+    command_funding: Option<Arc<crate::runtime::FrameBudget>>,
+}
+/// Exact loan return either retains the still-borrowed scope, or reports a refusal AFTER
+/// every scoped payload/pin was destroyed and its resource holding safely finished.
+pub enum ScopeRejoinError {
+    /// Another actual owner/pin still exists, or the requested cause is not current. No force-release.
+    Retained {
+        /// The actual scope and its still-paid pins; no ownership is discarded.
+        scope: Box<Permit>,
+        /// Why the synchronous return was refused.
+        code: ErrorCode,
+    },
+    /// No scoped payload/pin remains. Rejoin was refused; the actual holding has been finished.
+    Released(ErrorCode),
 }
 impl Permit {
     /// Borrow the EXACT command admitted by this native authority, after currentness checks.
@@ -402,7 +418,115 @@ impl Permit {
             .retain_check(check)
     }
     pub(crate) fn bind_resources(&mut self, resources: Arc<crate::runtime::FrameResources>) {
+        if self.command_funding.is_none() {
+            self.command_funding = Some(resources.budget.clone());
+        }
         self.resources = Some(resources);
+    }
+    /// Fresh independent Source/Query scope over the EXACT already admitted command/session.
+    /// This grants no new selection, command, raw-write or human intention. Old result/version pins
+    /// are not copied into fresh IO; the host separately retains/checks its actual job/input cause.
+    /// The complete scoped envelope is split from this actual live Claim BEFORE copies/FD opens.
+    /// Its local spend counter can neither enlarge/refund credit nor fall back to global reserve.
+    /// Drop nonwinning scopes promptly; move actual winning scopes/pins through final delivery.
+    pub fn fork_processing_scope(
+        &self,
+        claim: &knowledge_core::jobs::Claim,
+        expected: knowledge_core::jobs::Key<'_>,
+        reservation: knowledge_core::jobs::Reservation,
+    ) -> Result<Self, ErrorCode> {
+        self.check()?;
+        if !matches!(
+            &*self.command,
+            Command::Process { .. } | Command::Refresh { .. } | Command::Query { .. }
+        ) {
+            return Err(ErrorCode::InvalidRequest);
+        }
+        if claim
+            .stop_requested(expected)
+            .map_err(|_| ErrorCode::Changed)?
+            .is_some()
+        {
+            return Err(ErrorCode::Changed);
+        }
+        let scope_count = self
+            .revisions
+            .len()
+            .checked_add(self.session.selections.len())
+            .ok_or(ErrorCode::BudgetExhausted)?;
+        let copied_facts = match &self.session.facts {
+            TransportFacts::Http { host, origin, .. } => host
+                .len()
+                .checked_add(origin.as_ref().map_or(0, String::len))
+                .ok_or(ErrorCode::BudgetExhausted)?,
+            _ => 0,
+        };
+        let need = (scope_count as u64)
+            .checked_mul(64)
+            .and_then(|n| n.checked_add((copied_facts as u64).checked_mul(8)?))
+            .and_then(|n| n.checked_add(256 * 1024))
+            .ok_or(ErrorCode::BudgetExhausted)?;
+        if reservation.memory_bytes < need {
+            return Err(ErrorCode::BudgetExhausted);
+        }
+        let command_funding = self
+            .command_funding
+            .as_ref()
+            .ok_or(ErrorCode::BudgetExhausted)?
+            .clone();
+        let holding = knowledge_core::admission::Account::current()
+            .map_err(|_| ErrorCode::BudgetExhausted)?
+            .split_claim(claim, expected, reservation)
+            .map_err(|_| ErrorCode::BudgetExhausted)?;
+        let resources = Arc::new(crate::runtime::FrameResources::prepaid(holding, need)?);
+        let fork = Self {
+            command: self.command.clone(),
+            session: self.session.clone(),
+            revisions: self.revisions.clone(),
+            write: self.write,
+            human: self.human,
+            resources: Some(resources),
+            command_funding: Some(command_funding),
+        };
+        fork.check()?;
+        Ok(fork)
+    }
+    /// Return ONLY this exclusively owned prepaid scope loan to the exact original live Claim.
+    /// This permits bounded corpus iteration without releasing/re-reserving global credit between
+    /// sources. Clones/deliveries/native pins must first actually die; shared command funding is
+    /// separate. Cleanup does not require permission for another effect after policy revocation.
+    pub fn rejoin_processing_scope(
+        mut self,
+        claim: &knowledge_core::jobs::Claim,
+        expected: knowledge_core::jobs::Key<'_>,
+    ) -> Result<(), ScopeRejoinError> {
+        if claim.stop_requested(expected).is_err() {
+            return Err(ScopeRejoinError::Retained {
+                scope: Box::new(self),
+                code: ErrorCode::Changed,
+            });
+        }
+        let holding = self
+            .resources
+            .as_mut()
+            .and_then(Arc::get_mut)
+            .and_then(|r| r.take_prepaid());
+        let Some(mut holding) = holding else {
+            return Err(ScopeRejoinError::Retained {
+                scope: Box::new(self),
+                code: ErrorCode::Busy,
+            });
+        };
+        // The real loan remains charged while ALL scope/session/revision/callback buffers die.
+        drop(self);
+        let result = knowledge_core::admission::Account::current()
+            .and_then(|a| a.rejoin_claim(&mut holding, claim, expected));
+        if result.is_err() {
+            // There are now no live paid payloads or work to quarantine/abandon.
+            let _ = holding.finish();
+            return Err(ScopeRejoinError::Released(ErrorCode::Changed));
+        }
+        Ok(())
     }
     /// Recheck current native directory identity, face, sensitivity, mode and exact policy revision.
     pub fn check(&self) -> Result<(), ErrorCode> {

@@ -1,4 +1,6 @@
 //! Builder tests against actual native selections and filesystem observations, not transport mocks.
+#[path = "funded_scope_tests.rs"]
+mod funded;
 use super::*;
 use crate::authority::{HumanIntent, LocalPolicy, NativeIntent, Owner, Selection, TransportFacts};
 use crate::{EntryKind, ExposureMode, ListingEntry, Transport};
