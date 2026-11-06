@@ -212,6 +212,18 @@ impl Lease {
                 self.lost = true;
                 true
             } else {
+                if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                    eprintln!(
+                        "omni-native fsevents exit pid={} code={:?} ready={} lost={} memory_limit={} work={} scopes={}",
+                        child.id(),
+                        status.code(),
+                        self.frame.is_some(),
+                        self.lost,
+                        self.budget.max_memory_bytes,
+                        self.budget.max_files,
+                        self.admission.outside.len()
+                    );
+                }
                 return Err(match status.code() {
                     Some(0) => WatchError::LeaseExpired,
                     Some(65 | 69) => WatchError::Budget,
@@ -227,7 +239,22 @@ impl Lease {
             }
             match knowledge_processing::worker::resident_bytes(child.id()) {
                 Ok(n) if n <= self.budget.max_memory_bytes => (),
-                _ => {
+                sample => {
+                    if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                        // Exact owned exit observation is diagnostic only: do NOT convert a
+                        // missing/over-budget sample into native readiness or a quiet cursor.
+                        let after_exit = child.try_wait().ok().flatten().map(|s| s.code());
+                        eprintln!(
+                            "omni-native fsevents rss-refusal pid={} resident={:?} after_exit={:?} ready={} memory_limit={} work={} scopes={}",
+                            child.id(),
+                            sample.ok(),
+                            after_exit,
+                            self.frame.is_some(),
+                            self.budget.max_memory_bytes,
+                            self.budget.max_files,
+                            self.admission.outside.len()
+                        );
+                    }
                     self.lost = true;
                     self.stop();
                     return Err(WatchError::Budget);
