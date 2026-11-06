@@ -1,0 +1,25 @@
+# Native M1 inventory → current source → processing consumer
+
+## Necessity and reuse
+
+Native processing previously used a compatibility path-hash source label. That cannot carry M1's independent asset identity through rename, and decoded journal records alone cannot supply a current native source capability. This change consumes the EXISTING M1 visible journal and streaming reconciliation; it adds no inventory/index/resource engine, corpus-size cap or resident source table.
+
+`NativeLibraryService::reconcile_inventory` requires native Owner, the actual sealed **Refresh** permit and already prepaid context plus M1 scan scratch. It checks the actual request budget/verification choice. Read/write contexts come from that exact current selected policy/exclusions and an opaque owner selection lease; raw-original writes remain false. M1 Store and ordinary-local Mount retain the actual selected directory descriptors. Their new `from_selected_directory` constructors do not discard them and reopen a pathname as a substitute. The pathname only qualifies current namespace continuity. Legacy homes still need the existing explicit durable-library-identity upgrade.
+
+The complete durable scan ID selects rows from bounded `replay_tracking` pages. Follow actual `next_offset`, require progress, and preserve replay issues; never accumulate historical records or treat a partial page as absence. An affine page iterator yields opaque `NativeObservedSource` handles. Their actual page/context credit stays with the handles and source/delivery checks after their parent handles drop. No caller-created Observation/UUID/stat can construct one.
+
+`source_for_observed` requires a separate actual Process selecting that UUID, or actual Refresh for that library, BEFORE source inspection/hash. The existing native descriptor-relative hash/current namespace guard remains. The existing Local backend additionally compares that exact held FD with the current root-qualified M1 stat, including native identity; an equal-byte different inode is not the same asset. `check_held_snapshot` is metadata-only, not source identity, body verification or authority. Source bytes are still verified on the SAME actual FD. Arc sharing adds no source FD clone or path reopen.
+
+Canonical M1 asset IDs now enter actual Core source keys and representation/vector dependency facts. The effective processor additionally binds the EXACT hint data actually passed to existing M3 (length-framed and domain-separated): stable IDs mean a rename must no longer hide an input hint change behind an unchanged source/content key. This is input dependency data, never path authority or a reopen. Process matches its exact wire ID, without assuming all IDs use the compatibility `source-<path-hash>` prefix. Actual Refresh can extract; only `embeddings:true` permits the selected receiver/provider composition. Actual `Process/Embed` remains supported. Source/model/current policy/Claim guards and the SAME-Claim provider-before-M3 admission remain unchanged.
+
+The inventory policy checks its real immutable native selection lease, not its own Permit's delivery callbacks. It deliberately does NOT retain a Permit inside a source callback's inventory owner: sharing the same actual Refresh frame must not create recursive checks or an Arc pin/credit cycle.
+
+## Executed controls
+
+The actual isolated Root test exercises native Owner/model artifacts, stat-first M1 reconciliation (pending/no verified digest/no provider contact), full Refresh, child-owned-home/control-directory exclusion, bounded durable replay, independently observed UUID, SAME actual Refresh frame, exact Core Claim/M3/HTTP output with ALL otherwise-free account credit held, false Refresh embedding choice, rename continuity, equal-byte inode replacement/new independent ID, and rejection of unrelated root/held descriptors. The selected deterministic HTTP contract model proves NO WeMM loaded weights, embedding quality, external model package trust or native human acceptance.
+
+Four independently executed necessity ablations fail: removing held-FD metadata comparison; ignoring Refresh's embedding choice; retaining the compatibility path hash instead of M1 asset ID; and bypassing the actual pre-body command/source check. An actual old/no-hint dependency control also failed (equal effective processor before/after rename with the SAME stable asset/digest/caller recipe); binding the actual M3 hint passes it. Compile/discovery-count REDs and restored receipts are retained outside source.
+
+## Not activation
+
+This is an actual native M1→producer consumer, not full application startup/Refresh job wiring. The compatibility Root browse/search still has path-hash/resident snapshot/vector consumers. Full-corpus producer/query, one complete lexical/vector/source generation selection, recovery/descriptor-qualified retirement, all M6 effects/destination/admission/drain, installed/native platform qualification and physical M0 remain required. No READY claim or hostile/resource ceiling change.

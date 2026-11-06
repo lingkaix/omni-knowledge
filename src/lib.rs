@@ -2734,6 +2734,7 @@ pub mod native_service {
     mod held;
     #[cfg(test)]
     mod held_tests;
+    mod inventory;
     mod models;
     mod source;
     use super::*;
@@ -2744,6 +2745,7 @@ pub mod native_service {
         NativeIndexInput,
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
+    pub use inventory::{NativeInventory, NativeInventoryPage, NativeObservedSource};
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;
     use knowledge_retrieval::Work;

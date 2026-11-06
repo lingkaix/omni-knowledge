@@ -160,6 +160,38 @@ impl<P: LocalReadPolicy> LocalMount<P> {
         })
     }
 
+    /// Retain the native owner's actual already selected ordinary-local directory.
+    /// The pathname only qualifies its current namespace; it never substitutes a reopened root.
+    /// The caller prepays retained descriptors/context and supplies the same live read owner.
+    pub fn from_selected_directory(
+        path: &Path,
+        root: File,
+        library_id: impl Into<String>,
+        mount_id: Option<String>,
+        policy: P,
+    ) -> Result<Self, LocalError> {
+        let library_id = library_id.into();
+        if !valid_id(&library_id) || mount_id.as_ref().is_some_and(|mount| !valid_id(mount)) {
+            return Err(LocalError::InvalidIdentity);
+        }
+        let (device, inode, kind) =
+            native::identity_of(&root).map_err(|_| LocalError::InvalidRoot)?;
+        if kind != native::NodeKind::Directory || !path.is_absolute() {
+            return Err(LocalError::InvalidRoot);
+        }
+        let selected = Self {
+            path: path.to_path_buf(),
+            device,
+            inode,
+            held: root,
+            library_id,
+            mount_id,
+            policy,
+            kind: BackendKind::Local,
+        };
+        selected.root().map_err(|_| LocalError::InvalidRoot)?;
+        Ok(selected)
+    }
     /// Bind one explicitly selected existing OS-mounted NAS without mounting/authenticating or assuming reliable events.
     /// Every operation still requires OsMountedNas from the actual current native read owner.
     pub fn open_os_mount(
@@ -232,6 +264,60 @@ impl<P: LocalReadPolicy> LocalMount<P> {
             return Err(BackendError::Unavailable(Unavailable::Unknown));
         }
         Ok(ExpectedVersion { digest, snapshot })
+    }
+    /// Compare an already held descriptor with current root-qualified metadata without reading its body.
+    /// This supplies neither source identity nor byte-verification authority. The native caller retains
+    /// its actual descriptor/current read grant and prepays the metadata observation before this call.
+    pub fn check_held_snapshot(
+        &self,
+        file: &File,
+        expected: &StatSnapshot,
+        budget: Budget,
+    ) -> Result<(), BackendError> {
+        if !same_bound_backend(self, &expected.backend) {
+            return Err(BackendError::InvalidRequest);
+        }
+        let root = self.root()?;
+        let started = Instant::now();
+        let admission = match gate(&self.policy, &self.library_id, &self.mount_id, self.kind)? {
+            Gate::Proceed(admission) => admission,
+            Gate::Cancel => return Err(BackendError::Unavailable(Unavailable::Unknown)),
+            Gate::Refuse(error) => return Err(error),
+        };
+        if outside(expected.path.as_str(), &admission.outside) {
+            return Err(BackendError::Unavailable(Unavailable::Denied));
+        }
+        if budget.max_files == 0
+            || !metadata_fits(expected.path.as_str(), budget)
+            || expired(started, budget.max_millis)
+        {
+            return Err(BackendError::BudgetExhausted);
+        }
+        let (parent, name) = open_parent(&root, &expected.path)?;
+        let observed = native::observe(&parent, &name).map_err(map_native)?;
+        let charge = stat_charge(
+            expected.path.as_str(),
+            &observed,
+            &self.library_id,
+            &self.mount_id,
+        )
+        .ok_or(BackendError::BudgetExhausted)?;
+        if charge > budget.max_memory_bytes {
+            return Err(BackendError::BudgetExhausted);
+        }
+        if observed.kind != native::NodeKind::File
+            || snapshot_from(self, &expected.path, &observed) != *expected
+            || !native::same_sample(file, &observed).map_err(map_native)?
+        {
+            return Err(BackendError::Unavailable(Unavailable::Changed));
+        }
+        if live(self, &admission)? == Live::Cancelled {
+            return Err(BackendError::Unavailable(Unavailable::Unknown));
+        }
+        if expired(started, budget.max_millis) {
+            return Err(BackendError::BudgetExhausted);
+        }
+        Ok(())
     }
     /// Inspect real link multiplicity under current admission before using file identity as rename evidence.
     /// Multiple/changed/unknown links cannot select one annotation identity among ambiguous paths.

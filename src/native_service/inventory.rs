@@ -1,0 +1,385 @@
+//! Native M1 inventory consumption. Journal DTOs cannot construct these opaque source carriers.
+#[cfg(test)]
+#[path = "inventory_tests.rs"]
+mod tests;
+use super::source::refused_error;
+use super::*;
+use knowledge_core::{
+    admission::Holding,
+    backend::{Availability, Budget},
+};
+use knowledge_local::{
+    CurrentAdmission, LocalMount, LocalReadPolicy, LocalityPremise, ReadDecision,
+};
+use knowledge_storage::{
+    ChangeKind, Observation, Preflight, ReconcileOptions, Reconciled, Replay, Schedule, Store,
+    WriteContext, WritePolicy,
+};
+use omni_service::authority::SelectionLease;
+use std::sync::Arc;
+
+/// Actual native inventory owner, immutable context epoch and complete persisted scan.
+/// This is neither a serialized observation nor permission to select another library/receiver.
+pub struct NativeInventory {
+    owner: Arc<InventoryOwner>,
+}
+struct InventoryOwner {
+    store: Store<InventoryPolicy>,
+    mount: LocalMount<InventoryPolicy>,
+    policy: InventoryPolicy,
+    scan: String,
+    root: (u64, u64),
+    check_budget: Budget,
+    // Current opaque owner epoch and actual context credit survive every dependent page/source.
+    // Never retain a Permit here: a source's delivery checks may retain this inventory.
+    _funding: Holding,
+}
+#[derive(Clone)]
+struct InventoryPolicy(Arc<PolicyOwner>);
+struct PolicyOwner {
+    lease: SelectionLease,
+    write: WriteContext,
+    read: CurrentAdmission,
+}
+impl WritePolicy for InventoryPolicy {
+    fn current(&self) -> std::result::Result<WriteContext, knowledge_storage::Error> {
+        self.0
+            .lease
+            .check()
+            .map_err(|_| knowledge_storage::Error::Context)?;
+        Ok(self.0.write.clone())
+    }
+}
+impl LocalReadPolicy for InventoryPolicy {
+    fn decide(&self) -> ReadDecision {
+        if self.0.lease.check().is_err() {
+            ReadDecision::Deny
+        } else {
+            ReadDecision::Admit(self.0.read.clone())
+        }
+    }
+}
+/// One bounded replay page. Its actual metadata/credit survive all extracted opaque row handles.
+pub struct NativeInventoryPage {
+    page: Arc<PageOwner>,
+}
+struct PageOwner {
+    replay: Replay,
+    inventory: Arc<InventoryOwner>,
+    _funding: Holding,
+}
+/// An actual row read from the selected M1 journal, not a caller-manufactured ID/stat DTO.
+/// Its stable asset identity is still DATA; opening requires a separate current native read permit.
+pub struct NativeObservedSource {
+    page: Arc<PageOwner>,
+    row: usize,
+}
+impl NativeInventoryPage {
+    /// Validated next byte position; partial pages must follow this actual cursor without skipping.
+    pub fn next_offset(&self) -> u64 {
+        self.page.replay.next_offset
+    }
+    /// True only when this actual journal reader reached its EOF.
+    pub fn complete(&self) -> bool {
+        self.page.replay.complete
+    }
+    /// Retained malformed/contradictory evidence is not successful empty coverage.
+    pub fn issue(&self) -> Option<&knowledge_storage::Error> {
+        self.page.replay.issue.as_ref()
+    }
+    /// Consume the page once; old scans/tombstones never become current producer inputs.
+    /// Metadata remains shared/paid rather than copied into a resident corpus table.
+    pub fn into_sources(self) -> impl Iterator<Item = NativeObservedSource> {
+        let page = self.page;
+        (0..page.replay.observations.len()).filter_map(move |row| {
+            let observation = &page.replay.observations[row];
+            (observation.scan == page.inventory.scan
+                && observation.root == page.inventory.root
+                && observation.change != ChangeKind::Deleted
+                && observation.availability == Availability::Available)
+                .then(|| NativeObservedSource {
+                    page: page.clone(),
+                    row,
+                })
+        })
+    }
+}
+impl NativeObservedSource {
+    /// Stable independently observed M1 asset data identity, not a path/content hash.
+    pub fn source_id(&self) -> &str {
+        &self.observation().source_id
+    }
+    /// Actual metadata observation; borrowing it creates no source read/write permission.
+    pub fn observation(&self) -> &Observation {
+        &self.page.replay.observations[self.row]
+    }
+    pub(super) fn check_file(&self, file: &File) -> Result<()> {
+        let inventory = &self.page.inventory;
+        inventory.policy.0.lease.check().map_err(refused_error)?;
+        inventory.mount.check_held_snapshot(
+            file,
+            &self.observation().stat,
+            inventory.check_budget,
+        )?;
+        Ok(())
+    }
+    pub(super) fn check_permit(&self, permit: &Permit) -> Result<()> {
+        self.page
+            .inventory
+            .policy
+            .0
+            .lease
+            .check_permit(permit)
+            .map_err(refused_error)?;
+        Ok(())
+    }
+}
+impl NativeInventory {
+    /// Replay one paid page from the actual durable M1 stream; never accumulate journal history.
+    /// The incoming holding covers the complete page plus wrapper before native inspection.
+    pub fn page(
+        &self,
+        offset: u64,
+        budget: Budget,
+        funding: Holding,
+    ) -> Result<NativeInventoryPage> {
+        anyhow::ensure!(
+            funding.remaining()?.memory_bytes
+                >= budget
+                    .max_memory_bytes
+                    .checked_add(128 * 1024)
+                    .context("inventory page envelope overflow")?,
+            "native inventory page is not fully prepaid"
+        );
+        self.owner.policy.0.lease.check().map_err(refused_error)?;
+        let replay = self.owner.store.replay_tracking(
+            offset,
+            &Preflight {
+                holding: &funding,
+                budget,
+            },
+        )?;
+        self.owner.policy.0.lease.check().map_err(refused_error)?;
+        Ok(NativeInventoryPage {
+            page: Arc::new(PageOwner {
+                replay,
+                inventory: self.owner.clone(),
+                _funding: funding,
+            }),
+        })
+    }
+    /// Actual complete durable scan ID for progress, never authorization or a global writer clock.
+    pub fn scan(&self) -> &str {
+        &self.owner.scan
+    }
+}
+impl NativeLibraryService {
+    /// Consume the actual Refresh intention through M1 before full-corpus processing.
+    /// Native Owner selects the text layout; no source/read grant implies raw-original writes.
+    /// Context and scan scratch are BOTH already prepaid in the ONE account before inspection.
+    /// Old inventory/source handles are revoked by selection/policy/model epoch changes.
+    pub fn reconcile_inventory(
+        &self,
+        owner: &Owner,
+        permit: Permit,
+        text_root: &str,
+        context_funding: Holding,
+        preflight: &Preflight<'_>,
+    ) -> Result<(NativeInventory, Reconciled)> {
+        anyhow::ensure!(
+            context_funding.remaining()?.memory_bytes >= 1024 * 1024,
+            "native inventory context is not prepaid"
+        );
+        let wire::Command::Refresh {
+            library_id,
+            verification,
+            budget,
+            ..
+        } = permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("M1 inventory requires the actual Refresh command");
+        };
+        anyhow::ensure!(
+            library_id == &self.library,
+            "inventory library differs from command"
+        );
+        let requested = preflight.budget;
+        anyhow::ensure!(
+            requested.max_files <= budget.max_files.get()
+                && requested.max_bytes <= budget.max_bytes.get()
+                && requested.max_millis <= budget.max_millis.get()
+                && requested.max_memory_bytes <= budget.max_memory_bytes.get(),
+            "inventory scan exceeds the actual Refresh budget"
+        );
+        anyhow::ensure!(
+            matches!(text_root, "pages" | "wiki"),
+            "invalid native text layout"
+        );
+        let verify_bytes = *verification == wire::Verification::FullHash;
+        let lease = owner
+            .pin_selection(&self.selection)
+            .map_err(refused_error)?;
+        lease.check_permit(&permit).map_err(refused_error)?;
+        let host = self
+            .host
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native library unavailable"))?;
+        anyhow::ensure!(
+            host.kb.config.library_id.is_some(),
+            "native M1 inventory requires explicit durable library identity upgrade"
+        );
+        let root_path = &host.kb.root;
+        let (store_root, mount_root, policy) = permit
+            .with_selected_context(&self.library, |root, actual, revision| {
+                let variable = actual
+                    .excluded_paths
+                    .iter()
+                    .try_fold(0u64, |n, p| {
+                        n.checked_add(128)?
+                            .checked_add((p.as_str().len() as u64).checked_mul(16)?)
+                    })
+                    .and_then(|n| {
+                        n.checked_add(
+                            (root_path.as_os_str().len() as u64
+                                + text_root.len() as u64
+                                + self.library.as_str().len() as u64)
+                                * 16,
+                        )
+                    });
+                let needed = variable
+                    .and_then(|n| n.checked_add(1024 * 1024))
+                    .ok_or(wire::ErrorCode::BudgetExhausted)?;
+                if context_funding.remaining().map_err(refused)?.memory_bytes < needed
+                    || actual.mode != wire::ExposureMode::ReadWrite
+                {
+                    return Err(wire::ErrorCode::BudgetExhausted);
+                }
+                let write = WriteContext {
+                    library_id: self.library.as_str().into(),
+                    revision,
+                    text_root: text_root.into(),
+                    writable: true,
+                    raw_original_writes: false,
+                    outside_scope: actual
+                        .excluded_paths
+                        .iter()
+                        .map(|p| p.as_str().to_owned())
+                        .collect(),
+                };
+                let mut outside_scope = actual
+                    .excluded_paths
+                    .iter()
+                    .map(|p| knowledge_core::data::RelativePath::new(p.as_str()).map_err(refused))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                // Canonical native bookkeeping is never original content or a source identity.
+                for path in [".omni", ".git"] {
+                    outside_scope
+                        .push(knowledge_core::data::RelativePath::new(path).map_err(refused)?);
+                }
+                let read = CurrentAdmission {
+                    library_id: self.library.as_str().into(),
+                    mount_id: None,
+                    revision,
+                    locality: LocalityPremise::OrdinaryLocal,
+                    outside_scope,
+                };
+                Ok((
+                    root.try_clone().map_err(refused)?,
+                    root.try_clone().map_err(refused)?,
+                    InventoryPolicy(Arc::new(PolicyOwner {
+                        lease: lease.clone(),
+                        write,
+                        read,
+                    })),
+                ))
+            })
+            .map_err(refused_error)?;
+        let store = Store::from_selected_directory(
+            root_path,
+            store_root,
+            self.library.as_str(),
+            "native",
+            policy.clone(),
+        )?;
+        let mount = LocalMount::from_selected_directory(
+            root_path,
+            mount_root,
+            self.library.as_str(),
+            None,
+            policy.clone(),
+        )?;
+        drop(host);
+        let root = mount.root_identity()?;
+        let reconciled = store.reconcile_local(
+            &mount,
+            ReconcileOptions {
+                verify_bytes,
+                schedule: Schedule::Manual,
+            },
+            preflight,
+        )?;
+        permit.check().map_err(refused_error)?;
+        anyhow::ensure!(
+            reconciled.complete,
+            "native inventory scan is partial; previous generation remains selected"
+        );
+        let scan = reconciled
+            .last_complete
+            .clone()
+            .context("native inventory lacks durable checkpoint")?;
+        let check_budget = Budget {
+            max_files: 1,
+            max_bytes: 128 * 1024,
+            max_millis: requested.max_millis,
+            max_memory_bytes: 128 * 1024,
+        };
+        Ok((
+            NativeInventory {
+                owner: Arc::new(InventoryOwner {
+                    store,
+                    mount,
+                    policy,
+                    scan,
+                    root,
+                    check_budget,
+                    _funding: context_funding,
+                }),
+            },
+            reconciled,
+        ))
+    }
+    /// Open this actual M1 row through a SEPARATE current read/Process/Refresh permit.
+    /// Actual retained descriptor identity must match M1 native metadata even for identical bytes.
+    pub fn source_for_observed(
+        &self,
+        permit: &Permit,
+        observed: NativeObservedSource,
+        verification: Budget,
+    ) -> Result<NativeSource> {
+        observed.check_permit(permit)?;
+        anyhow::ensure!(
+            observed.observation().stat.backend.library_id == self.library.as_str(),
+            "observed source belongs to another library"
+        );
+        let allowed = match permit.admitted_command().map_err(refused_error)? {
+            wire::Command::Process {
+                library_id,
+                source_ids,
+                ..
+            } => {
+                library_id == &self.library
+                    && source_ids
+                        .iter()
+                        .any(|id| id.as_str() == observed.source_id())
+            }
+            wire::Command::Refresh { library_id, .. } => library_id == &self.library,
+            _ => false,
+        };
+        anyhow::ensure!(
+            allowed,
+            "actual command does not select this M1 processing source"
+        );
+        let path = wire::RelativePath::new(observed.observation().stat.path.as_str())?;
+        NativeSource::open(&self.library, &path, permit, verification)?.bind_observed(observed)
+    }
+}
