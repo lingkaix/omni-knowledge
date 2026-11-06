@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn actual_refresh_claim_processes_distinct_native_sources_without_child_jobs() {
     if std::env::var_os("OMNI_REFRESH_CAUSE_CHILD").is_none() {
-        for mode in ["normal", "premature"] {
+        for mode in ["normal", "premature", "pressure-race"] {
             let out=std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact","native_service::inventory::tests::job::actual_refresh_claim_processes_distinct_native_sources_without_child_jobs","--nocapture"])
                 .env("OMNI_REFRESH_CAUSE_CHILD","1").env("OMNI_REFRESH_CAUSE_MODE",mode).output().unwrap();
@@ -202,7 +202,42 @@ fn actual_refresh_claim_processes_distinct_native_sources_without_child_jobs() {
     let mut claim = account.queue().claim(Instant::now()).unwrap().unwrap();
     assert_eq!(claim.job(), submitted.job);
     let available = account.status().unwrap();
-    let mut pressure = holding(available.memory_available, available.storage_available);
+    // A real independent ONE-account owner arrives after the numeric status quote.
+    let mut raced = std::env::var("OMNI_REFRESH_CAUSE_MODE")
+        .is_ok_and(|mode| mode == "pressure-race")
+        .then(|| holding(65536, 0));
+    // Status is a quote, never a grant. Native volume facts/other owners may change it.
+    // Only Waiting (which acquires nothing) is resampled; no effect/error is retried.
+    let mut quote = available;
+    let mut saw_wait = false;
+    let mut pressure = loop {
+        assert!(
+            Instant::now() < claim.deadline(),
+            "actual pressure admission deadline; no native phase started"
+        );
+        match account
+            .reserve(
+                Reservation {
+                    memory_bytes: quote.memory_available,
+                    temporary_bytes: quote.storage_available,
+                },
+                knowledge_core::admission::Origin::BeforeVerification,
+            )
+            .unwrap()
+        {
+            knowledge_core::admission::Decision::Ready(owner) => break owner,
+            knowledge_core::admission::Decision::Waiting(reason) => {
+                saw_wait = true;
+                eprintln!("actual pressure fixture waiting: {reason:?}");
+                std::thread::sleep(Duration::from_millis(1));
+                quote = account.status().unwrap();
+            }
+        }
+    };
+    assert!(
+        raced.is_none() || saw_wait,
+        "forced real owner must invalidate the earlier status quote"
+    );
     let verify = Budget {
         max_files: 1,
         max_bytes: 65536,
@@ -300,6 +335,9 @@ fn actual_refresh_claim_processes_distinct_native_sources_without_child_jobs() {
         );
     }
     pressure.finish().unwrap();
+    if let Some(raced) = &mut raced {
+        raced.finish().unwrap();
+    }
     account
         .queue()
         .settle(&claim, job.key(), knowledge_core::jobs::Outcome::Completed)
