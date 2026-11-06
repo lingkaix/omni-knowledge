@@ -272,8 +272,8 @@ impl Runtime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure(&mut command, call.file_limit)?;
-        let mut child = command.spawn()?;
+        configure(&mut command, call.file_limit).map_err(|e| trace_io("configure", e))?;
+        let mut child = command.spawn().map_err(|e| trace_io("spawn", e))?;
         let identity = match process_identity(child.id()) {
             Ok(identity) => identity,
             Err(_) => {
@@ -304,7 +304,7 @@ impl Runtime {
             .and_then(|_| nonblocking(&stderr))
             .and_then(|_| stdin.as_ref().map(nonblocking).transpose().map(|_| ()));
         let result = (|| -> Result<(), Error> {
-            setup?;
+            setup.map_err(|e| trace_io("pipe-setup", e))?;
             loop {
                 call.check()?;
                 match group_sample(identity) {
@@ -323,8 +323,10 @@ impl Runtime {
                     Err(_) if unseen < 5 => unseen += 1,
                     Err(_) => return Err(Error::Recovery),
                 }
-                out_done |= drain(&mut stdout, &mut stdout_bytes, cap)?;
-                err_done |= drain(&mut stderr, &mut stderr_bytes, cap)?;
+                out_done |= drain(&mut stdout, &mut stdout_bytes, cap)
+                    .map_err(|e| trace_error("stdout-drain", e))?;
+                err_done |= drain(&mut stderr, &mut stderr_bytes, cap)
+                    .map_err(|e| trace_error("stderr-drain", e))?;
                 if let Some(pipe) = &mut stdin {
                     let end = input.len().min(sent.saturating_add(8192));
                     match pipe.write(&input[sent..end]) {
@@ -336,24 +338,26 @@ impl Runtime {
                             ) => {}
                         Err(error)
                             if error.kind() == io::ErrorKind::BrokenPipe
-                                && exited(identity.pid)? =>
+                                && exited(identity.pid)
+                                    .map_err(|e| trace_io("stdin-peer-exit", e))? =>
                         {
                             stdin.take();
                         }
-                        Err(error) => return Err(error.into()),
+                        Err(error) => return Err(trace_io("stdin-write", error)),
                     }
                     if sent == input.len() {
                         stdin.take();
                     }
                 }
-                if exited(identity.pid)? {
-                    let sample = group_sample(identity)?;
+                if exited(identity.pid).map_err(|e| trace_io("owned-exit-observe", e))? {
+                    let sample =
+                        group_sample(identity).map_err(|e| trace_io("exited-group-sample", e))?;
                     if sample.live > 0 {
-                        signal(identity)?;
+                        signal(identity).map_err(|e| trace_io("live-group-signal", e))?;
                         return Err(Error::Recovery);
                     }
                     if !out_done || !err_done {
-                        signal(identity)?;
+                        signal(identity).map_err(|e| trace_io("pipe-group-signal", e))?;
                     }
                     if sample.live == 0 && out_done && err_done {
                         break;
@@ -370,7 +374,10 @@ impl Runtime {
             return self.abandon(&mut slot, child, identity, call);
         }
         result?;
-        let status = child.try_wait()?.ok_or(Error::Recovery)?;
+        let status = child
+            .try_wait()
+            .map_err(|e| trace_io("final-owned-wait", e))?
+            .ok_or(Error::Recovery)?;
         call.account_bytes(stdout_bytes.len())?;
         call.account_bytes(stderr_bytes.len())?;
         Ok(Output {
@@ -409,6 +416,23 @@ impl Runtime {
     }
 }
 
+/// Numeric native-origin evidence only; do not expose paths, arguments or Git stderr.
+fn trace_io(stage: &'static str, error: io::Error) -> Error {
+    if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+        eprintln!(
+            "omni-native history io-stage: {stage} kind={:?} errno={:?}",
+            error.kind(),
+            error.raw_os_error()
+        );
+    }
+    error.into()
+}
+fn trace_error(stage: &'static str, error: Error) -> Error {
+    if matches!(&error, &Error::Io) && std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+        eprintln!("omni-native history io-stage: {stage}");
+    }
+    error
+}
 /// Set nonblocking only on a live owned pipe, through the safe rustix descriptor API.
 fn nonblocking(pipe: &impl std::os::fd::AsFd) -> io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(pipe)?;

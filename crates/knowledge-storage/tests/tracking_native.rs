@@ -14,6 +14,8 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
+#[path = "tracking/readonly.rs"]
+mod readonly;
 const M: u64 = 1024 * 1024;
 /// Serialize only this process-owned real fixture account.
 static SERIAL: Mutex<()> = Mutex::new(());
