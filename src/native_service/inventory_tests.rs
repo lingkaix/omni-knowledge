@@ -1,4 +1,6 @@
 //! Actual canonical M1 journal/asset identity→native source→SAME Claim/M3/provider controls.
+#[path = "inventory_credit_tests.rs"]
+mod credit;
 use super::*;
 use crate::native_service::embedding_tests::{claim, digest, ready, server};
 use knowledge_core::admission::Account;
@@ -38,7 +40,7 @@ fn refresh(
     service.native_scope(session, &command, None).unwrap()
 }
 fn reconcile(service: &NativeLibraryService, owner: &Owner, permit: Permit) -> NativeInventory {
-    let scratch = holding(4 * 1024 * 1024, 16 * 1024 * 1024);
+    let mut scratch = holding(4 * 1024 * 1024, 16 * 1024 * 1024);
     let context = holding(2 * 1024 * 1024, 0);
     let (inventory, result) = service
         .reconcile_inventory(
@@ -59,6 +61,8 @@ fn reconcile(service: &NativeLibraryService, owner: &Owner, permit: Permit) -> N
         .unwrap();
     assert!(result.complete);
     assert!(result.verified > 0);
+    drop(result);
+    scratch.finish().unwrap(); // Actual synchronous report/scratch died; Holding::drop is not release.
     inventory
 }
 fn observed(inventory: &NativeInventory, wanted: &str) -> NativeObservedSource {
@@ -204,7 +208,7 @@ fn canonical_inventory_asset_rename_and_actual_refresh_embedding_use_the_held_de
     let metadata_permit = service
         .native_scope(&session, &metadata_command, None)
         .unwrap();
-    let scratch = holding(4 * 1024 * 1024, 16 * 1024 * 1024);
+    let mut scratch = holding(4 * 1024 * 1024, 16 * 1024 * 1024);
     let (metadata_inventory, metadata_result) = service
         .reconcile_inventory(
             &owner,
@@ -229,7 +233,8 @@ fn canonical_inventory_asset_rename_and_actual_refresh_embedding_use_the_held_de
     let metadata_asset = metadata_source.source_id().to_owned();
     drop(metadata_source);
     drop(metadata_inventory);
-    drop(scratch);
+    drop(metadata_result);
+    scratch.finish().unwrap();
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
     // Reusing the SAME admitted Refresh frame must neither recursively reenter nor form a pin cycle.
     let inventory = reconcile(&service, &owner, actual_refresh.clone());
