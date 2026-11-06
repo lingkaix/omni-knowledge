@@ -1660,7 +1660,7 @@ fn run(
     execution: (Option<(&OwnerContext, u64)>, &native::Runtime),
 ) -> Result<Vec<u8>, Error> {
     call.check()?;
-    let mut command = Command::new("/usr/bin/git");
+    let mut command = Command::new(execution.1.git_program(call)?);
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
