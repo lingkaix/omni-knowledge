@@ -1,6 +1,9 @@
 //! ONE actual Refresh cause over an owned M1 inventory; source digests are separate facts.
+#[path = "inventory_corpus.rs"]
+mod corpus;
 use super::*;
 use crate::native_service::source::{refused_error, selected_context};
+pub use corpus::{NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress};
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};
 
@@ -317,6 +320,7 @@ impl NativeLibraryService {
                 b"native-refresh-processor-v1\0".as_slice(),
                 admitted::processor_identity().as_bytes(),
                 include_bytes!("inventory_job.rs"),
+                include_bytes!("inventory_corpus.rs"),
                 recipe.as_str().as_bytes(),
             ]
             .concat(),

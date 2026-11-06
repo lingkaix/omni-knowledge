@@ -189,6 +189,10 @@ impl NativeIndexInput {
     pub fn text(&self) -> Result<&str> {
         Ok(&self.owner.value()?.text)
     }
+    /// Borrow mature M3 coverage/format facts with the SAME actual source/Claim checks and credit.
+    pub fn extraction(&self) -> Result<&Extraction> {
+        self.owner.value()
+    }
     /// Original source identity is the actual native processing key, not equal-content deduplication.
     pub fn source_id(&self) -> Result<&str> {
         self.owner.source()?;
@@ -250,15 +254,34 @@ impl NativeProcessing {
         max_bytes: usize,
         child_rss_bytes: Option<u64>,
     ) -> std::result::Result<NativeIndexInput, NativeExtractionError> {
+        self.extract_indexed_mode(claim, max_bytes, child_rss_bytes, false)
+    }
+    pub(super) fn extract_corpus_input(
+        self,
+        claim: Claim,
+        max_bytes: usize,
+        child_rss_bytes: Option<u64>,
+    ) -> std::result::Result<NativeIndexInput, NativeExtractionError> {
+        self.extract_indexed_mode(claim, max_bytes, child_rss_bytes, true)
+    }
+    fn extract_indexed_mode(
+        self,
+        claim: Claim,
+        max_bytes: usize,
+        child_rss_bytes: Option<u64>,
+        metadata: bool,
+    ) -> std::result::Result<NativeIndexInput, NativeExtractionError> {
         let mut owner = self.run(claim, Inputs::default(), |processing, claim, inputs| {
             indexed_value(processing, claim, inputs, max_bytes, child_rss_bytes)
         })?;
         let facts = (|| -> Result<_> {
-            indexed_facts(
-                owner.processing.as_ref().expect("native processing owner"),
-                owner.claim.as_ref().expect("native claim owner"),
-                owner.value()?,
-            )
+            let processing = owner.processing.as_ref().expect("native processing owner");
+            let claim = owner.claim.as_ref().expect("native claim owner");
+            if metadata {
+                corpus_facts(processing, claim, owner.value()?)
+            } else {
+                indexed_facts(processing, claim, owner.value()?)
+            }
         })();
         match facts {
             Ok((representation, source_id, source_digest)) => Ok(NativeIndexInput {
@@ -614,11 +637,18 @@ fn indexed_facts(
     claim: &Claim,
     value: &Extraction,
 ) -> Result<(knowledge_search::RepresentationIdentity, String, String)> {
-    use sha2::{Digest, Sha256};
     anyhow::ensure!(
         matches!(value.status.as_str(), "extracted" | "partial"),
         "no actual text representation"
     );
+    corpus_facts(processing, claim, value)
+}
+fn corpus_facts(
+    processing: &NativeProcessing,
+    claim: &Claim,
+    value: &Extraction,
+) -> Result<(knowledge_search::RepresentationIdentity, String, String)> {
+    use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
     for chunk in value.text.as_bytes().chunks(64 * 1024) {
         processing.check(claim)?;

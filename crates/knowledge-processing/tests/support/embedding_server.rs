@@ -49,6 +49,16 @@ pub(crate) struct Server {
 }
 impl Server {
     pub(crate) fn start(config: &EmbeddingConfig, cancel: Option<Cancel>, delay: bool) -> Self {
+        Self::start_for(config, cancel, delay, Duration::from_secs(8))
+    }
+    /// New corpus fixtures retain this SAME paid/joined server through their actual bounded job.
+    /// Existing eight-second fixtures keep their original bound; no application ceiling changes.
+    pub(crate) fn start_for(
+        config: &EmbeddingConfig,
+        cancel: Option<Cancel>,
+        delay: bool,
+        lifetime: Duration,
+    ) -> Self {
         let account = admission::current().unwrap();
         let credit = match account
             .reserve(
@@ -77,7 +87,7 @@ impl Server {
         let seen = Arc::new(std::sync::Mutex::new(None));
         let observed = seen.clone();
         let thread = thread::Builder::new().stack_size(256*1024).spawn(move || {
-            let end = Instant::now() + Duration::from_secs(8);
+            let end = Instant::now() + lifetime;
             while !stopped.load(Ordering::Acquire) && Instant::now() < end {
                 let (mut socket, _) = match listener.accept() {
                     Ok(x) => x,

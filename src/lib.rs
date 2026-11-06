@@ -280,6 +280,11 @@ mod admitted {
     pub(super) fn start() -> Result<()> {
         native().map(|_| ())
     }
+    /// Actual native generated-root metadata; callers still qualify it against Account's held FD.
+    #[cfg(test)]
+    pub(super) fn generated_path() -> Result<&'static Path> {
+        Ok(&native()?.cache)
+    }
     /// Effective policy from the sole process owner; no global hidden-job count is fabricated.
     pub(super) fn budgets() -> Result<omni_service::ResourceBudgets> {
         native()?;
@@ -1159,12 +1164,14 @@ mod admitted {
         })
     }
     /// The real consuming identity, not the retained upstream lock alone.
-    fn build_identity() -> String {
+    pub(crate) fn build_identity() -> String {
         let mut hash = Sha256::new();
         hash.update(include_bytes!("../Cargo.lock"));
         hash.update(include_bytes!("../vendor/retrieval-kernel/PROVENANCE.json"));
         hash.update(include_bytes!("lib.rs"));
         hash.update(include_bytes!("embedding.rs"));
+        hash.update(include_bytes!("native_service/inventory_corpus.rs"));
+        hash.update(include_bytes!("native_service/inventory_corpus_vectors.rs"));
         hash.update(processor_identity().as_bytes());
         hash.update(std::env::consts::OS.as_bytes());
         hash.update(std::env::consts::ARCH.as_bytes());
@@ -2751,8 +2758,8 @@ pub mod native_service {
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
-        NativeInventory, NativeInventoryPage, NativeObservedSource, NativeRefreshJob,
-        NativeRefreshScopeError,
+        NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress, NativeInventory,
+        NativeInventoryPage, NativeObservedSource, NativeRefreshJob, NativeRefreshScopeError,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

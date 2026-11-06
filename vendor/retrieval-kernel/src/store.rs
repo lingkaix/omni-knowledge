@@ -636,7 +636,12 @@ impl Kernel {
             if let Err(e) = process {
                 // Native input integrity/currentness failures preserve the prior generation;
                 // they are not silently successful partial native publication.
-                if self.source_bytes.is_some() {
+                if self.source_bytes.is_some()
+                    && matches!(
+                        &record.document.content,
+                        Content::Text { .. } | Content::Representation { .. }
+                    )
+                {
                     return Err(e);
                 }
                 // A failed derived write cannot be committed as incomplete per-document coverage.

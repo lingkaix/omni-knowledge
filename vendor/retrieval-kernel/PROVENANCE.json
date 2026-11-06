@@ -215,7 +215,7 @@
     {
       "path": "src/store.rs",
       "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
-      "vendored_sha256": "e9a9373ccfe96a2ba5d5a1edf883f858cab3bedd84eff4b4de355c1b601b2739"
+      "vendored_sha256": "1338b3ba6c1753c12ec92bd7c18fa4e4301e2adb8993648951c678d2d1368b47"
     },
     {
       "path": "src/tests.rs",

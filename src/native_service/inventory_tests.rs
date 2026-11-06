@@ -1,4 +1,6 @@
 //! Actual canonical M1 journal/asset identity→native source→SAME Claim/M3/provider controls.
+#[path = "inventory_corpus_tests.rs"]
+mod corpus;
 #[path = "inventory_credit_tests.rs"]
 mod credit;
 #[path = "inventory_job_tests.rs"]
