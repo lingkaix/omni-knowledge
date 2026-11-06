@@ -2758,8 +2758,9 @@ pub mod native_service {
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
-        NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress, NativeInventory,
-        NativeInventoryPage, NativeObservedSource, NativeRefreshJob, NativeRefreshScopeError,
+        NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
+        NativeInventory, NativeInventoryPage, NativeObservedSource, NativeRefreshJob,
+        NativeRefreshScopeError,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

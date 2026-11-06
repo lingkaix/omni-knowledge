@@ -132,6 +132,12 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     }
     let home = tempfile::tempdir().unwrap();
     let kb = KnowledgeBase::init(home.path(), "Actual bounded native corpus").unwrap();
+    let source_root = kb.root.clone();
+    fs::write(
+        source_root.join("raw/actually-deleted.md"),
+        "actual prior source, not a fabricated tombstone",
+    )
+    .unwrap();
     fs::write(kb.root.join("raw/one.md"), "# Native first\n日本語 alpha\n").unwrap();
     fs::write(
         kb.root.join("raw/two.html"),
@@ -171,6 +177,26 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         (None, None)
     };
     let session = service.connect(TransportFacts::OwnerStdio).unwrap();
+    let seed = reconcile(
+        &service,
+        &owner,
+        corpus_refresh(&service, &session, "actual-metadata-seed", false),
+    );
+    drop(seed);
+    fs::remove_file(source_root.join("raw/actually-deleted.md")).unwrap();
+    fs::write(
+        source_root.join("raw/actually-denied.md"),
+        "no original digest may be fabricated for this unreadable source",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            source_root.join("raw/actually-denied.md"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+    }
     let permit = corpus_refresh(&service, &session, "actual-corpus", embeddings);
     let inventory = reconcile(&service, &owner, permit.clone());
     let expected = observed(&inventory, "raw/long.md").source_id().to_owned();
@@ -245,7 +271,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             status
                 .storage_available
                 .saturating_sub(if mode == "waiting-after-progress" {
-                    64 * 1024
+                    256 * 1024
                 } else {
                     0
                 })
@@ -259,22 +285,22 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         let mut waits = 0;
         let mut admitted_writes = 0;
         let mut at_wait = None;
+        let lengths = || {
+            [
+                "representations.data",
+                "sources.rows",
+                "lexical.rows",
+                "inventory.rows",
+            ]
+            .map(|name| file_at(&directory, name).metadata().unwrap().len())
+        };
         let error = match draft.build_lexical(|event| {
             if let NativeCorpusProgress::WriteAdmitted { bytes, available } = event {
                 assert!(available >= bytes + 64 * 1024);
                 admitted_writes += 1;
             }
             if let NativeCorpusProgress::Waiting(reason) = event {
-                at_wait = Some((
-                    file_at(&directory, "representations.data")
-                        .metadata()
-                        .unwrap()
-                        .len(),
-                    file_at(&directory, "sources.rows")
-                        .metadata()
-                        .unwrap()
-                        .len(),
-                ));
+                at_wait = Some(lengths());
                 assert_eq!(reason, knowledge_core::admission::Waiting::Storage);
                 waits += 1;
                 account
@@ -304,21 +330,12 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         let before = at_wait.expect("actual waiting boundary");
         if mode == "waiting-after-progress" {
             assert!(
-                before.0 > 0 && admitted_writes > 0,
+                before[0] > 0 && admitted_writes > 0,
                 "exercise actual previously prepaid successful appends, not an empty-corpus special case"
             );
         }
         assert_eq!(
-            (
-                file_at(&directory, "representations.data")
-                    .metadata()
-                    .unwrap()
-                    .len(),
-                file_at(&directory, "sources.rows")
-                    .metadata()
-                    .unwrap()
-                    .len()
-            ),
+            lengths(),
             before,
             "cancellation while Waiting cannot perform ANY additional payload or metadata append"
         );
@@ -355,11 +372,38 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     assert_eq!(account.status().unwrap().memory_available, 0);
     let records = frames(file_at(draft.staging_directory().unwrap(), "sources.rows"));
     let catalog = frames(file_at(draft.staging_directory().unwrap(), "lexical.rows"));
+    let inventory = frames(file_at(
+        draft.staging_directory().unwrap(),
+        "inventory.rows",
+    ));
+    assert_eq!(draft.coverage().observations, inventory.len() as u64);
+    assert_eq!(draft.coverage().tombstones, 1);
+    assert_eq!(draft.coverage().unavailable, 1);
+    let denied = inventory
+        .iter()
+        .find(|r| r["stat"]["path"] == "raw/actually-denied.md")
+        .expect("actual unreadable metadata remains discoverable");
+    assert!(
+        denied["version"].is_null(),
+        "unreadable original has NO manufactured digest/version"
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|r| r["stat"]["path"] == "raw/actually-deleted.md"),
+        "actual M1 tombstone remains discoverable"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| r["document"]["key"]["source_id"] == denied["source_id"]),
+        "unreadable metadata cannot become an invented representation/vector source"
+    );
     assert_eq!(catalog.len() as u64, shards);
     assert_eq!(
         admitted_writes,
-        count + records.len() as u64 + catalog.len() as u64,
-        "EVERY tape/source/catalog append must have the actual complete prepaid write event"
+        count + records.len() as u64 + catalog.len() as u64 + inventory.len() as u64,
+        "EVERY tape/source/catalog/inventory append must have the actual complete prepaid write event"
     );
     let chunks: Vec<_> = records
         .iter()
