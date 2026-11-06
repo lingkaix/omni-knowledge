@@ -173,7 +173,8 @@ fn inherited_owner(path: Option<String>) -> i32 {
     abandon(&mut child, code)
 }
 
-/// Fork a child that drops its inherited cache only after the parent records the start token.
+/// Fork a child that drops its inherited cache only AFTER the external observer ACKs its live identity.
+/// The helper records the birth token, then waits for bounded stdin ACK before releasing its child.
 /// The child blocks on the release pipe until the parent writes one byte.
 /// `hold_ready` then parks with the signal write end open, so the parent reaches its existing deadline.
 /// The other path drops the cache, writes one readiness byte, and exits.
@@ -266,6 +267,13 @@ fn fork_destroy_owner(path: Option<String>, hold_ready: bool) -> i32 {
         return report_failure(&mut child, "ERROR Observer");
     };
     say(&format!("CHILD {pid} {token}"));
+    if !matches!(read_byte_bounded(0, CHILD_SIGNAL_MS), Ok(b'I')) {
+        unsafe {
+            close(release[1]);
+            close(signal[0]);
+        }
+        return report_failure(&mut child, "ERROR ChildIdentity");
+    }
     let released = write_byte(release[1], PARENT_RELEASE);
     unsafe { close(release[1]) };
     if !released {
