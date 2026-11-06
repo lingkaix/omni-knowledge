@@ -116,6 +116,11 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         for mode in [
             "normal",
             "query-source-change",
+            "ranking",
+            "query-byte-budget",
+            "query-byte-phase",
+            "query-range-budget",
+            "query-drop-tail",
             "waiting",
             "waiting-after-progress",
             "vectors",
@@ -148,16 +153,39 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     )
     .unwrap();
     fs::write(kb.root.join("raw/unavailable.unknown"), [0xff, 0, 0xfe, 1]).unwrap();
-    let long = "corpus alpha 日本語\n".repeat(180_000);
+    let mode = std::env::var("OMNI_CORPUS_MODE").unwrap();
+    let ranking = mode == "ranking";
+    // Keep EVERY original hostile/high-frequency alpha fixture unchanged. The additional
+    // ranking mode makes a rare-term long original repeat across partitions and gives a
+    // single short original the same best rank plus the earlier stable logical path.
+    let long = if ranking {
+        ("corpus 日本語\n".repeat(12000) + "alpha\n").repeat(21)
+    } else {
+        "corpus alpha 日本語\n".repeat(180_000)
+    };
     assert!(long.len() > 2 * 1024 * 1024);
-    fs::write(kb.root.join("raw/long.md"), &long).unwrap();
+    if ranking {
+        assert!(long.len() >= "corpus alpha 日本語\n".len() * 180_000);
+    }
+    let long_path = if ranking {
+        "raw/zzz-long.md"
+    } else {
+        "raw/long.md"
+    };
+    fs::write(kb.root.join(long_path), &long).unwrap();
     drop(long);
     for n in 0..70 {
-        fs::write(
-            kb.root.join(format!("raw/page-{n:03}.md")),
-            format!("actual page source {n} alpha\n"),
-        )
-        .unwrap();
+        let path = if ranking && n == 0 {
+            "raw/aaa-page-000.md".to_owned()
+        } else {
+            format!("raw/page-{n:03}.md")
+        };
+        let text = if ranking && n == 0 {
+            "alpha\n".to_owned()
+        } else {
+            format!("actual page source {n} alpha\n")
+        };
+        fs::write(kb.root.join(path), text).unwrap();
     }
     let (service, owner, _selection) = NativeLibraryService::ordinary_local(
         kb,
@@ -171,7 +199,6 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         },
     )
     .unwrap();
-    let mode = std::env::var("OMNI_CORPUS_MODE").unwrap();
     let embeddings = mode.starts_with("vectors");
     let (model, fixture) = if embeddings {
         let (model, fixture) = contract_model(&service, &owner);
@@ -202,7 +229,12 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     }
     let permit = corpus_refresh(&service, &session, "actual-corpus", embeddings);
     let inventory = reconcile(&service, &owner, permit.clone());
-    let expected = observed(&inventory, "raw/long.md").source_id().to_owned();
+    let expected = observed(&inventory, long_path).source_id().to_owned();
+    let first_ranked = ranking.then(|| {
+        observed(&inventory, "raw/aaa-page-000.md")
+            .source_id()
+            .to_owned()
+    });
     {
         let page = inventory
             .page(
@@ -733,6 +765,21 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         &query_inventory,
         (mode == "query-source-change").then(|| source_root.join("raw/two.html")),
     );
+    let mut whole_command = query_command.clone();
+    if let wire::Command::Query { query } = &mut whole_command {
+        query.methods = vec![wire::SearchMethod::Bm25];
+    }
+    let whole_permit = service
+        .native_scope(&session, &whole_command, None)
+        .unwrap();
+    query_job::run_whole_bm25(
+        &service,
+        &owner,
+        &whole_permit,
+        reopened["scan"].as_str().unwrap(),
+        &mode,
+        first_ranked.as_deref(),
+    );
     // A real same-inode edit followed by actual stat-first M1 discovery leaves no verified
     // new digest. The opaque producer FD version must reject it without a query-time rehash.
     {
@@ -782,11 +829,17 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         .native_scope(&session, &query_command, None)
         .unwrap();
     let before_stale_hash = NativeSource::test_hash_read_calls();
+    let stale = match reader.current_source_at(&service, &current_query, current, 0) {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a current M1 metadata row with changed original version cannot certify old cached payload"
+        ),
+    };
     assert!(
-        reader
-            .current_source_at(&service, &current_query, current, 0)
-            .is_err(),
-        "a current M1 metadata row with changed original version cannot certify old cached payload"
+        stale
+            .chain()
+            .any(|cause| cause.is::<crate::native_service::source::CachedQuerySourceUnavailable>()),
+        "actual source ineligibility must be typed separately from global policy/Claim/cache failure: {stale:#}"
     );
     assert_eq!(
         NativeSource::test_hash_read_calls(),
@@ -794,6 +847,28 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         "stale Query dependency must not synchronously hash the changed original"
     );
     drop(current_query);
+    // Explicit fixture actor removes the actual original name. Outer native authorization
+    // remains current; the confined open refusal, not its text, identifies unavailable input.
+    let missing = observed(&stat_inventory, &first_path);
+    let missing_query = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
+    let original_path = source_root.join(&first_path);
+    let hidden_path = source_root.join("raw/fixture-missing-original");
+    fs::rename(&original_path, &hidden_path).unwrap();
+    let refused = match reader.current_source_at(&service, &missing_query, missing, 0) {
+        Err(error) => error,
+        Ok(_) => panic!("missing actual original cannot authorize cached payload"),
+    };
+    fs::rename(&hidden_path, &original_path).unwrap();
+    assert!(
+        refused
+            .chain()
+            .any(|cause| cause.is::<crate::native_service::source::CachedQuerySourceUnavailable>()),
+        "confined original absence must not be confused with a global grant failure: {refused:#}"
+    );
+    assert_eq!(NativeSource::test_hash_read_calls(), before_stale_hash);
+    drop(missing_query);
     drop(stat_inventory);
     drop(stat_report);
     stat_scratch.finish().unwrap();

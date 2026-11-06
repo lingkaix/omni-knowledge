@@ -35,6 +35,8 @@ pub enum Error {
     Admission(knowledge_core::admission::Error),
     /// Caller has not reserved enough for this bounded kernel invocation.
     Reservation,
+    /// Actual native caller's aggregate read-data ceiling refused before allocation/IO.
+    ReadBudget,
     /// Existing kernel admission/current-generation/processing refusal.
     Kernel(retrieval_kernel::Error),
     /// Checked accounting arithmetic or bounded inventory encoding failed.

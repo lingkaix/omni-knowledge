@@ -384,3 +384,280 @@ pub(super) fn run(
     drop(query);
     scratch.finish().unwrap();
 }
+
+pub(super) fn run_whole_bm25(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    permit: &Permit,
+    scan: &str,
+    mode: &str,
+    first_ranked: Option<&str>,
+) {
+    let changed = mode == "query-source-change";
+    let tiny = mode == "query-byte-budget";
+    let range_limited = mode == "query-range-budget";
+    let limited = tiny || range_limited;
+    let byte_budget = match mode {
+        "query-byte-budget" => 1,
+        "query-byte-phase" => 22 * 1024 * 1024,
+        "query-range-budget" => 20 * 1024 * 1024,
+        _ => 64 * 1024 * 1024,
+    };
+    let account = Account::current().unwrap();
+    let mut scratch = holding(4 * 1024 * 1024, 0);
+    let inventory = service
+        .inventory_for_query(
+            owner,
+            permit,
+            "wiki",
+            scan,
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    let reader = service
+        .open_corpus_tuple(owner, permit.clone(), ready(NativeTupleRead::requirement()))
+        .unwrap();
+    let shards = reader.test_header().unwrap()["shards"].as_u64().unwrap();
+    let query = NativeTupleQuery::prepare(
+        vec![NativeQueryLibrary::new(reader, inventory, None)],
+        ready(NativeTupleQuery::metadata_requirement()),
+    )
+    .unwrap();
+    let need = query.bm25_requirement(0).unwrap();
+    eprintln!("actual whole BM25 conservative SAME-Claim requirement={need:?} shards={shards}");
+    assert!(
+        need.memory_bytes <= 512 * 1024 * 1024,
+        "actual fixture must fit its unchanged sealed512MiB budget"
+    );
+    query
+        .submit(NativeJobPlan {
+            operation_id: "actual-whole-bm25",
+            job_id: "actual-whole-bm25-job",
+            budget: Budget {
+                max_files: 1000,
+                max_bytes: byte_budget,
+                max_millis: 60000,
+                max_memory_bytes: need.memory_bytes,
+            },
+            reservation: need,
+            priority: knowledge_core::jobs::Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    let claim = Arc::new(account.queue().claim(Instant::now()).unwrap().unwrap());
+    let before = account
+        .job_status(claim.job(), query.key())
+        .unwrap()
+        .execution
+        .memory_bytes;
+    let mut pressure = loop {
+        let s = account.status().unwrap();
+        match account
+            .reserve(
+                Reservation {
+                    memory_bytes: s.memory_available,
+                    temporary_bytes: s.storage_available,
+                },
+                Origin::BeforeVerification,
+            )
+            .unwrap()
+        {
+            Decision::Ready(owner) => break owner,
+            Decision::Waiting(reason) => {
+                eprintln!("actual whole Query pressure waiting: {reason:?}");
+                assert!(Instant::now() < claim.deadline());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    let mut walk = query.start_bm25(claim.clone(), 0, 0).unwrap();
+    if mode == "query-drop-tail" {
+        let observed = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        assert_eq!(account.status().unwrap().memory_available, 0);
+        walk.test_paid_admin_tail(observed.clone());
+        drop(walk);
+        let available_with_live_data = observed.load(std::sync::atomic::Ordering::SeqCst);
+        eprintln!(
+            "actual Core global bytes available while the paid8KiB admin buffer was STILL LIVE: {available_with_live_data}"
+        );
+        account.queue().cancel(claim.job(), query.key()).unwrap();
+        pressure.finish().unwrap();
+        let claim =
+            Arc::try_unwrap(claim).unwrap_or_else(|_| panic!("actual probe Claim still retained"));
+        account
+            .queue()
+            .settle(
+                &claim,
+                query.key(),
+                knowledge_core::jobs::Outcome::Cancelled,
+            )
+            .unwrap();
+        drop(query);
+        scratch.finish().unwrap();
+        assert_eq!(
+            available_with_live_data, 0,
+            "actual paid administrative bytes must DIE before their Core credit is released"
+        );
+        return;
+    }
+    let opened = walk.test_component_opens();
+    let metadata_reads = walk.test_frame_read_bytes();
+    let start = Instant::now();
+    let mut stopped = false;
+    loop {
+        let step = walk.step(service);
+        if step.is_failed() {
+            if limited {
+                stopped = true;
+                break;
+            }
+            panic!(
+                "actual whole native BM25 failed while retaining its real owner: {:?}",
+                walk.failure()
+            )
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+    eprintln!(
+        "actual whole-library BM25 elapsed={:?} partitions={} unavailable_parts={} admitted-data-bytes={}",
+        start.elapsed(),
+        walk.partitions(),
+        walk.unavailable_parts(),
+        walk.bytes_admitted()
+    );
+    if limited {
+        assert!(
+            stopped,
+            "actual Claim data ceiling must refuse before over-budget result delivery"
+        );
+        if tiny {
+            assert!(
+                walk.test_frame_read_bytes() - metadata_reads <= 1,
+                "actual metadata FD reads must be admitted BEFORE read/retained allocation under the same one-byte Claim"
+            );
+        }
+        assert!(
+            walk.budget_exhausted(),
+            "actual Claim data limit must be a typed budget refusal, not fabricated source absence"
+        );
+        if tiny {
+            assert_eq!(
+                walk.test_component_opens(),
+                opened,
+                "no generation payload may open after insufficient actual byte admission"
+            );
+        } else {
+            assert!(
+                walk.test_component_opens() > opened,
+                "range quota control must actually reach mature generation IO"
+            );
+        }
+        let observed = (
+            walk.test_component_opens(),
+            walk.test_frame_read_bytes(),
+            walk.bytes_admitted(),
+        );
+        assert!(
+            walk.step(service).is_failed(),
+            "failed step must never retry effects"
+        );
+        assert_eq!(
+            (
+                walk.test_component_opens(),
+                walk.test_frame_read_bytes(),
+                walk.bytes_admitted()
+            ),
+            observed
+        );
+        account.queue().cancel(claim.job(), query.key()).unwrap();
+    } else {
+        assert_eq!(
+            walk.partitions(),
+            shards,
+            "every admitted partition must be visited"
+        );
+        assert!(
+            shards > 1,
+            "actual fixture must cross source fragments/partitions"
+        );
+        assert_eq!(
+            walk.unavailable_parts(),
+            u64::from(changed),
+            "real stale noncandidate must be removed BEFORE eligible-only statistics"
+        );
+        let hits = walk.hits().unwrap().collect::<Vec<_>>();
+        assert!(!hits.is_empty());
+        assert!(hits.len() <= 10);
+        if let Some(expected) = first_ranked {
+            assert_eq!(
+                hits[0].key.id, expected,
+                "an original repeated across partitions must never gain extra fragment votes over the earlier-path single original"
+            );
+        }
+        let unique: std::collections::BTreeSet<_> = hits.iter().map(|hit| &hit.key).collect();
+        assert_eq!(
+            unique.len(),
+            hits.len(),
+            "original fragments can never multiply a returned file"
+        );
+        drop((unique, hits));
+        assert_eq!(
+            account.status().unwrap().memory_available,
+            0,
+            "actual whole Query must never reserve or release global credit between partitions"
+        );
+        let live = walk
+            .test_scope_clone()
+            .expect("actual retained winning original scope");
+        account.queue().cancel(claim.job(), query.key()).unwrap();
+        assert!(
+            walk.hits().is_err(),
+            "actual cancellation must revoke whole-library result access"
+        );
+        walk = match walk.finish() {
+            Err(owner) => owner,
+            Ok(_) => panic!("actual live winning SDK clone must retain whole-result cleanup owner"),
+        };
+        assert_eq!(account.status().unwrap().queue.unsettled, 1);
+        drop(live);
+    }
+    let (returned, alias) = walk.finish().unwrap_or_else(|_| {
+        panic!("actual whole Query remained pinned after last winning source consumer")
+    });
+    drop((returned, alias));
+    assert_eq!(
+        account
+            .job_status(claim.job(), query.key())
+            .unwrap()
+            .execution
+            .memory_bytes,
+        before,
+        "every whole-query/page/source/output loan must return exactly to SAME Claim"
+    );
+    assert_eq!(account.status().unwrap().memory_available, 0);
+    pressure.finish().unwrap();
+    let claim = Arc::try_unwrap(claim).unwrap_or_else(|_| {
+        panic!("whole Query Claim still retained after actual final consumers")
+    });
+    account
+        .queue()
+        .settle(
+            &claim,
+            query.key(),
+            knowledge_core::jobs::Outcome::Cancelled,
+        )
+        .unwrap();
+    drop(query);
+    scratch.finish().unwrap();
+}

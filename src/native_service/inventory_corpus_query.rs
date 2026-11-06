@@ -1,5 +1,11 @@
 //! ONE actual Query invocation over selected complete tuples; no child source jobs/new scheduler.
 use super::*;
+#[path = "inventory_corpus_query_budget.rs"]
+mod budget;
+pub(super) use budget::{QueryBudgetExhausted, ReadAllowance};
+#[path = "inventory_corpus_controller.rs"]
+mod controller;
+pub use controller::{NativeBm25Run, NativeQueryStep};
 #[path = "inventory_corpus_partition.rs"]
 mod partition;
 use knowledge_core::jobs::{Key, Submission, Submitted};
@@ -40,9 +46,34 @@ struct QueryCause {
     libraries: Vec<NativeQueryLibrary>,
     request_budget: Budget,
     deadline: Instant,
+    reads: ReadAllowance,
+    // DATA baseline of separately funded pre-submission inputs, never a permission/epoch cache.
+    execution_base: std::sync::OnceLock<u64>,
     _funding: Work,
 }
 impl QueryCause {
+    fn admit_io(&self, claim: &Claim, bytes: u64) -> Result<()> {
+        self.check_scope_claim(claim)?;
+        self.reads.admit(bytes, self.execution_limit(claim)?)?;
+        self.check_scope_claim(claim)
+    }
+    fn admit_planning(&self, bytes: u64) -> Result<()> {
+        anyhow::ensure!(
+            self.execution_base.get().is_none(),
+            "query quote metadata requires pre-submission ownership"
+        );
+        self.reads.admit(bytes, self.request_budget.max_bytes)
+    }
+    fn execution_limit(&self, claim: &Claim) -> Result<u64> {
+        let base = *self
+            .execution_base
+            .get()
+            .context("actual aggregate Query submission required")?;
+        Ok(self
+            .request_budget
+            .max_bytes
+            .min(base.saturating_add(claim.budget().max_bytes)))
+    }
     fn key(&self) -> Key<'_> {
         Key {
             context: &self.context,
@@ -80,6 +111,7 @@ impl QueryCause {
     // check current metadata/root/original FD dependencies. Do not recursively repeat all of
     // those SAME checks here. No permission/epoch TTL or boolean grant cache is introduced.
     fn check_scope_claim(&self, claim: &Claim) -> Result<()> {
+        self.reads.check()?;
         let b = &self.request_budget;
         let a = claim.budget();
         anyhow::ensure!(
@@ -238,6 +270,12 @@ impl NativeTupleQuery {
         })?;
         let version =
             knowledge_core::data::ContentDigest::new(hex::encode(Sha256::digest(&descriptor)))?;
+        let spent = inputs.libraries.iter().try_fold(0u64, |n, scope| {
+            n.checked_add(scope.reader.physical.input_reads.used())
+                .and_then(|n| n.checked_add(scope.inventory.owner.input_bytes))
+                .ok_or(QueryBudgetExhausted)
+        })?;
+        anyhow::ensure!(spent <= query.budget.max_bytes.get(), QueryBudgetExhausted);
         Ok(Self {
             cause: Arc::new(QueryCause {
                 descriptor,
@@ -257,6 +295,8 @@ impl NativeTupleQuery {
                     .map(|scope| scope.reader.deadline)
                     .min()
                     .expect("actual nonempty Query libraries"),
+                reads: ReadAllowance::new(spent),
+                execution_base: std::sync::OnceLock::new(),
                 libraries: inputs.libraries,
                 _funding: inputs.funding,
             }),
@@ -289,6 +329,9 @@ impl NativeTupleQuery {
                 && plan.budget.max_memory_bytes <= b.max_memory_bytes.get(),
             "Query job exceeds actual admitted request budget"
         );
+        self.cause
+            .execution_base
+            .get_or_init(|| self.cause.reads.used());
         Ok(Account::current()?.submit(Submission {
             key: self.key(),
             operation_id: plan.operation_id,
@@ -323,7 +366,27 @@ impl NativeTupleQuery {
                 && budget.max_memory_bytes <= b.max_memory_bytes,
             "Query page exceeds actual claim budget"
         );
-        scope.inventory.page(offset, budget, funding.into_holding())
+        self.cause
+            .reads
+            .with_remaining(self.cause.execution_limit(claim)?, |remaining| {
+                self.cause.check_scope_claim(claim)?;
+                let page = scope.inventory.page(
+                    offset,
+                    Budget {
+                        max_bytes: budget.max_bytes.min(remaining),
+                        ..budget
+                    },
+                    funding.into_holding(),
+                )?;
+                if page.issue() == Some(&knowledge_storage::Error::Budget)
+                    || (!page.complete() && page.next_offset() == offset)
+                {
+                    return Err(QueryBudgetExhausted.into());
+                }
+                let spent = page.read_bytes();
+                self.cause.check_scope_claim(claim)?;
+                Ok((page, spent))
+            })
     }
     /// Already prepaid tuple metadata supplies the exact framed quote. A fresh SAME-Claim SDK
     /// scope precedes retained metadata copies and actual original-source FD inspection.
@@ -345,7 +408,10 @@ impl NativeTupleQuery {
             Arc::ptr_eq(&observed.page.inventory, &selected.inventory.owner),
             "foreign Query inventory owner"
         );
-        let Some((part, next)) = selected.reader.part(offset)? else {
+        let Some((part, next)) = selected
+            .reader
+            .part_admitted(offset, &|n| self.cause.admit_io(claim, n))?
+        else {
             return Ok(None);
         };
         let bytes = next

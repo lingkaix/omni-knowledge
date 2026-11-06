@@ -129,6 +129,9 @@ pub struct Replay {
     pub event_cursors: Vec<EventCursor>,
     /// Next exact retained byte position; malformed bytes are never skipped.
     pub next_offset: u64,
+    /// Native read spend including predecessor validation/read-ahead, not a logical cursor delta.
+    /// A failed partial predecessor retains its full conservative admitted spend.
+    pub read_bytes: u64,
     /// The selected current stream EOF was actually reached.
     pub complete: bool,
     /// Malformed/truncated/contradictory bytes remain visible for explicit recovery.
@@ -485,7 +488,8 @@ impl<P: WritePolicy> Store<P> {
     ) -> Result<Replay, Error> {
         check()?;
         let lane = self.existing_lane()?;
-        let mut journal = journal::Journal::read(&lane.journal, &self.writer, b.control())?;
+        let mut journal =
+            journal::Journal::read_bounded(&lane.journal, &self.writer, b.control(), b.bytes)?;
         let mut observations = Vec::new();
         let mut checkpoints = Vec::new();
         let mut event_cursors = Vec::new();
@@ -543,6 +547,7 @@ impl<P: WritePolicy> Store<P> {
             checkpoints,
             event_cursors,
             next_offset: cursor,
+            read_bytes: journal.read_bytes(),
             complete,
             issue,
         })

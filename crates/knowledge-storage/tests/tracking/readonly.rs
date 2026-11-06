@@ -118,6 +118,53 @@ fn actual_readonly_owner_replays_without_writer_grant_or_mutation() {
             .iter()
             .any(|o| o.stat.path.as_str() == "pages/a.md")
     );
+    #[cfg(target_os = "linux")]
+    {
+        // Owning-thread kernel counters measure the REAL synchronous readonly adapter, including BufReader
+        // prefetch, not merely its logical next_offset. The one /proc snapshot read itself
+        // is subtracted exactly; no native backend/provider is mocked or interposed.
+        fn rchar() -> (u64, u64) {
+            let data = fs::read_to_string("/proc/thread-self/io").unwrap();
+            let value = data
+                .lines()
+                .find_map(|line| line.strip_prefix("rchar: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            (value, data.len() as u64)
+        }
+        let mut one = f.preflight();
+        one.budget.max_bytes = 1;
+        let (before_bytes, snapshot_bytes) = rchar();
+        let tiny = store.replay_tracking_readonly(&mount, 0, &one).unwrap();
+        let (after_bytes, _) = rchar();
+        let actual = after_bytes - before_bytes - snapshot_bytes;
+        assert!(
+            actual <= 1,
+            "actual one-byte readonly metadata call read {actual} native bytes; logical cursor {} is not physical IO admission",
+            tiny.next_offset
+        );
+        assert_eq!(tiny.next_offset, 0);
+        assert_eq!(tiny.issue, Some(Error::Budget));
+        assert_eq!(
+            tiny.read_bytes, actual,
+            "reported native read spend must include real buffering"
+        );
+        let (before_bytes, snapshot_bytes) = rchar();
+        let tail = store
+            .replay_tracking_readonly(&mount, replay.next_offset, &one)
+            .unwrap();
+        let (after_bytes, _) = rchar();
+        let actual = after_bytes - before_bytes - snapshot_bytes;
+        assert!(
+            actual <= 1,
+            "resumed predecessor validation read {actual} native bytes beyond one-byte admission"
+        );
+        assert!(!tail.complete);
+        assert_eq!(tail.next_offset, replay.next_offset);
+        assert_eq!(tail.issue, Some(Error::Budget));
+        assert_eq!(tail.read_bytes, actual);
+    }
     let mut limited = f.preflight();
     limited.budget.max_files = 1;
     let first = store.replay_tracking_readonly(&mount, 0, &limited).unwrap();

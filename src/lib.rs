@@ -1182,8 +1182,26 @@ mod admitted {
             "native_service/inventory_corpus_partition.rs"
         ));
         hash.update(include_bytes!(
+            "native_service/inventory_corpus_controller.rs"
+        ));
+        hash.update(include_bytes!(
+            "native_service/inventory_corpus_query_budget.rs"
+        ));
+        hash.update(include_bytes!("../crates/knowledge-retrieval/src/lib.rs"));
+        hash.update(include_bytes!(
+            "../crates/knowledge-retrieval/src/stored.rs"
+        ));
+        hash.update(include_bytes!(
+            "../crates/knowledge-storage/src/tracking.rs"
+        ));
+        hash.update(include_bytes!("../crates/knowledge-storage/src/journal.rs"));
+        hash.update(include_bytes!(
             "../crates/knowledge-retrieval/src/stored/held.rs"
         ));
+        hash.update(include_bytes!(
+            "../crates/knowledge-search/src/partition_ranks.rs"
+        ));
+        hash.update(include_bytes!("../crates/knowledge-search/src/rrf.rs"));
         hash.update(processor_identity().as_bytes());
         hash.update(std::env::consts::OS.as_bytes());
         hash.update(std::env::consts::ARCH.as_bytes());
@@ -2770,11 +2788,12 @@ pub mod native_service {
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
-        NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
-        NativeInventory, NativeInventoryPage, NativeObservedSource, NativePartitionResult,
-        NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition, NativeQueryPartitionPage,
-        NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
-        NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
+        NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
+        NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeObservedSource,
+        NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
+        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
+        NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
+        NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

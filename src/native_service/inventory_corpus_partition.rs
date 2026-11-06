@@ -207,6 +207,10 @@ thread_local! {
     static TEST_COMPONENT_OPENS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
     static TEST_INDEX_OPEN_HOOK:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
 }
+#[cfg(test)]
+pub(super) fn test_component_open_count() -> u64 {
+    TEST_COMPONENT_OPENS.with(std::cell::Cell::get)
+}
 /// One bounded catalog advance; an empty eligible view skips payload without conflating EOF.
 pub struct NativeQueryPartitionPage {
     pub partition: Option<NativeQueryPartition>,
@@ -232,13 +236,17 @@ impl NativeQueryStage {
     pub fn partition(&self, offset: u64) -> Result<Option<NativeQueryPartitionPage>> {
         self.check()?;
         let physical = self.0.physical();
-        let catalog = physical.open_verified("lexical.rows", || self.check())?;
+        let catalog = physical.open_verified_admitted("lexical.rows", || self.check(), &|n| {
+            self.0.cause.admit_io(&self.0.claim, n)
+        })?;
         let size = catalog.metadata()?.len();
         if offset == size {
             return Ok(None);
         }
         anyhow::ensure!(offset < size, "partition cursor outside actual catalog");
-        let (shard, next) = read_frame::<Shard>(&catalog, offset)?;
+        let (shard, next) = read_frame_admitted::<Shard>(&catalog, offset, &|n| {
+            self.0.cause.admit_io(&self.0.claim, n)
+        })?;
         if self.0.sources.is_empty() {
             return Ok(Some(NativeQueryPartitionPage {
                 partition: None,
@@ -340,6 +348,22 @@ impl ArchiveSource for HeldFile {
         // and again after reading. Borrowing its descriptor must not repeat that entire check.
         Ok(&self.file)
     }
+    fn admit_read(&self, bytes: u64) -> std::result::Result<(), knowledge_retrieval::Error> {
+        #[cfg(test)]
+        if std::env::var_os("OMNI_TEST_BYPASS_RANGE_DATA_BUDGET").is_some() {
+            return Ok(());
+        }
+        self.owner
+            .cause
+            .admit_io(&self.owner.claim, bytes)
+            .map_err(|error| {
+                if error.is::<QueryBudgetExhausted>() {
+                    knowledge_retrieval::Error::ReadBudget
+                } else {
+                    knowledge_retrieval::Error::Inventory
+                }
+            })
+    }
 }
 fn range(
     owner: &Arc<StageOwner>,
@@ -349,9 +373,12 @@ fn range(
     original: Option<usize>,
 ) -> Result<Arc<dyn ByteHandle>> {
     check_range(owner, original)?;
-    let file = owner
-        .physical()
-        .open_verified(name, || check_range(owner, original))?;
+    let file =
+        owner
+            .physical()
+            .open_verified_admitted(name, || check_range(owner, original), &|n| {
+                owner.cause.admit_io(&owner.claim, n)
+            })?;
     let version = stamp(&file)?;
     let length = length.unwrap_or(version[2]);
     let source = Arc::new(HeldFile {
@@ -391,7 +418,9 @@ impl ByteDirectory for Components {
         self.check()?;
         self.owner
             .physical()
-            .member_exists(&self.name(name)?, || self.owner.check_io())
+            .member_exists_admitted(&self.name(name)?, || self.owner.check_io(), &|n| {
+                self.owner.cause.admit_io(&self.owner.claim, n)
+            })
             .map_err(|_| kernel_error())
     }
     fn open(&self, name: &str) -> std::result::Result<Arc<dyn ByteHandle>, KernelError> {

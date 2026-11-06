@@ -1,6 +1,7 @@
 //! File-rank orchestration and disk vectors using the ONE Core account and actual kernel facade.
 //! No numeric grant constructor, pending admission, resource pool, or lexical engine lives here.
 mod lexical;
+mod partition_ranks;
 mod rrf;
 mod vectors;
 use knowledge_core::{
@@ -12,6 +13,7 @@ pub use lexical::{
     AdmittedSource, LexicalError, LexicalHit, LexicalMode, LexicalOutcome, LexicalQuery,
     publish_lexical, query_lexical, search_lexical,
 };
+pub use partition_ranks::FileRankWindow;
 pub use rrf::fuse_ranks;
 use std::{
     sync::{Arc, Mutex},

@@ -8,11 +8,11 @@ use super::source::refused_error;
 use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
-    NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
-    NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery,
-    NativeTupleRead,
+    NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
+    NativeCorpusProgress, NativePartitionResult, NativeQueryLibrary, NativeQueryLoans,
+    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
+    NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::{
     admission::Holding,
@@ -61,6 +61,7 @@ struct InventoryOwner {
     scan: String,
     root: (u64, u64),
     check_budget: Budget,
+    input_bytes: u64,
     // Current opaque owner epoch and actual context credit survive every dependent page/source.
     // Never retain a Permit here: a source's delivery checks may retain this inventory.
     _funding: InventoryCredit,
@@ -109,6 +110,10 @@ impl NativeInventoryPage {
     /// Validated next byte position; partial pages must follow this actual cursor without skipping.
     pub fn next_offset(&self) -> u64 {
         self.page.replay.next_offset
+    }
+    /// Native read spend including predecessor/read-ahead, not a logical cursor delta.
+    pub fn read_bytes(&self) -> u64 {
+        self.page.replay.read_bytes
     }
     /// True only when this actual journal reader reached its EOF.
     pub fn complete(&self) -> bool {
@@ -408,12 +413,7 @@ impl NativeLibraryService {
                 "query inventory evidence requires recovery"
             );
             bytes = bytes
-                .checked_add(
-                    replay
-                        .next_offset
-                        .checked_sub(offset)
-                        .context("query inventory cursor regressed")?,
-                )
+                .checked_add(replay.read_bytes)
                 .context("query inventory bytes overflow")?;
             records = records
                 .checked_add(
@@ -458,6 +458,7 @@ impl NativeLibraryService {
                 policy,
                 scan: scan.to_owned(),
                 root,
+                input_bytes: bytes,
                 check_budget: Budget {
                     max_files: 1,
                     max_bytes: 128 * 1024,
@@ -545,6 +546,7 @@ impl NativeLibraryService {
                     policy,
                     scan,
                     root,
+                    input_bytes: 0,
                     check_budget,
                     _funding: context_funding,
                 }),

@@ -24,6 +24,11 @@ pub trait ArchiveSource: Send + Sync + 'static {
     fn check(&self) -> Result<(), Error>;
     /// Borrow the exact admitted regular descriptor. Never resolve or reopen its display hint.
     fn file(&self) -> Result<&File, Error>;
+    /// Restrict an already paid read BEFORE allocation/native IO. This mints no authority or
+    /// Core promise; hosts with an aggregate data ceiling charge its SAME actual caller here.
+    fn admit_read(&self, _bytes: u64) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// Actual native consumer format facts, independent of package metadata and source authorization.
@@ -407,6 +412,10 @@ impl FileHandle for RangeHandle {
             .checked_add(range.start as u64)
             .ok_or_else(|| io::Error::other("range overflow"))?;
         let loan = self.backing.reads.acquire(range.len() as u64)?;
+        self.backing
+            .source
+            .admit_read(range.len() as u64)
+            .map_err(io::Error::other)?;
         let mut bytes = vec![0; range.len()];
         let mut read = 0;
         while read < bytes.len() {

@@ -33,6 +33,8 @@ pub(super) struct Physical {
     header_version: [u64; 8],
     members_version: [u64; 8],
     readers_version: [u64; 8],
+    pub(super) input_reads: query::ReadAllowance,
+    input_limit: u64,
     // Actual descriptors/pins and all metadata above die before their one paid resource lifetime.
     _funding: Work,
 }
@@ -63,13 +65,18 @@ fn same(a: &File, b: &File) -> Result<bool> {
     let b = b.metadata()?;
     Ok((a.dev(), a.ino()) == (b.dev(), b.ino()))
 }
-fn read_small(file: &File, mut check: impl FnMut() -> Result<()>) -> Result<Vec<u8>> {
+fn read_small(
+    file: &File,
+    mut check: impl FnMut() -> Result<()>,
+    admit: &impl Fn(u64) -> Result<()>,
+) -> Result<Vec<u8>> {
     check()?;
     let before = stamp(file)?;
     anyhow::ensure!(
         before[2] <= FRAME as u64,
         "tuple metadata frame exceeds existing format"
     );
+    admit(before[2])?;
     let mut bytes = vec![0; usize::try_from(before[2])?];
     file.read_exact_at(&mut bytes, 0)?;
     check()?;
@@ -77,16 +84,18 @@ fn read_small(file: &File, mut check: impl FnMut() -> Result<()>) -> Result<Vec<
     Ok(bytes)
 }
 impl Physical {
-    pub(super) fn member_exists(
+    pub(super) fn member_exists_admitted(
         &self,
         name: &str,
         mut check: impl FnMut() -> Result<()>,
+        admit: &impl Fn(u64) -> Result<()>,
     ) -> Result<bool> {
         self.check()?;
         let mut offset = 0;
         while offset < self.members_version[2] {
             check()?;
-            let (member, next) = read_frame::<tuple::Member>(&self.members, offset)?;
+            let (member, next) =
+                read_frame_admitted::<tuple::Member>(&self.members, offset, admit)?;
             offset = next;
             if member.name == name {
                 self.check()?;
@@ -97,16 +106,28 @@ impl Physical {
         self.check()?;
         Ok(false)
     }
+    #[cfg(test)]
     pub(super) fn open_verified(
         &self,
         name: &str,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<File> {
+        self.open_verified_admitted(name, check, &|n| {
+            self.input_reads.admit(n, self.input_limit)
+        })
+    }
+    pub(super) fn open_verified_admitted(
+        &self,
+        name: &str,
         mut check: impl FnMut() -> Result<()>,
+        admit: &impl Fn(u64) -> Result<()>,
     ) -> Result<File> {
         self.check()?;
         let mut offset = 0;
         while offset < self.members_version[2] {
             check()?;
-            let (member, next) = read_frame::<tuple::Member>(&self.members, offset)?;
+            let (member, next) =
+                read_frame_admitted::<tuple::Member>(&self.members, offset, admit)?;
             offset = next;
             if member.name == name {
                 anyhow::ensure!(!member.directory, "tuple component is not a regular file");
@@ -165,7 +186,10 @@ impl Physical {
         let mut count = 0;
         while offset < self.members_version[2] {
             check()?;
-            let (member, next) = read_frame::<tuple::Member>(&self.members, offset)?;
+            let (member, next) =
+                read_frame_admitted::<tuple::Member>(&self.members, offset, &|n| {
+                    self.input_reads.admit(n, self.input_limit)
+                })?;
             let file = tuple::open_member(&self.stage, &member.name)?;
             let metadata = file.metadata()?;
             anyhow::ensure!(
@@ -246,11 +270,23 @@ impl NativeTupleRead {
         }
     }
     pub(super) fn part(&self, offset: u64) -> Result<Option<(TuplePart, u64)>> {
-        self.check()?;
-        let file = Arc::new(
+        self.part_admitted(offset, &|n| {
             self.physical
-                .open_verified("sources.rows", || self.check())?,
-        );
+                .input_reads
+                .admit(n, self.physical.input_limit)
+        })
+    }
+    pub(super) fn part_admitted(
+        &self,
+        offset: u64,
+        admit: &impl Fn(u64) -> Result<()>,
+    ) -> Result<Option<(TuplePart, u64)>> {
+        self.check()?;
+        let file = Arc::new(self.physical.open_verified_admitted(
+            "sources.rows",
+            || self.check(),
+            admit,
+        )?);
         let version = stamp(&file)?;
         if offset == version[2] {
             return Ok(None);
@@ -259,7 +295,7 @@ impl NativeTupleRead {
             offset < version[2],
             "source cursor is outside selected tuple"
         );
-        let (data, next) = read_frame::<SourcePart>(&file, offset)?;
+        let (data, next) = read_frame_admitted::<SourcePart>(&file, offset, admit)?;
         self.check()?;
         anyhow::ensure!(
             stamp(&file)? == version,
@@ -422,6 +458,8 @@ impl NativeLibraryService {
             "tuple Query selection/budget differs"
         );
         let max_bytes = query.budget.max_bytes.get();
+        let input_reads = query::ReadAllowance::new(0);
+        let admit = |n| input_reads.admit(n, max_bytes);
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(query.budget.max_millis.get()))
             .context("tuple query deadline overflow")?;
@@ -459,8 +497,7 @@ impl NativeLibraryService {
         }
         let pointer_file = open(&namespace, "CURRENT", false)?;
         let pointer_version = stamp(&pointer_file)?;
-        let bytes = read_small(&pointer_file, &check)?;
-        let mut spent = bytes.len() as u64;
+        let bytes = read_small(&pointer_file, &check, &admit)?;
         let pointer: selection::Pointer = serde_json::from_slice(&bytes)?;
         drop(bytes);
         anyhow::ensure!(
@@ -501,10 +538,7 @@ impl NativeLibraryService {
             stamp(&header)? == pointer.header_version,
             "selected tuple header identity/version differs"
         );
-        let bytes = read_small(&header, &check)?;
-        spent = spent
-            .checked_add(bytes.len() as u64)
-            .context("tuple read bytes overflow")?;
+        let bytes = read_small(&header, &check, &admit)?;
         anyhow::ensure!(
             hex::encode(Sha256::digest(&bytes)) == pointer.header_sha256,
             "whole tuple header checksum differs"
@@ -534,14 +568,7 @@ impl NativeLibraryService {
             members_version[2] == data.members_length,
             "whole tuple member length differs"
         );
-        spent = spent
-            .checked_add(data.members_length)
-            .and_then(|n| n.checked_add(data.members_length))
-            .context("tuple metadata read bound overflow")?;
-        anyhow::ensure!(
-            spent <= max_bytes,
-            "actual Query metadata byte budget exhausted"
-        );
+        admit(data.members_length)?;
         anyhow::ensure!(
             tuple::hash(&members, &check)? == data.members_sha256,
             "whole tuple member manifest checksum differs"
@@ -568,6 +595,8 @@ impl NativeLibraryService {
             pointer,
             data,
             readers_version,
+            input_reads,
+            input_limit: max_bytes,
             _funding: inputs.funding.take().expect("actual paid reader lifetime"),
         });
         let reader = NativeTupleRead {

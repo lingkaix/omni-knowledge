@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 #[path = "inventory_corpus_query.rs"]
 mod query;
 pub use query::{
-    NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeTupleQuery,
+    NativeBm25Run, NativePartitionResult, NativeQueryLibrary, NativeQueryLoans,
+    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeTupleQuery,
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;
@@ -1285,9 +1285,21 @@ fn frame_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     bytes.extend_from_slice(&data);
     Ok(bytes)
 }
+#[cfg(test)]
+thread_local! {static TEST_FRAME_READ_BYTES:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};}
 fn read_frame<T: serde::de::DeserializeOwned>(file: &File, offset: u64) -> Result<(T, u64)> {
+    read_frame_admitted(file, offset, &|_| Ok(()))
+}
+fn read_frame_admitted<T: serde::de::DeserializeOwned>(
+    file: &File,
+    offset: u64,
+    admit: &impl Fn(u64) -> Result<()>,
+) -> Result<(T, u64)> {
+    admit(4)?;
     let mut len = [0; 4];
     file.read_exact_at(&mut len, offset)?;
+    #[cfg(test)]
+    TEST_FRAME_READ_BYTES.with(|count| count.set(count.get() + 4));
     let n = u32::from_le_bytes(len) as usize;
     anyhow::ensure!(n <= FRAME, "native metadata frame too large");
     let next = offset
@@ -1295,8 +1307,11 @@ fn read_frame<T: serde::de::DeserializeOwned>(file: &File, offset: u64) -> Resul
         .and_then(|v| v.checked_add(n as u64))
         .context("metadata frame overflow")?;
     anyhow::ensure!(next <= file.metadata()?.len(), "incomplete metadata frame");
+    admit(n as u64)?;
     let mut data = vec![0; n];
     file.read_exact_at(&mut data, offset + 4)?;
+    #[cfg(test)]
+    TEST_FRAME_READ_BYTES.with(|count| count.set(count.get() + n as u64));
     Ok((serde_json::from_slice(&data)?, next))
 }
 fn text_windows(text: &str) -> impl Iterator<Item = &str> {

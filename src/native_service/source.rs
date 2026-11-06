@@ -13,6 +13,17 @@ thread_local! {static TEST_HASH_READS:std::cell::Cell<u64>=const{std::cell::Cell
 
 type CachedOriginalCheck = Arc<dyn Fn(&File) -> Result<()> + Send + Sync>;
 
+/// Actual original-file ineligibility, distinct from policy/Claim/model/cache failures.
+/// Native controllers may preserve approved metadata but must omit this source before statistics.
+#[derive(Debug)]
+pub(super) struct CachedQuerySourceUnavailable;
+impl std::fmt::Display for CachedQuerySourceUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cached original unavailable or changed; reconcile before payload query")
+    }
+}
+impl std::error::Error for CachedQuerySourceUnavailable {}
+
 /// An actual selected source descriptor, policy/version guard and prepaid native delivery lifetime.
 /// Keep this carrier (or its Delivery) until the last controllable output write settles.
 pub struct NativeSource {
@@ -136,9 +147,17 @@ impl NativeSource {
             .map_err(refused_error)?;
         let path = wire::RelativePath::new(observed.observation().stat.path.as_str())?;
         permit.check_path(library, &path).map_err(refused_error)?;
+        // Keep outer native scope/policy failures distinct from an actual confined original
+        // open refusal. Only the latter is an eligible-view omission, never a new read grant.
         let file = permit
-            .with_root(library, |root| LibraryHost::open_root(root, path.as_str()))
-            .map_err(refused_error)?;
+            .with_root(library, |root| {
+                Ok(LibraryHost::open_root(root, path.as_str()))
+            })
+            .map_err(refused_error)?
+            .map_err(|code| {
+                anyhow::Error::new(CachedQuerySourceUnavailable)
+                    .context(format!("actual original open refused: {code:?}"))
+            })?;
         let before = file.metadata()?;
         let actual = [
             before.dev(),
@@ -150,10 +169,9 @@ impl NativeSource {
             before.ctime_nsec() as u64,
             before.nlink(),
         ];
-        anyhow::ensure!(
-            before.is_file() && actual == original_version,
-            "cached source original version is stale; no synchronous query rehash"
-        );
+        if !before.is_file() || actual != original_version {
+            return Err(CachedQuerySourceUnavailable.into());
+        }
         observed.check_file(&file)?;
         dependency(&file)?;
         LibraryHost::track_version(library, path.as_str(), &file, &before, permit)

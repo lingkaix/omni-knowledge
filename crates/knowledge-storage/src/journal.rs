@@ -118,7 +118,10 @@ pub(crate) struct Journal {
     /// Finite caller memory-derived record ceiling, not a durable format quota.
     max: u64,
     /// Reuse bounded sequential buffering; random proof/tail I/O explicitly invalidates it.
-    replay: Option<BufReader<File>>,
+    replay: Option<BufReader<std::io::Take<File>>>,
+    // One call's existing data ceiling, including native read-ahead and predecessor inspection.
+    read_remaining: u64,
+    read_total: u64,
     /// Exact next logical replay offset, independent of buffered read-ahead.
     replay_next: u64,
     /// Actual sequence continuity through this exact sequential replay.
@@ -134,6 +137,8 @@ impl Journal {
             replay: None,
             replay_next: 0,
             replay_sequence: None,
+            read_remaining: u64::MAX,
+            read_total: 0,
         };
         j.last_sequence()?;
         Ok(j)
@@ -166,7 +171,25 @@ impl Journal {
             replay: None,
             replay_next: 0,
             replay_sequence: None,
+            read_remaining: u64::MAX,
+            read_total: 0,
         })
+    }
+    /// A fresh readonly replay keeps the same native FD/parser, with a limit BELOW BufReader.
+    /// std::io::Take caps actual syscalls, not just decoded cursors; no replacement IO engine.
+    pub(crate) fn read_bounded(
+        dir: &File,
+        writer: &str,
+        max: u64,
+        bytes: u64,
+    ) -> Result<Self, Error> {
+        let mut journal = Self::read(dir, writer, max)?;
+        journal.read_remaining = bytes;
+        Ok(journal)
+    }
+    /// Native buffered read counts; a failed predecessor read keeps its full conservative spend.
+    pub(crate) fn read_bytes(&self) -> u64 {
+        self.read_total
     }
     /// Report a tail problem without discarding earlier verifiable operation evidence.
     pub(crate) fn issue(&mut self) -> Option<Error> {
@@ -439,6 +462,11 @@ impl Journal {
             return Ok(None);
         }
         let length = offset.min(max.checked_add(1).ok_or(Error::Budget)?);
+        if length > self.read_remaining {
+            return Err(Error::Budget);
+        }
+        self.read_remaining -= length;
+        self.read_total = self.read_total.checked_add(length).ok_or(Error::Budget)?;
         self.file
             .seek(SeekFrom::Start(offset - length))
             .map_err(|_| Error::Io)?;
@@ -498,18 +526,45 @@ impl Journal {
                 .map_err(|_| Error::Io)?;
             self.replay = Some(BufReader::with_capacity(
                 8192,
-                self.file.try_clone().map_err(|_| Error::Io)?,
+                self.file
+                    .try_clone()
+                    .map_err(|_| Error::Io)?
+                    .take(self.read_remaining),
             ));
         }
         let mut bytes = Vec::new();
-        self.replay
+        let before = self
+            .replay
+            .as_ref()
+            .ok_or(Error::Recovery)?
+            .get_ref()
+            .limit();
+        let result = self
+            .replay
             .as_mut()
             .ok_or(Error::Recovery)?
             .take(length)
-            .read_until(b'\n', &mut bytes)
-            .map_err(|_| Error::Io)?;
+            .read_until(b'\n', &mut bytes);
+        let after = self
+            .replay
+            .as_ref()
+            .ok_or(Error::Recovery)?
+            .get_ref()
+            .limit();
+        let read = before.checked_sub(after).ok_or(Error::Recovery)?;
+        self.read_remaining = self
+            .read_remaining
+            .checked_sub(read)
+            .ok_or(Error::Recovery)?;
+        self.read_total = self.read_total.checked_add(read).ok_or(Error::Budget)?;
+        result.map_err(|_| Error::Io)?;
         if bytes.last() != Some(&b'\n') {
+            let exhausted = self.read_remaining == 0
+                && self.file.stream_position().map_err(|_| Error::Io)? < end;
             self.replay = None;
+            if exhausted {
+                return Err(Error::Budget);
+            }
             return Err(if length == end - offset {
                 Error::Recovery
             } else {
