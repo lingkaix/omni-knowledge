@@ -38,6 +38,16 @@ impl MockService {
 
     /// Starts a service with independently controlled advertised model identity.
     fn with_models(health: Value, models: Value, embedding: Value, delay: Duration) -> Self {
+        Self::with_accepted_mode(health, models, embedding, delay, false)
+    }
+    /// Force the inherited descriptor state on every platform for a real transport regression.
+    fn with_accepted_mode(
+        health: Value,
+        models: Value,
+        embedding: Value,
+        delay: Duration,
+        inherited_nonblocking: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -51,6 +61,12 @@ impl MockService {
                     thread::sleep(Duration::from_millis(5));
                     continue;
                 };
+                if inherited_nonblocking {
+                    stream.set_nonblocking(true).unwrap();
+                }
+                // Accepted flags are platform-dependent. This finite, joined fixture reads with
+                // timeouts; WouldBlock is NOT a complete request or EOF.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -61,6 +77,9 @@ impl MockService {
                         break;
                     }
                     request.push(byte[0]);
+                }
+                if !request.ends_with(b"\r\n\r\n") {
+                    continue;
                 }
                 let headers = String::from_utf8_lossy(&request);
                 let first = headers.lines().next().unwrap_or_default();
@@ -83,7 +102,9 @@ impl MockService {
                     .unwrap_or(0);
                 let mut discarded = vec![0; length];
                 if length > 0 {
-                    let _ = stream.read_exact(&mut discarded);
+                    if stream.read_exact(&mut discarded).is_err() {
+                        continue;
+                    }
                     let payload: Value = serde_json::from_slice(&discarded).unwrap();
                     assert_eq!(payload["model"], EmbeddingConfig::default().model);
                     if let Some(content) = payload["messages"][0]["content"].as_array() {
@@ -141,6 +162,32 @@ impl Drop for MockService {
             thread.join().unwrap();
         }
     }
+}
+
+#[test]
+fn inherited_nonblocking_socket_waits_for_complete_http_request() {
+    let service =
+        MockService::with_accepted_mode(health(), models(), embedding(), Duration::ZERO, true);
+    let mut socket =
+        std::net::TcpStream::connect(service.endpoint.strip_prefix("http://").unwrap()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    socket.write_all(b"GET /health HTTP/1.1\r\nHost: ").unwrap();
+    let mut byte = [0u8; 1];
+    let early = socket.peek(&mut byte);
+    assert!(
+        matches!(early,Err(ref e) if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut)),
+        "incomplete HTTP request must not cause a response, EOF or reset: {early:?}"
+    );
+    socket.write_all(b"localhost\r\n\r\n").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(service.requests.lock().unwrap().as_slice(), ["GET /health"]);
 }
 
 /// Builds a compatible ready health record from the configured package identity.
