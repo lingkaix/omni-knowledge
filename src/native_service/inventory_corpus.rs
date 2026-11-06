@@ -36,6 +36,8 @@ pub enum NativeCorpusProgress {
     Prepared { sources: u64, shards: u64 },
     /// Actual saved representations produced a prepared, unselected vector component.
     VectorsPrepared { rows: u64 },
+    /// Actual existing credit immediately before a tape/catalog append; DATA, never a grant.
+    WriteAdmitted { bytes: u64, available: u64 },
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct SourcePart {
@@ -469,6 +471,16 @@ impl NativeCorpusDraft {
             Err(cause) => Err(self.error(cause)),
         }
     }
+    fn write_checkpoint(&self, input: Option<&NativeIndexInput>) -> Result<()> {
+        if let Some(input) = input {
+            input.source()?;
+            self.job.cause.check()?;
+            self.files.as_ref().context("actual destination")?.check()?;
+            Ok(())
+        } else {
+            self.check()
+        }
+    }
     fn wait_growth(
         &mut self,
         bytes: u64,
@@ -479,23 +491,22 @@ impl NativeCorpusDraft {
             .checked_add(METADATA_DISK)
             .context("generated metadata peak overflow")?;
         loop {
-            if let Some(input) = input {
-                input.source()?;
-                self.job.cause.check()?;
-                self.files.as_ref().context("actual destination")?.check()?;
-            } else {
-                self.check()?;
-            }
+            self.write_checkpoint(input)?;
             let work = self.work.as_mut().context("actual corpus metadata owner")?;
             let remaining = work.remaining()?.temporary_bytes;
             if remaining >= bytes {
+                progress(NativeCorpusProgress::WriteAdmitted {
+                    bytes: bytes - METADATA_DISK,
+                    available: remaining,
+                });
+                self.write_checkpoint(input)?; // An observer can request cancellation or change the selected context.
                 return Ok(());
             }
             match work.grow(Reservation {
                 memory_bytes: 0,
                 temporary_bytes: bytes - remaining,
             })? {
-                Decision::Ready(()) => return Ok(()),
+                Decision::Ready(()) => continue,
                 Decision::Waiting(reason) => {
                     progress(NativeCorpusProgress::Waiting(reason));
                     std::thread::sleep(Duration::from_millis(10));

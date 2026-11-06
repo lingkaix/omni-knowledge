@@ -201,7 +201,8 @@ impl NativeInventory {
             "native inventory page is not fully prepaid"
         );
         self.owner.policy.0.lease.check().map_err(refused_error)?;
-        let replay = self.owner.store.replay_tracking(
+        let replay = self.owner.store.replay_tracking_readonly(
+            &self.owner.mount,
             offset,
             &Preflight {
                 holding: &funding,
@@ -223,53 +224,36 @@ impl NativeInventory {
     }
 }
 impl NativeLibraryService {
-    /// Consume the actual Refresh intention through M1 before full-corpus processing.
-    /// Native Owner selects the text layout; no source/read grant implies raw-original writes.
-    /// Context and scan scratch are BOTH already prepaid in the ONE account before inspection.
-    /// Old inventory/source handles are revoked by selection/policy/model epoch changes.
-    pub fn reconcile_inventory(
+    // One root/policy/copy-quote path for actual Refresh and actual readonly Query intent.
+    fn inventory_bindings(
         &self,
         owner: &Owner,
-        permit: Permit,
+        permit: &Permit,
         text_root: &str,
-        context_funding: Holding,
-        preflight: &Preflight<'_>,
-    ) -> Result<(NativeInventory, Reconciled)> {
-        let context_funding = InventoryCredit(Some(context_funding));
-        anyhow::ensure!(
-            context_funding.remaining()?.memory_bytes >= 1024 * 1024,
-            "native inventory context is not prepaid"
-        );
-        let wire::Command::Refresh {
-            library_id,
-            verification,
-            budget,
-            ..
-        } = permit.admitted_command().map_err(refused_error)?
-        else {
-            bail!("M1 inventory requires the actual Refresh command");
-        };
-        anyhow::ensure!(
-            library_id == &self.library,
-            "inventory library differs from command"
-        );
-        let requested = preflight.budget;
-        anyhow::ensure!(
-            requested.max_files <= budget.max_files.get()
-                && requested.max_bytes <= budget.max_bytes.get()
-                && requested.max_millis <= budget.max_millis.get()
-                && requested.max_memory_bytes <= budget.max_memory_bytes.get(),
-            "inventory scan exceeds the actual Refresh budget"
-        );
+        context_funding: &InventoryCredit,
+        writing: bool,
+    ) -> Result<(
+        Store<InventoryPolicy>,
+        LocalMount<InventoryPolicy>,
+        InventoryPolicy,
+    )> {
         anyhow::ensure!(
             matches!(text_root, "pages" | "wiki"),
             "invalid native text layout"
         );
-        let verify_bytes = *verification == wire::Verification::FullHash;
+        let intent = permit.admitted_command().map_err(refused_error)?;
+        anyhow::ensure!(
+            if writing {
+                matches!(intent,wire::Command::Refresh{library_id,..} if library_id==&self.library)
+            } else {
+                matches!(intent,wire::Command::Query{query} if query.library_ids.contains(&self.library))
+            },
+            "actual matching inventory intent required"
+        );
         let lease = owner
             .pin_selection(&self.selection)
             .map_err(refused_error)?;
-        lease.check_permit(&permit).map_err(refused_error)?;
+        lease.check_permit(permit).map_err(refused_error)?;
         let host = self
             .host
             .lock()
@@ -300,7 +284,11 @@ impl NativeLibraryService {
                     .and_then(|n| n.checked_add(1024 * 1024))
                     .ok_or(wire::ErrorCode::BudgetExhausted)?;
                 if context_funding.remaining().map_err(refused)?.memory_bytes < needed
-                    || actual.mode != wire::ExposureMode::ReadWrite
+                    || (if writing {
+                        actual.mode != wire::ExposureMode::ReadWrite
+                    } else {
+                        actual.mode == wire::ExposureMode::Off
+                    })
                 {
                     return Err(wire::ErrorCode::BudgetExhausted);
                 }
@@ -308,7 +296,7 @@ impl NativeLibraryService {
                     library_id: self.library.as_str().into(),
                     revision,
                     text_root: text_root.into(),
-                    writable: true,
+                    writable: writing,
                     raw_original_writes: false,
                     outside_scope: actual
                         .excluded_paths
@@ -359,6 +347,169 @@ impl NativeLibraryService {
             policy.clone(),
         )?;
         drop(host);
+        Ok((store, mount, policy))
+    }
+    /// Bind an existing complete M1 snapshot under actual Query read intent, without filesystem
+    /// reconciliation, journal creation/upgrade, or a manufactured writable policy. Scan labels grant nothing.
+    /// Context/replay scratch are prepaid; existing checkpoint evidence and total read bounds are checked.
+    /// The caller retains the borrowed actual Query owner through subsequent paging and delivery.
+    pub fn inventory_for_query(
+        &self,
+        owner: &Owner,
+        permit: &Permit,
+        text_root: &str,
+        scan: &str,
+        context_funding: Holding,
+        preflight: &Preflight<'_>,
+    ) -> Result<NativeInventory> {
+        let context_funding = InventoryCredit(Some(context_funding));
+        anyhow::ensure!(
+            context_funding.remaining()?.memory_bytes >= 1024 * 1024,
+            "native query inventory context is not prepaid"
+        );
+        anyhow::ensure!(
+            scan.len() <= 128 && uuid::Uuid::parse_str(scan).is_ok(),
+            "invalid snapshot scan identity data"
+        );
+        let wire::Command::Query { query } = permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("actual Query required")
+        };
+        let requested = preflight.budget;
+        anyhow::ensure!(
+            requested.max_files <= query.budget.max_files.get()
+                && requested.max_bytes <= query.budget.max_bytes.get()
+                && requested.max_millis <= query.budget.max_millis.get()
+                && requested.max_memory_bytes <= query.budget.max_memory_bytes.get(),
+            "query inventory read exceeds actual Query budget"
+        );
+        let (store, mount, policy) =
+            self.inventory_bindings(owner, permit, text_root, &context_funding, false)?;
+        let root = mount.root_identity()?;
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(requested.max_millis))
+            .context("read inventory deadline")?;
+        let mut offset = 0u64;
+        let mut bytes = 0u64;
+        let mut records = 0u64;
+        let mut found = false;
+        loop {
+            permit.check().map_err(refused_error)?;
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "query inventory deadline elapsed"
+            );
+            let replay = store.replay_tracking_readonly(&mount, offset, preflight)?;
+            anyhow::ensure!(
+                replay.issue.is_none(),
+                "query inventory evidence requires recovery"
+            );
+            bytes = bytes
+                .checked_add(
+                    replay
+                        .next_offset
+                        .checked_sub(offset)
+                        .context("query inventory cursor regressed")?,
+                )
+                .context("query inventory bytes overflow")?;
+            records = records
+                .checked_add(
+                    (replay.observations.len()
+                        + replay.checkpoints.len()
+                        + replay.event_cursors.len()) as u64,
+                )
+                .context("query inventory records overflow")?;
+            anyhow::ensure!(
+                bytes <= requested.max_bytes && records <= requested.max_files,
+                "query inventory evidence budget exhausted"
+            );
+            for checkpoint in &replay.checkpoints {
+                if checkpoint.scan == scan {
+                    anyhow::ensure!(
+                        checkpoint.complete
+                            && checkpoint.root == root
+                            && checkpoint.backend == mount.context(),
+                        "incomplete/foreign snapshot checkpoint"
+                    );
+                    found = true;
+                }
+            }
+            if replay.complete {
+                break;
+            }
+            anyhow::ensure!(
+                replay.next_offset > offset,
+                "query inventory replay did not advance"
+            );
+            offset = replay.next_offset;
+        }
+        anyhow::ensure!(
+            found,
+            "selected query snapshot has no actual complete M1 checkpoint"
+        );
+        permit.check().map_err(refused_error)?;
+        Ok(NativeInventory {
+            owner: Arc::new(InventoryOwner {
+                store,
+                mount,
+                policy,
+                scan: scan.to_owned(),
+                root,
+                check_budget: Budget {
+                    max_files: 1,
+                    max_bytes: 128 * 1024,
+                    max_millis: requested.max_millis,
+                    max_memory_bytes: 128 * 1024,
+                },
+                _funding: context_funding,
+            }),
+        })
+    }
+    /// Consume the actual Refresh intention through M1 before full-corpus processing.
+    /// Native Owner selects the text layout; no source/read grant implies raw-original writes.
+    /// Context and scan scratch are BOTH already prepaid in the ONE account before inspection.
+    /// Old inventory/source handles are revoked by selection/policy/model epoch changes.
+    pub fn reconcile_inventory(
+        &self,
+        owner: &Owner,
+        permit: Permit,
+        text_root: &str,
+        context_funding: Holding,
+        preflight: &Preflight<'_>,
+    ) -> Result<(NativeInventory, Reconciled)> {
+        let context_funding = InventoryCredit(Some(context_funding));
+        anyhow::ensure!(
+            context_funding.remaining()?.memory_bytes >= 1024 * 1024,
+            "native inventory context is not prepaid"
+        );
+        let wire::Command::Refresh {
+            library_id,
+            verification,
+            budget,
+            ..
+        } = permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("M1 inventory requires the actual Refresh command");
+        };
+        anyhow::ensure!(
+            library_id == &self.library,
+            "inventory library differs from command"
+        );
+        let requested = preflight.budget;
+        anyhow::ensure!(
+            requested.max_files <= budget.max_files.get()
+                && requested.max_bytes <= budget.max_bytes.get()
+                && requested.max_millis <= budget.max_millis.get()
+                && requested.max_memory_bytes <= budget.max_memory_bytes.get(),
+            "inventory scan exceeds the actual Refresh budget"
+        );
+        anyhow::ensure!(
+            matches!(text_root, "pages" | "wiki"),
+            "invalid native text layout"
+        );
+        let verify_bytes = *verification == wire::Verification::FullHash;
+        let (store, mount, policy) =
+            self.inventory_bindings(owner, &permit, text_root, &context_funding, true)?;
         let root = mount.root_identity()?;
         let reconciled = store.reconcile_local(
             &mount,

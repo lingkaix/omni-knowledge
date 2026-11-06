@@ -114,6 +114,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         for mode in [
             "normal",
             "waiting",
+            "waiting-after-progress",
             "vectors",
             "vectors-source-change",
             "vectors-tape-change",
@@ -224,7 +225,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     .unwrap();
     let claim = account.queue().claim(Instant::now()).unwrap().unwrap();
     let number = claim.job();
-    let waiting = std::env::var("OMNI_CORPUS_MODE").unwrap() == "waiting";
+    let waiting = mode.starts_with("waiting");
     let mut test_metadata = holding(8 * 1024 * 1024, 0);
     let k = job.key();
     let facts = (
@@ -240,14 +241,40 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     let status = account.status().unwrap();
     let mut pressure = holding(
         status.memory_available,
-        if waiting { status.storage_available } else { 0 },
+        if waiting {
+            status
+                .storage_available
+                .saturating_sub(if mode == "waiting-after-progress" {
+                    64 * 1024
+                } else {
+                    0
+                })
+        } else {
+            0
+        },
     );
     let draft = job.begin_corpus(claim, &generated).unwrap();
     if waiting {
         let directory = draft.staging_directory().unwrap().try_clone().unwrap();
         let mut waits = 0;
+        let mut admitted_writes = 0;
+        let mut at_wait = None;
         let error = match draft.build_lexical(|event| {
+            if let NativeCorpusProgress::WriteAdmitted { bytes, available } = event {
+                assert!(available >= bytes + 64 * 1024);
+                admitted_writes += 1;
+            }
             if let NativeCorpusProgress::Waiting(reason) = event {
+                at_wait = Some((
+                    file_at(&directory, "representations.data")
+                        .metadata()
+                        .unwrap()
+                        .len(),
+                    file_at(&directory, "sources.rows")
+                        .metadata()
+                        .unwrap()
+                        .len(),
+                ));
                 assert_eq!(reason, knowledge_core::admission::Waiting::Storage);
                 waits += 1;
                 account
@@ -272,21 +299,28 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         };
         assert_eq!(
             waits, 1,
-            "actual Core waiting is visible BEFORE generated payload writes"
+            "actual Core waiting is visible BEFORE the append which requires its credit"
         );
+        let before = at_wait.expect("actual waiting boundary");
+        if mode == "waiting-after-progress" {
+            assert!(
+                before.0 > 0 && admitted_writes > 0,
+                "exercise actual previously prepaid successful appends, not an empty-corpus special case"
+            );
+        }
         assert_eq!(
-            file_at(&directory, "representations.data")
-                .metadata()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
-            file_at(&directory, "sources.rows")
-                .metadata()
-                .unwrap()
-                .len(),
-            0
+            (
+                file_at(&directory, "representations.data")
+                    .metadata()
+                    .unwrap()
+                    .len(),
+                file_at(&directory, "sources.rows")
+                    .metadata()
+                    .unwrap()
+                    .len()
+            ),
+            before,
+            "cancellation while Waiting cannot perform ANY additional payload or metadata append"
         );
         assert_eq!(account.status().unwrap().queue.unsettled, 1);
         drop(directory);
@@ -302,8 +336,13 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         return;
     }
     let mut reports = 0;
+    let mut admitted_writes = 0;
     let draft = draft
         .build_lexical(|event| {
+            if let NativeCorpusProgress::WriteAdmitted { bytes, available } = event {
+                assert!(available >= bytes + 64 * 1024);
+                admitted_writes += 1;
+            }
             if let NativeCorpusProgress::Prepared { .. } = event {
                 reports += 1;
             }
@@ -317,6 +356,11 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     let records = frames(file_at(draft.staging_directory().unwrap(), "sources.rows"));
     let catalog = frames(file_at(draft.staging_directory().unwrap(), "lexical.rows"));
     assert_eq!(catalog.len() as u64, shards);
+    assert_eq!(
+        admitted_writes,
+        count + records.len() as u64 + catalog.len() as u64,
+        "EVERY tape/source/catalog append must have the actual complete prepaid write event"
+    );
     let chunks: Vec<_> = records
         .iter()
         .filter(|v| v["document"]["key"]["id"] == expected)

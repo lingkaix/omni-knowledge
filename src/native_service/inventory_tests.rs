@@ -5,6 +5,8 @@ mod corpus;
 mod credit;
 #[path = "inventory_job_tests.rs"]
 mod job;
+#[path = "inventory_readonly_tests.rs"]
+mod readonly;
 use super::*;
 use crate::native_service::embedding_tests::{claim, digest, ready, server};
 use knowledge_core::admission::Account;

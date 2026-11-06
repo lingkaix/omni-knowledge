@@ -440,6 +440,50 @@ impl<P: WritePolicy> Store<P> {
     pub fn replay_tracking(&self, offset: u64, preflight: &Preflight<'_>) -> Result<Replay, Error> {
         let b = Bounds::new(preflight)?;
         let c = self.gate()?;
+        self.replay_tracking_checked(offset, preflight, &b, || self.live(&c))
+    }
+    /// Inspect an EXISTING journal under the actual selected backend's live read admission.
+    /// No writable context is fabricated, no journal/lane is created, and the fingerprint is DATA.
+    /// Caller prepays metadata/FD lifetimes and retains its actual native Query/selection owners.
+    pub fn replay_tracking_readonly<R: LocalReadPolicy>(
+        &self,
+        mount: &LocalMount<R>,
+        offset: u64,
+        preflight: &Preflight<'_>,
+    ) -> Result<Replay, Error> {
+        use std::os::unix::fs::MetadataExt;
+        let b = Bounds::new(preflight)?;
+        let admitted = mount
+            .read_scope(preflight.budget, preflight.holding)
+            .map_err(Error::Backend)?;
+        let backend = mount.context();
+        let root = mount.root_identity().map_err(Error::Backend)?;
+        let check = || {
+            native::bound(&self.path, &self.root)?;
+            let actual = self.root.metadata().map_err(|_| Error::Io)?;
+            if root != (actual.dev(), actual.ino())
+                || backend.library_id != self.library
+                || mount.root_identity().map_err(Error::Backend)? != root
+                || mount.context() != backend
+                || mount
+                    .read_scope(preflight.budget, preflight.holding)
+                    .map_err(Error::Backend)?
+                    != admitted
+            {
+                return Err(Error::Context);
+            }
+            Ok(())
+        };
+        self.replay_tracking_checked(offset, preflight, &b, check)
+    }
+    fn replay_tracking_checked(
+        &self,
+        offset: u64,
+        preflight: &Preflight<'_>,
+        b: &Bounds,
+        check: impl Fn() -> Result<(), Error>,
+    ) -> Result<Replay, Error> {
+        check()?;
         let lane = self.existing_lane()?;
         let mut journal = journal::Journal::read(&lane.journal, &self.writer, b.control())?;
         let mut observations = Vec::new();
@@ -454,6 +498,7 @@ impl<P: WritePolicy> Store<P> {
                 < preflight.budget.max_files
         {
             b.check()?;
+            check()?;
             match journal.next_tracking(cursor, b.control().min(b.memory / 64)) {
                 Ok(Some((next, item))) => {
                     consumed = consumed.checked_add(next - cursor).ok_or(Error::Budget)?;
@@ -492,7 +537,7 @@ impl<P: WritePolicy> Store<P> {
                 break;
             }
         }
-        self.live(&c)?;
+        check()?;
         Ok(Replay {
             observations,
             checkpoints,

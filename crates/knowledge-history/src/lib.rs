@@ -227,7 +227,14 @@ impl std::error::Error for Error {
 }
 impl From<std::io::Error> for Error {
     /// Classify I/O without leaking filesystem paths.
-    fn from(_: std::io::Error) -> Self {
+    fn from(error: std::io::Error) -> Self {
+        if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+            eprintln!(
+                "omni-native history io: kind={:?} errno={:?}",
+                error.kind(),
+                error.raw_os_error()
+            );
+        }
         Self::Io
     }
 }
