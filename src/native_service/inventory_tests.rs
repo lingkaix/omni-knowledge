@@ -1,6 +1,8 @@
 //! Actual canonical M1 journal/asset identity→native source→SAME Claim/M3/provider controls.
 #[path = "inventory_credit_tests.rs"]
 mod credit;
+#[path = "inventory_job_tests.rs"]
+mod job;
 use super::*;
 use crate::native_service::embedding_tests::{claim, digest, ready, server};
 use knowledge_core::admission::Account;

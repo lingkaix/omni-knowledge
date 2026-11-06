@@ -2750,7 +2750,10 @@ pub mod native_service {
         NativeIndexInput,
     };
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
-    pub use inventory::{NativeInventory, NativeInventoryPage, NativeObservedSource};
+    pub use inventory::{
+        NativeInventory, NativeInventoryPage, NativeObservedSource, NativeRefreshJob,
+        NativeRefreshScopeError,
+    };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;
     use knowledge_retrieval::Work;
