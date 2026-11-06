@@ -7,11 +7,11 @@ use knowledge_search::{
 };
 use std::{os::unix::fs::PermissionsExt, sync::atomic::Ordering};
 #[path = "../../crates/knowledge-processing/tests/support/embedding_server.rs"]
-mod server;
-fn digest(bytes: &[u8]) -> ContentDigest {
+pub(super) mod server;
+pub(super) fn digest(bytes: &[u8]) -> ContentDigest {
     ContentDigest::new(hex::encode(Sha256::digest(bytes))).unwrap()
 }
-fn ready(need: Reservation) -> Work {
+pub(super) fn ready(need: Reservation) -> Work {
     match Work::reserve(need, Origin::BeforeVerification).unwrap() {
         Decision::Ready(w) => w,
         _ => panic!("actual fixture admission"),
@@ -43,7 +43,11 @@ fn processing(
         .processing(recipe, digest(include_bytes!("embedding_tests.rs")))
         .unwrap()
 }
-fn claim(processing: &NativeProcessing, budget: Budget, id: &str) -> knowledge_core::jobs::Claim {
+pub(super) fn claim(
+    processing: &NativeProcessing,
+    budget: Budget,
+    id: &str,
+) -> knowledge_core::jobs::Claim {
     let job = processing
         .submit(NativeJobPlan {
             operation_id: id,

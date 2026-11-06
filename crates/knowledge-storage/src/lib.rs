@@ -354,6 +354,22 @@ impl<P: WritePolicy> Store<P> {
             return Err(Error::Invalid);
         }
         let root = native::bind(path)?;
+        Self::from_selected_directory(path, root, library, writer, policy)
+    }
+    /// Retain the native owner's actual already selected directory, never substitute a path reopen.
+    /// `path` is a current-namespace qualifier only; the live write policy still supplies authority.
+    /// The caller prepays this constructor and every descriptor/context lifetime before inspection.
+    pub fn from_selected_directory(
+        path: &Path,
+        root: File,
+        library: &str,
+        writer: &str,
+        policy: P,
+    ) -> Result<Self, Error> {
+        if library.is_empty() || !component(writer) {
+            return Err(Error::Invalid);
+        }
+        native::bound(path, &root)?;
         Ok(Self {
             path: path.to_owned(),
             root,

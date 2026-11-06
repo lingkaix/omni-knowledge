@@ -175,6 +175,8 @@ impl Drop for Scratch {
 pub(crate) struct Runtime {
     /// Actual unresolved process owner, not a transaction registry.
     pending: Mutex<Option<UnsettledChild>>,
+    /// One native installed provider per History owner; never reselect midway through effects.
+    git: std::sync::OnceLock<&'static str>,
 }
 
 /// Bounded actual native result, including nonzero status for verification/refusal classification.
@@ -188,6 +190,38 @@ pub(crate) struct Output {
 }
 
 impl Runtime {
+    /// Native host code selects an existing installed Git, not a remote/config/manifest executable.
+    /// Selection inspection is inside the SAME already paid call. On Darwin /usr/bin/git is a
+    /// developer-tools launcher: actual hosted observations show it spawning xcodebuild under the
+    /// owned Git group. Prefer the installed real tool without that unnecessary launcher work.
+    /// Retain this choice for the actual owner; disappearance refuses rather than switching engines.
+    pub(crate) fn git_program(&self, call: &Call) -> Result<&'static str, Error> {
+        call.check()?;
+        let program = self.git.get_or_init(|| {
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                for candidate in [
+                    "/opt/homebrew/bin/git",
+                    "/usr/local/bin/git",
+                    "/Library/Developer/CommandLineTools/usr/bin/git",
+                    "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+                ] {
+                    if std::fs::metadata(candidate)
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                    {
+                        if std::env::var_os("OMNI_NATIVE_TRACE").is_some() {
+                            eprintln!("omni-native selected installed Git: {candidate}");
+                        }
+                        return candidate;
+                    }
+                }
+            }
+            "/usr/bin/git"
+        });
+        call.check()?;
+        Ok(program)
+    }
     /// Inspect actual retained native identity/evidence without signalling it.
     pub fn pending(&self) -> Result<Option<(ProcessIdentity, Vec<PathBuf>)>, Error> {
         let slot = self.pending.try_lock().map_err(|_| Error::Busy)?;

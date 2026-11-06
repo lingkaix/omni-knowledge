@@ -400,8 +400,37 @@ fn process_limits() -> Result<()> {
     // the selected native budget on either OS; owned full-RSS observation is the active bound.
     set_limit(libc::RLIMIT_FSIZE, 512 * 1024 * 1024)?;
     cpu_limit()?;
+    // Darwin has no public cross-process getrlimit. Report ACTUAL readback from this same
+    // installed controller, not desired constants or a platform/cfg acceptance assertion.
+    eprintln!("{}", native_limits_summary()?);
     eprintln!("{}", self_vm_summary("installed"));
     Ok(())
+}
+/// Bounded native startup witness, kept off the request/response protocol.
+/// Linux acceptance cross-checks it against /proc; Darwin uses it for limits and libproc for
+/// the actual worker graph/resident sample. It grants no source/execution authority.
+fn native_limits_summary() -> Result<String> {
+    fn read(resource: Resource) -> Result<libc::rlimit> {
+        let mut limits: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: this exact process and a correctly sized caller-owned native output buffer.
+        if unsafe { libc::getrlimit(resource, &mut limits) } != 0 {
+            return Err(error("unavailable", "native resource readback unavailable"));
+        }
+        Ok(limits)
+    }
+    let address = read(libc::RLIMIT_AS)?;
+    let file = read(libc::RLIMIT_FSIZE)?;
+    let cpu = read(libc::RLIMIT_CPU)?;
+    Ok(format!(
+        "native_limits pid={} source=getrlimit as_soft={} as_hard={} fsize_soft={} fsize_hard={} cpu_soft={} cpu_hard={}",
+        std::process::id(),
+        address.rlim_cur,
+        address.rlim_max,
+        file.rlim_cur,
+        file.rlim_max,
+        cpu.rlim_cur,
+        cpu.rlim_max,
+    ))
 }
 /// Give each foreground request 65 CPU seconds; the cooperative wall ceiling is 60 seconds.
 fn cpu_limit() -> Result<()> {

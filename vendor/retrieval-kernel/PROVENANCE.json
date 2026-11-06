@@ -200,7 +200,7 @@
     {
       "path": "src/main.rs",
       "upstream_sha256": "0cdbe2ec86510d604c2a07ddc3e57850392daa4b04f4c8e836ed036688ddd892",
-      "vendored_sha256": "485a3e5d9467cf0d589f508685eed6a13dd2626cd63f68547f49add4e6738359"
+      "vendored_sha256": "260171005fbaa680dfa904604123e7acd50aa3096276cf7ae3655f4627578b1a"
     },
     {
       "path": "src/model.rs",
@@ -230,7 +230,7 @@
     {
       "path": "tests/faces.rs",
       "upstream_sha256": "8162feebba22f033ece5ac8362bda5f5b55e4e686c4bf6766f7649758feaf112",
-      "vendored_sha256": "cb87808230b4edffe2b29eba4126866628478b0145c29f2a446f1959340b98e7"
+      "vendored_sha256": "e415fa058260511cde2b502cf8346e603215b8850711399985a7489ab0ab767e"
     },
     {
       "path": "tests/image_notices_test.py",

@@ -164,23 +164,167 @@ fn local_service_contract_smoke_and_revocation_after_restart() {
     assert_eq!(revoked[0]["result"]["generations"], json!({}));
 }
 
+/// Even a failed observation keeps the actual controller in foreground until its owned worker drains.
+struct ResourceChild(std::process::Child);
+impl std::ops::Deref for ResourceChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ResourceChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for ResourceChild {
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        let mut reported = false;
+        loop {
+            match self.0.wait() {
+                Ok(_) => break,
+                Err(error) => {
+                    if !reported {
+                        eprintln!("resource controller collection remains foreground: {error}");
+                        reported = true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+/// Observe the actual Darwin child graph/resident bytes, never infer them from report IDs/EOF.
+#[cfg(target_os = "macos")]
+fn macos_worker_resident(parent: u32) -> u64 {
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_listchildpids(
+            parent: libc::pid_t,
+            buffer: *mut libc::c_void,
+            bytes: libc::c_int,
+        ) -> libc::c_int;
+    }
+    // Apple libproc.c divides proc_listpids's byte result: this wrapper returns a PID COUNT.
+    // Two slots detect any violation of the unchanged exactly-one-worker condition.
+    let mut children = [0i32; 2];
+    let count = unsafe {
+        proc_listchildpids(
+            parent as i32,
+            children.as_mut_ptr().cast(),
+            std::mem::size_of_val(&children) as i32,
+        )
+    };
+    assert_eq!(count, 1, "one actual owned pure-kernel worker");
+    let pid = children[0];
+    assert!(pid > 0);
+    let mut before: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let mut after: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let mut task: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    unsafe {
+        assert_eq!(
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut before).cast(),
+                std::mem::size_of_val(&before) as i32
+            ),
+            std::mem::size_of_val(&before) as i32
+        );
+        assert_eq!(
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                (&raw mut task).cast(),
+                std::mem::size_of_val(&task) as i32
+            ),
+            std::mem::size_of_val(&task) as i32
+        );
+        assert_eq!(
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut after).cast(),
+                std::mem::size_of_val(&after) as i32
+            ),
+            std::mem::size_of_val(&after) as i32
+        );
+    }
+    assert_eq!((before.pbi_pid, before.pbi_ppid), (pid as u32, parent));
+    assert_eq!(
+        (
+            after.pbi_pid,
+            after.pbi_ppid,
+            after.pbi_start_tvsec,
+            after.pbi_start_tvusec
+        ),
+        (
+            before.pbi_pid,
+            before.pbi_ppid,
+            before.pbi_start_tvsec,
+            before.pbi_start_tvusec
+        )
+    );
+    task.pti_resident_size
+}
 /// The executable enforces named OS ceilings before accepting a service request.
 #[test]
 fn executable_process_resource_limits() {
     let root = TempDir::new().unwrap();
     let store = TempDir::new().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_retrieval-kernel"))
-        .args([
-            "service",
-            "--sources",
-            root.path().to_str().unwrap(),
-            "--store",
-            store.path().to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
+    let mut child = ResourceChild(
+        Command::new(env!("CARGO_BIN_EXE_retrieval-kernel"))
+            .args([
+                "service",
+                "--sources",
+                root.path().to_str().unwrap(),
+                "--store",
+                store.path().to_str().unwrap(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    // Public Darwin has no cross-process getrlimit: read this controller's real startup witness.
+    // Linux ALSO checks the same values against its existing /proc observation below.
+    use std::io::{BufRead, Read};
+    let mut native_stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut witness = String::new();
+    native_stderr
+        .by_ref()
+        .take(1024)
+        .read_line(&mut witness)
         .unwrap();
+    assert!(witness.starts_with("native_limits ") && witness.ends_with('\n'));
+    let mut native = std::collections::BTreeMap::new();
+    for field in witness.split_whitespace().skip(1) {
+        let (key, value) = field.split_once('=').unwrap();
+        assert!(native.insert(key, value).is_none());
+    }
+    assert_eq!(native.len(), 8);
+    assert_eq!(native["source"], "getrlimit");
+    assert_eq!(native["pid"].parse::<u32>().unwrap(), child.id());
+    let mut inherited: libc::rlimit = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut inherited) },
+        0
+    );
+    assert_eq!(
+        native["as_soft"].parse::<u64>().unwrap(),
+        inherited.rlim_cur
+    );
+    assert_eq!(
+        native["as_hard"].parse::<u64>().unwrap(),
+        inherited.rlim_max
+    );
+    assert_eq!(native["fsize_soft"].parse::<u64>().unwrap(), 536870912);
+    assert_eq!(native["cpu_soft"].parse::<u64>().unwrap(), 65);
     let stdin = child.stdin.as_mut().unwrap();
     writeln!(
         stdin,
@@ -188,54 +332,62 @@ fn executable_process_resource_limits() {
         json!({"version":1,"id":1,"op":"inspect","scope":"empty"})
     )
     .unwrap();
-    use std::io::BufRead;
     let mut line = String::new();
     std::io::BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["version"], 1);
-    let limits = fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
-    let memory = limits
-        .lines()
-        .find(|l| l.starts_with("Max address space"))
-        .unwrap();
-    let caller_limits = fs::read_to_string("/proc/self/limits").unwrap();
-    assert_eq!(
-        memory,
-        caller_limits
+    #[cfg(target_os = "linux")]
+    {
+        let limits = fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
+        let memory = limits
             .lines()
-            .find(|line| line.starts_with("Max address space"))
-            .unwrap(),
-        "AS is not the native memory authority"
+            .find(|l| l.starts_with("Max address space"))
+            .unwrap();
+        let caller_limits = fs::read_to_string("/proc/self/limits").unwrap();
+        assert_eq!(
+            memory,
+            caller_limits
+                .lines()
+                .find(|line| line.starts_with("Max address space"))
+                .unwrap(),
+            "AS is not the native memory authority"
+        );
+        let children =
+            fs::read_to_string(format!("/proc/{}/task/{}/children", child.id(), child.id()))
+                .unwrap();
+        let owned: Vec<u32> = children
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(owned.len(), 1, "one actual owned pure-kernel worker");
+        let status = fs::read_to_string(format!("/proc/{}/status", owned[0])).unwrap();
+        assert!(status.lines().any(|line| {
+            line.starts_with("VmRSS:")
+                && line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    > 0
+        }));
+        let file = limits
+            .lines()
+            .find(|l| l.starts_with("Max file size"))
+            .unwrap();
+        assert!(file.contains("536870912"), "{file}");
+        let cpu = limits
+            .lines()
+            .find(|l| l.starts_with("Max cpu time"))
+            .unwrap();
+        assert!(cpu.split_whitespace().any(|v| v == "65"), "{cpu}");
+    }
+    #[cfg(target_os = "macos")]
+    assert!(
+        macos_worker_resident(child.id()) > 0,
+        "actual native worker resident bytes"
     );
-    let children =
-        fs::read_to_string(format!("/proc/{}/task/{}/children", child.id(), child.id())).unwrap();
-    let owned: Vec<u32> = children
-        .split_whitespace()
-        .map(|pid| pid.parse().unwrap())
-        .collect();
-    assert_eq!(owned.len(), 1, "one actual owned pure-kernel worker");
-    let status = fs::read_to_string(format!("/proc/{}/status", owned[0])).unwrap();
-    assert!(status.lines().any(|line| {
-        line.starts_with("VmRSS:")
-            && line
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<u64>()
-                .unwrap()
-                > 0
-    }));
-    let file = limits
-        .lines()
-        .find(|l| l.starts_with("Max file size"))
-        .unwrap();
-    assert!(file.contains("536870912"), "{file}");
-    let cpu = limits
-        .lines()
-        .find(|l| l.starts_with("Max cpu time"))
-        .unwrap();
-    assert!(cpu.split_whitespace().any(|v| v == "65"), "{cpu}");
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
 }

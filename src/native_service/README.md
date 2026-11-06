@@ -2,6 +2,14 @@
 
 Public types: `omni_knowledge::native_service::{NativeLibraryService, NativeSource, NativeProcessing, NativeJobPlan}`. Runtime/authority types remain in `omni_service::{runtime,authority}`. This is an additive native SDK surface, NOT another wire command, scheduler, pool, permission DTO, or competing writer.
 
+## Canonical M1 asset consumer
+
+`reconcile_inventory(owner, actual_refresh_permit, native_text_root, context_holding, &Preflight)` consumes the existing M1 Store/LocalMount with the **actual selected directory FDs** and current owner policy/exclusions. Both context and scan scratch are prepaid before inspection; legacy homes require explicit durable library identity upgrade. Actual `StatFirst` remains metadata-only; actual `FullHash` requests bounded verification. Child-owned homes and native bookkeeping are outside the parent source inventory.
+
+`inventory.page(actual_offset, budget, holding)` retains one bounded actual journal page. Follow `next_offset`/progress/issue/EOF, not an assumed first-page corpus. Consuming `page.into_sources()` yields opaque `NativeObservedSource` handles ONLY for that complete durable scan; the real page/context credit survives their last dependent source/delivery. Decoded observations/UUIDs do not construct them.
+
+`source_for_observed(&actual_permit, observed, verification_budget)` checks actual Process/Refresh intention before body access and binds M1's independent UUID to the existing exact native FD. Current backend metadata must also match that SAME FD, not an equal-byte replacement. Process selects its exact UUID; Refresh extraction is allowed, but provider transmission requires actual `embeddings:true` (or Process/Embed). The SAME actual Refresh frame is supported without recursive guards/pin cycles. This consumer does **not** activate complete application startup/Refresh jobs or replace compatibility resident Root search/browse. See `docs/changes/2026-11-06-native-inventory-source-consumer.md`.
+
 ## Source and current context
 
 1. Keep the actual native `Session` from `NativeLibraryService::connect`, with real transport observations. `native_scope(&session, &existing_command, approval)` uses the SAME 47-command routing/native approval/read-policy checks and real frame holding as dispatch. It starts no effect. Domain hosts may instead use their existing dispatcher `&Permit`.
@@ -110,4 +118,4 @@ For an EXISTING v1 `Response`, `source.into_delivery(response)` moves the same g
 
 `native_source_real_claim_key_and_delivery_bridge` executes real descriptor hash/version binding, two visible jobs while one is running, actual EEE funded-FD extraction, whole-value destruction before exact rejoin, terminal/stopped claim refusal, native queue settlement and source-change refusal after encoding. Original seven native controls remain active.
 
-This compiled boundary does not certify the consumer's five caller repairs, close consequential rereview of the three 9ed findings, or activate native M6. Full Root disk vectors, generic archive Directory consumption, full-corpus streaming and native macOS evidence remain required. No waiting for FSEvents and no host inotify changes/suppression are part of this slice.
+This compiled boundary does not certify the consumer's five caller repairs, close consequential rereview of the three 9ed findings, or activate native M6. Generic held-archive lexical/vector IO and native provider ownership have separate qualified controls; full Root disk-vector/query activation, full-corpus streaming/complete generation selection and full native macOS acceptance remain required. No waiting for FSEvents and no host inotify changes/suppression are part of this slice.

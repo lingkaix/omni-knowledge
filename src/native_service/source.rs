@@ -11,11 +11,12 @@ use knowledge_processing::funding::Funding;
 /// An actual selected source descriptor, policy/version guard and prepaid native delivery lifetime.
 /// Keep this carrier (or its Delivery) until the last controllable output write settles.
 pub struct NativeSource {
-    file: File,
+    file: std::sync::Arc<File>,
     library: wire::Id,
     path: wire::RelativePath,
     context: String,
     source: String,
+    wire_source: wire::Id,
     version: ContentDigest,
     permit: Permit,
 }
@@ -24,27 +25,27 @@ impl NativeSource {
     /// never a status/browse permit, caller boolean or naked source ID.
     pub(super) fn indexed_extract_scope(&self, claim: &Claim, max_bytes: usize) -> Result<()> {
         self.check()?;
-        let wire::Command::Process {
-            library_id,
-            source_ids,
-            recipe,
-            budget,
-            ..
-        } = self.permit.admitted_command().map_err(refused_error)?
-        else {
-            bail!("native index input requires the actual Process command");
-        };
-        anyhow::ensure!(
-            library_id == &self.library
+        let budget = match self.permit.admitted_command().map_err(refused_error)? {
+            wire::Command::Process {
+                library_id,
+                source_ids,
+                recipe,
+                budget,
+                ..
+            } if library_id == &self.library
                 && matches!(
                     *recipe,
                     wire::ProcessRecipe::Extract | wire::ProcessRecipe::Embed
                 )
-                && source_ids
-                    .iter()
-                    .any(|id| id.as_str().strip_prefix("source-") == Some(self.source.as_str())),
-            "native processing source/recipe differs from admitted command"
-        );
+                && source_ids.contains(&self.wire_source) =>
+            {
+                budget
+            }
+            wire::Command::Refresh {
+                library_id, budget, ..
+            } if library_id == &self.library => budget,
+            _ => bail!("native processing source/recipe differs from admitted command"),
+        };
         let actual = claim.budget();
         anyhow::ensure!(
             max_bytes as u64 <= budget.max_bytes.get()
@@ -64,9 +65,12 @@ impl NativeSource {
                 wire::Command::Process {
                     recipe: wire::ProcessRecipe::Embed,
                     ..
+                } | wire::Command::Refresh {
+                    embeddings: true,
+                    ..
                 }
             ),
-            "actual Process/Embed intention required before transmitting source text"
+            "actual Process/Embed or Refresh/embeddings intention required before transmitting text"
         );
         Ok(())
     }
@@ -159,14 +163,47 @@ impl NativeSource {
         }
         let version = ContentDigest::new(hex::encode(hash.finalize()))?;
         Ok(Self {
-            file,
+            file: std::sync::Arc::new(file),
             library: library.clone(),
             path: path.clone(),
             context,
             source: hex::encode(Sha256::digest(path.as_str().as_bytes())),
+            wire_source: wire::Id::new(format!(
+                "source-{}",
+                hex::encode(Sha256::digest(path.as_str().as_bytes()))
+            ))?,
             version,
             permit: permit.clone(),
         })
+    }
+    /// Bind stable M1 asset DATA only through its opaque actual journal owner/current native FD.
+    /// Arc sharing retains this exact descriptor; no hash-FD-then-reopen or new source FD occurs.
+    pub(super) fn bind_observed(
+        mut self,
+        observed: super::inventory::NativeObservedSource,
+    ) -> Result<Self> {
+        observed.check_permit(&self.permit)?;
+        observed.check_file(&self.file)?;
+        if let Some(expected) = &observed.observation().version {
+            anyhow::ensure!(
+                expected.digest == self.version,
+                "M1 verified source bytes differ from the held native input"
+            );
+        }
+        self.permit
+            .reserve_result(256 + observed.source_id().len() as u64 * 8)
+            .map_err(refused_error)?;
+        let identity = wire::Id::new(observed.source_id())?;
+        let file = self.file.clone();
+        self.permit
+            .retain_check(std::sync::Arc::new(move || {
+                observed.check_file(&file).is_ok()
+            }))
+            .map_err(refused_error)?;
+        self.source = identity.as_str().to_owned();
+        self.wire_source = identity;
+        self.check()?;
+        Ok(self)
     }
     /// Recheck the actual current namespace, selected read policy and held/current source version.
     pub fn check(&self) -> Result<()> {
@@ -252,6 +289,11 @@ impl NativeSource {
         fingerprint.update(include_bytes!("extraction.rs"));
         fingerprint.update(include_bytes!("held.rs"));
         fingerprint.update(include_bytes!("models.rs"));
+        fingerprint.update(include_bytes!("inventory.rs"));
+        fingerprint.update(include_bytes!("../../crates/knowledge-local/src/lib.rs"));
+        fingerprint.update(include_bytes!(
+            "../../crates/knowledge-storage/src/tracking.rs"
+        ));
         fingerprint.update(include_bytes!("../../crates/omni-service/src/authority.rs"));
         fingerprint.update(include_bytes!("../../crates/omni-service/src/runtime.rs"));
         fingerprint.update(include_bytes!(
@@ -260,6 +302,12 @@ impl NativeSource {
         fingerprint.update(include_bytes!("../lib.rs"));
         fingerprint.update(include_bytes!("../../Cargo.lock"));
         fingerprint.update(processor.as_str().as_bytes());
+        // The existing M3 producer receives this exact extension/MIME/title hint. With stable
+        // M1 asset IDs a rename no longer changes the source key, so bind this actual input DATA.
+        // It remains a hint only: never use it to reopen a file or manufacture source authority.
+        fingerprint.update(b"native-M3-hint-v1\0");
+        fingerprint.update((self.path.as_str().len() as u64).to_le_bytes());
+        fingerprint.update(self.path.as_str().as_bytes());
         let processor = ContentDigest::new(hex::encode(fingerprint.finalize()))?;
         Ok(NativeProcessing {
             source: self,

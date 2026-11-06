@@ -5395,6 +5395,7 @@ dependencies = [
  "html2text",
  "knowledge-core",
  "knowledge-daemon",
+ "knowledge-local",
  "knowledge-processing",
  "knowledge-retrieval",
  "knowledge-search",
