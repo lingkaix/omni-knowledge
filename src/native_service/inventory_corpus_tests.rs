@@ -115,6 +115,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         fs::set_permissions(cache.path(), fs::Permissions::from_mode(0o700)).unwrap();
         for mode in [
             "normal",
+            "query-source-change",
             "waiting",
             "waiting-after-progress",
             "vectors",
@@ -715,13 +716,22 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         before_hash,
         "current Query eligibility must use actual pinned original FD version, not synchronously hash source bodies"
     );
+    // Independent actual Query scope, not the earlier primitive's already pinned source checks.
+    let job_permit = service
+        .native_scope(&session, &query_command, None)
+        .unwrap();
     query_job::run(
         &service,
         &owner,
-        &source_permit,
+        &job_permit,
         reopened["scan"].as_str().unwrap(),
-        "raw/one.md",
+        if mode == "query-source-change" {
+            "raw/two.html"
+        } else {
+            "raw/one.md"
+        },
         &query_inventory,
+        (mode == "query-source-change").then(|| source_root.join("raw/two.html")),
     );
     // A real same-inode edit followed by actual stat-first M1 discovery leaves no verified
     // new digest. The opaque producer FD version must reject it without a query-time rehash.

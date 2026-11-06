@@ -4,8 +4,8 @@ use super::*;
 mod partition;
 use knowledge_core::jobs::{Key, Submission, Submitted};
 pub use partition::{
-    NativePartitionResult, NativeQueryLoans, NativeQueryPartition, NativeQueryStage,
-    NativeQueryStageRefusal, NativeQueryStageResources,
+    NativePartitionResult, NativeQueryLoans, NativeQueryPartition, NativeQueryPartitionPage,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
 };
 use std::collections::BTreeSet;
 /// Actual selected tuple/M1/model owners for one labelled library; no manifest or ID reconstruction.
@@ -325,7 +325,8 @@ impl NativeTupleQuery {
         );
         scope.inventory.page(offset, budget, funding.into_holding())
     }
-    /// Fresh funded SAME-Claim SDK scope precedes metadata copies and actual source FD inspection.
+    /// Already prepaid tuple metadata supplies the exact framed quote. A fresh SAME-Claim SDK
+    /// scope precedes retained metadata copies and actual original-source FD inspection.
     pub fn source(
         &self,
         service: &NativeLibraryService,
@@ -344,9 +345,18 @@ impl NativeTupleQuery {
             Arc::ptr_eq(&observed.page.inventory, &selected.inventory.owner),
             "foreign Query inventory owner"
         );
-        let bytes = (observed.observation().stat.path.as_str().len() as u64)
-            .checked_mul(32)
-            .and_then(|n| n.checked_add(4 * FRAME as u64 + 1024 * 1024))
+        let Some((part, next)) = selected.reader.part(offset)? else {
+            return Ok(None);
+        };
+        let bytes = next
+            .checked_sub(offset)
+            .and_then(|n| n.checked_mul(16))
+            .and_then(|n| {
+                n.checked_add(
+                    (observed.observation().stat.path.as_str().len() as u64).checked_mul(32)?,
+                )
+            })
+            .and_then(|n| n.checked_add(1024 * 1024))
             .context("Query source scope envelope overflow")?;
         let scope = selected
             .reader
@@ -366,15 +376,11 @@ impl NativeTupleQuery {
             scope
                 .retain_check(Arc::new(move || checked.check_scope_claim(&live).is_ok()))
                 .map_err(refused_error)?;
-            let Some((source, part, next)) = selected
-                .reader
-                .checked_part_at(service, &scope, observed, offset)?
-            else {
-                return Ok(None);
-            };
+            let data = part.data.clone();
+            let source = part.source(service, &scope, observed)?;
             Ok(Some(NativeQuerySource {
                 source,
-                part,
+                part: data,
                 cause: self.cause.clone(),
                 library,
                 claim_owner: Arc::downgrade(claim),

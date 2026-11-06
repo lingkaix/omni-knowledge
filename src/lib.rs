@@ -2772,9 +2772,9 @@ pub mod native_service {
     pub use inventory::{
         NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
         NativeInventory, NativeInventoryPage, NativeObservedSource, NativePartitionResult,
-        NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition, NativeQuerySource,
-        NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeRefreshJob,
-        NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
+        NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition, NativeQueryPartitionPage,
+        NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+        NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

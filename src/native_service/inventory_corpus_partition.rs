@@ -83,6 +83,34 @@ impl StageOwner {
         });
         result
     }
+    // Immutable index statistics use the admitted source snapshot. Revalidate ALL source
+    // dependencies before/after that operation and on result access. Every actual IO boundary
+    // still checks current native Query authority, model, metadata FDs and real Claim/stop.
+    // Original representation ranges additionally check their OWN actual source at every refill.
+    fn check_io(&self) -> Result<()> {
+        #[cfg(test)]
+        let started = Instant::now();
+        let result = (|| {
+            self.cause.check_scope_claim(&self.claim)?;
+            let library = &self.cause.libraries[self.library];
+            library.reader.check()?;
+            library
+                .inventory
+                .owner
+                .policy
+                .0
+                .lease
+                .check()
+                .map_err(refused_error)?;
+            Ok(())
+        })();
+        #[cfg(test)]
+        TEST_CHECK_PROFILE.with(|p| {
+            let (n, t) = p.get();
+            p.set((n + 1, t + started.elapsed().as_micros()))
+        });
+        result
+    }
     fn physical(&self) -> &reader::Physical {
         &self.cause.libraries[self.library].reader.physical
     }
@@ -90,7 +118,7 @@ impl StageOwner {
         let owner = self.clone();
         Control::guarded(
             self.claim.deadline(),
-            Arc::new(move || owner.check().is_ok()),
+            Arc::new(move || owner.check_io().is_ok()),
         )
     }
 }
@@ -174,16 +202,34 @@ impl NativeTupleQuery {
         })))
     }
 }
+#[cfg(test)]
+thread_local! {
+    static TEST_COMPONENT_OPENS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+    static TEST_INDEX_OPEN_HOOK:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
+}
+/// One bounded catalog advance; an empty eligible view skips payload without conflating EOF.
+pub struct NativeQueryPartitionPage {
+    pub partition: Option<NativeQueryPartition>,
+    pub next: u64,
+}
 impl NativeQueryStage {
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_component_opens(&self) -> u64 {
+        TEST_COMPONENT_OPENS.with(std::cell::Cell::get)
+    }
     #[cfg(test)]
     pub(in crate::native_service) fn test_profile(&self) -> (u64, u128) {
         TEST_CHECK_PROFILE.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_on_index_open(&self, hook: impl FnOnce() + 'static) {
+        TEST_INDEX_OPEN_HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
     }
     pub fn check(&self) -> Result<()> {
         self.0.check()
     }
     /// One sealed catalog frame; source membership is exact held producer data plus actual scopes.
-    pub fn partition(&self, offset: u64) -> Result<Option<(NativeQueryPartition, u64)>> {
+    pub fn partition(&self, offset: u64) -> Result<Option<NativeQueryPartitionPage>> {
         self.check()?;
         let physical = self.0.physical();
         let catalog = physical.open_verified("lexical.rows", || self.check())?;
@@ -193,6 +239,12 @@ impl NativeQueryStage {
         }
         anyhow::ensure!(offset < size, "partition cursor outside actual catalog");
         let (shard, next) = read_frame::<Shard>(&catalog, offset)?;
+        if self.0.sources.is_empty() {
+            return Ok(Some(NativeQueryPartitionPage {
+                partition: None,
+                next,
+            }));
+        }
         let mut documents = Vec::new();
         for source in &self.0.sources {
             anyhow::ensure!(
@@ -221,8 +273,8 @@ impl NativeQueryStage {
             &control,
         )?;
         self.check()?;
-        Ok(Some((
-            NativeQueryPartition {
+        Ok(Some(NativeQueryPartitionPage {
+            partition: Some(NativeQueryPartition {
                 generation,
                 view: ScopeView {
                     scope: shard.scope,
@@ -230,9 +282,9 @@ impl NativeQueryStage {
                     unavailable_objects: 0,
                 },
                 owner: self.0.clone(),
-            },
+            }),
             next,
-        )))
+        }))
     }
     /// No consumer may outlive the returned exact loans. Live FD/bytes/result returns THIS owner.
     pub fn into_loans(self) -> std::result::Result<NativeQueryLoans, Self> {
@@ -265,11 +317,18 @@ struct HeldFile {
     file: File,
     version: [u64; 8],
     owner: Arc<StageOwner>,
+    original: Option<usize>,
+}
+fn check_range(owner: &StageOwner, original: Option<usize>) -> Result<()> {
+    owner.check_io()?;
+    if let Some(index) = original {
+        owner.sources[index].source.check()?;
+    }
+    Ok(())
 }
 impl ArchiveSource for HeldFile {
     fn check(&self) -> std::result::Result<(), knowledge_retrieval::Error> {
-        self.owner
-            .check()
+        check_range(&self.owner, self.original)
             .map_err(|_| knowledge_retrieval::Error::Inventory)?;
         if stamp(&self.file).map_err(|_| knowledge_retrieval::Error::Inventory)? != self.version {
             return Err(knowledge_retrieval::Error::Inventory);
@@ -287,15 +346,19 @@ fn range(
     name: &str,
     offset: u64,
     length: Option<u64>,
+    original: Option<usize>,
 ) -> Result<Arc<dyn ByteHandle>> {
-    owner.check()?;
-    let file = owner.physical().open_verified(name, || owner.check())?;
+    check_range(owner, original)?;
+    let file = owner
+        .physical()
+        .open_verified(name, || check_range(owner, original))?;
     let version = stamp(&file)?;
     let length = length.unwrap_or(version[2]);
     let source = Arc::new(HeldFile {
         file,
         version,
         owner: owner.clone(),
+        original,
     });
     Ok(owner.readers.open(source, offset, length)?)
 }
@@ -322,18 +385,29 @@ impl Components {
 }
 impl ByteDirectory for Components {
     fn check(&self) -> std::result::Result<(), KernelError> {
-        self.owner.check().map_err(|_| kernel_error())
+        self.owner.check_io().map_err(|_| kernel_error())
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
         self.owner
             .physical()
-            .member_exists(&self.name(name)?, || self.owner.check())
+            .member_exists(&self.name(name)?, || self.owner.check_io())
             .map_err(|_| kernel_error())
     }
     fn open(&self, name: &str) -> std::result::Result<Arc<dyn ByteHandle>, KernelError> {
         self.check()?;
-        range(&self.owner, &self.name(name)?, 0, None).map_err(|_| kernel_error())
+        #[cfg(test)]
+        TEST_COMPONENT_OPENS.with(|n| n.set(n.get() + 1));
+        #[cfg(test)]
+        if name.starts_with("index/") {
+            TEST_INDEX_OPEN_HOOK.with(|h| {
+                let hook = h.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook()
+                }
+            });
+        }
+        range(&self.owner, &self.name(name)?, 0, None, None).map_err(|_| kernel_error())
     }
 }
 struct Originals(Arc<StageOwner>);
@@ -344,7 +418,7 @@ impl std::fmt::Debug for Originals {
 }
 impl ByteDirectory for Originals {
     fn check(&self) -> std::result::Result<(), KernelError> {
-        self.0.check().map_err(|_| kernel_error())
+        self.0.check_io().map_err(|_| kernel_error())
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
@@ -354,12 +428,14 @@ impl ByteDirectory for Originals {
     }
     fn open(&self, name: &str) -> std::result::Result<Arc<dyn ByteHandle>, KernelError> {
         self.check()?;
-        let part=&self.0.sources.iter().find(|s|matches!(&s.part.document.content,Content::Representation{path,..}if path==name)).ok_or_else(kernel_error)?.part;
+        let index=self.0.sources.iter().position(|s|matches!(&s.part.document.content,Content::Representation{path,..}if path==name)).ok_or_else(kernel_error)?;
+        let part = &self.0.sources[index].part;
         range(
             &self.0,
             "representations.data",
             part.tape_start,
             Some(part.tape_length),
+            Some(index),
         )
         .map_err(|_| kernel_error())
     }

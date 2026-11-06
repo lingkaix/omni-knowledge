@@ -10,8 +10,9 @@ pub(super) use job::RefreshCause;
 pub use job::{
     NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError, NativeCorpusProgress,
     NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPartition,
-    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
-    NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
+    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
+    NativeQueryStageResources, NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery,
+    NativeTupleRead,
 };
 use knowledge_core::{
     admission::Holding,

@@ -184,7 +184,7 @@ impl Physical {
     }
 }
 pub(super) struct TuplePart {
-    data: SourcePart,
+    pub(super) data: SourcePart,
     physical: Arc<Physical>,
     source_rows: Arc<File>,
     rows_version: [u64; 8],
@@ -245,21 +245,7 @@ impl NativeTupleRead {
             None => Ok(None),
         }
     }
-    pub(super) fn checked_part_at(
-        &self,
-        service: &NativeLibraryService,
-        permit: &Permit,
-        observed: NativeObservedSource,
-        offset: u64,
-    ) -> Result<Option<(NativeSource, SourcePart, u64)>> {
-        let Some((part, next)) = self.part(offset)? else {
-            return Ok(None);
-        };
-        let data = part.data.clone();
-        let source = part.source(service, permit, observed)?;
-        Ok(Some((source, data, next)))
-    }
-    fn part(&self, offset: u64) -> Result<Option<(TuplePart, u64)>> {
+    pub(super) fn part(&self, offset: u64) -> Result<Option<(TuplePart, u64)>> {
         self.check()?;
         let file = Arc::new(
             self.physical
@@ -363,6 +349,37 @@ impl NativeTupleRead {
             at = next;
         }
         bail!("actual fixture source partition absent")
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_partition_sources(
+        &self,
+        offset: u64,
+    ) -> Result<Vec<(u64, u64, String, String)>> {
+        let catalog = self
+            .physical
+            .open_verified("lexical.rows", || self.check())?;
+        let (shard, _) = read_frame::<Shard>(&catalog, offset)?;
+        let mut rows = Vec::new();
+        let mut at = 0;
+        while let Some((part, next)) = self.part(at)? {
+            if shard.parts.contains(&part.data) {
+                rows.push((
+                    at,
+                    next,
+                    part.data.document.key.id,
+                    part.data
+                        .document
+                        .locator
+                        .context("actual original display path")?,
+                ))
+            }
+            at = next;
+        }
+        anyhow::ensure!(
+            rows.len() == shard.parts.len(),
+            "actual sealed partition/source receipts differ"
+        );
+        Ok(rows)
     }
     #[cfg(test)]
     pub(in crate::native_service) fn test_header(&self) -> Result<serde_json::Value> {
