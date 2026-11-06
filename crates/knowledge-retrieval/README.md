@@ -12,6 +12,7 @@ The actual implementation calls the vendored `Kernel`; no fake backend, alternat
 - `Work::split_claim` transfers an actual queued claim's existing reservation into an independently retained child/runtime/model/pin lifetime without charging twice or retaining a mount execution slot.
 - `Work::{remaining,grow,written}` inspect/acquire the same account's promise or confirm actual generated-byte deltas; this is not an RSS observation.
 - `KernelAdapter::open(source, store, build_identity)` opens an actual native kernel and binds the consuming build identity.
+- `KernelAdapter::open_held(source, store, build_identity, inputs, &setup, &control)` binds publication to actual generic source handles; retain the already-paid setup Work until AFTER the adapter/source owner dies. Initialize shared runtime at startup. No late global setup reserve or path fallback occurs.
 - `KernelAdapter::publish(view, expected, &mut work, &control)` invokes actual kernel publication under the unchanged per-shard format ceilings.
 - `KernelAdapter::search(query, &mut work, &control)` invokes actual lexical/exact/regex retrieval, including native reader locks and source verification.
 - `KernelAdapter::pin(scope, work, &control)` consumes an independent work lifetime and returns a real `PinnedGeneration`; its native lock drops before the resource charge.
@@ -43,12 +44,13 @@ The root `KnowledgeBase` now calls this adapter for actual lexical/grep publicat
 
 Rootlib starts/reuses the actual Core owner, verifies source digests through descriptor-relative opens, charges retained snapshots through cache/reader lifetimes, and binds M3's actual admitted file APIs. Deep-copy handoff admits the new buffers before copying and drops the original M3 buffers before finishing their holdings; this avoids one permanent holding record per corpus source without aliasing or early release. Raw compatibility results without a parent lifetime keep M3's documented conservative process charge.
 
-The standalone kernel executable has a native owned pure-kernel child watchdog, complete resident/peak-RSS observations and typed failures. It does not install RLIMIT_AS on either OS. The kernel worker launches no child processes; this proof is not the product processing descendant-executor proof. Linux is exercised; macOS native execution remains unobserved.
+The standalone kernel executable has a native owned pure-kernel child watchdog, complete resident/peak-RSS observations and typed failures. It does not install RLIMIT_AS on either OS. The kernel worker launches no child processes; this proof is not the product processing descendant-executor proof. Linux builder execution alone is not native macOS or whole-product acceptance; hosted native evidence is tracked separately.
 
 ## Generic Native Generations And STORED Queries
 
 `retrieval_kernel::ByteDirectory` supplies owned native range handles with current caller checks, not a path-backed emulator or an authorization DTO.
 `SourceGeneration::open` validates the existing native manifest digest, consuming machinery, bounded inventory and representation coordinates.
+The publisher also accepts this SAME Directory: actual Text/Representation bytes are read, indexed and finally reverified through one held handle. Native input failure aborts without changing prior CURRENT; matching old labels cannot skip verification of a new input owner. This is bounded-shard publication, not a resident whole-corpus inventory, destination permission, or whole-tuple activation. `held_publication` uses actual SDK Refresh, one Claim and M5 verified input ranges with the loose source removed, under all-global memory pressure. Its five real ablations remove held IO, same-handle verification, input verification on old-label reuse, strict native failure or prepaid setup; each fails its deciding assertion.
 Its `search` method and the ordinary filesystem kernel enter the same query implementation, including analyzer/scoring, title boosts, CJK candidates, source verification, canonical literal/regex scanners and original locators.
 A native provider must retain its actual generation, source, current policy, descriptor and concurrent resource costs through all handles.
 Only the immutable metadata lock retains that real provider lease; writer and unknown locks refuse, and immutable readers use manual reload without a watcher thread.

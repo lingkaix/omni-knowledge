@@ -1,6 +1,7 @@
 //! Cross-process owner lifetime. The forking helper is a separate single-threaded
 //! public consumer. Readiness is a pipe or a stdout line, never a sleep.
-//! A missed helper signal is an observer failure.
+//! A missed helper signal is an observer failure. The fork identity control deliberately delays
+//! its consumer, but only the actual parent ACK pipe permits child destruction; sleep is not readiness.
 
 #[allow(dead_code, unexpected_cfgs)]
 mod support {
@@ -83,6 +84,7 @@ fn observer_admits_pass_fail_and_timeout() {
 
     failure_cleanup(&bin);
     fork_readiness_failure_settles_child(&bin);
+    fork_identity_failure_settles_child(&bin);
 }
 
 #[test]
@@ -161,7 +163,7 @@ fn post_fork_child_destruction_does_not_unlock_the_parent() {
         &["fork-destroy-owner", &world.lab.root().to_string_lossy()],
     );
     let child_line = owner.next_line(PRODUCT_READY).expect("child line");
-    let (child_pid, child_token) = parse_child(&child_line);
+    let (child_pid, child_token, identity_observed) = identify_fork_child(&mut owner, &child_line);
     let dropped = owner.next_line(PRODUCT_READY).expect("dropped");
     assert_eq!(dropped.trim(), "CHILD_DROPPED");
     let held = owner.next_line(PRODUCT_READY).expect("held");
@@ -198,6 +200,10 @@ fn post_fork_child_destruction_does_not_unlock_the_parent() {
         "forked child {child_pid} was not reaped"
     );
     world.lab.finish();
+    assert!(
+        identity_observed,
+        "fork child was released before the external observer acquired its actual live birth identity; child={child_pid}, reaped={reaped:?}, helper_exit={status}"
+    );
 }
 
 /// Real `fork-destroy-owner` readiness timeout. The forked child stays parked
@@ -213,7 +219,7 @@ fn fork_readiness_failure_settles_child(bin: &Path) {
         ],
     );
     let child_line = owner.next_line(PRODUCT_READY).expect("forked child line");
-    let (child_pid, child_token) = parse_child(&child_line);
+    let (child_pid, child_token, identity_observed) = identify_fork_child(&mut owner, &child_line);
     let failed = owner.next_line(PRODUCT_READY).expect("readiness failure");
     assert_eq!(failed.trim(), "ERROR ChildTimeout");
     let reaped = owner.next_line(PRODUCT_READY).expect("cleanup line");
@@ -231,7 +237,35 @@ fn fork_readiness_failure_settles_child(bin: &Path) {
     );
     let status = owner.wait_bounded(ADMIT_READY).expect("helper wait");
     assert_eq!(status.code(), Some(1), "readiness failure exit {status}");
+    assert!(
+        identity_observed,
+        "readiness control requires the actual live child identity before release"
+    );
     assert_reaped(child_pid, &child_token);
+    world.lab.finish();
+}
+
+/// Withhold the actual identity ACK: bounded refusal must still collect the owned child.
+fn fork_identity_failure_settles_child(bin: &Path) {
+    let world = World::create(b"derived-SENTINEL_cache_6c2e91-payload-v1");
+    let mut owner = spawn(
+        bin,
+        &["fork-destroy-owner", &world.lab.root().to_string_lossy()],
+    );
+    let line = owner.next_line(PRODUCT_READY).expect("parked child");
+    let (pid, token) = parse_child(&line);
+    let failed = owner.next_line(PRODUCT_READY).expect("identity timeout");
+    let reaped = owner.next_line(PRODUCT_READY).expect("owned cleanup");
+    let status = owner
+        .wait_bounded(PRODUCT_READY)
+        .expect("identity refusal wait");
+    assert_eq!(failed.trim(), "ERROR ChildIdentity");
+    assert!(
+        reaped.trim().starts_with(&format!("CHILD_REAPED {pid} ")),
+        "{reaped}"
+    );
+    assert_eq!(status.code(), Some(1));
+    assert_reaped(pid, &token);
     world.lab.finish();
 }
 
@@ -303,6 +337,22 @@ fn hex_of(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
+}
+
+/// Observe the actual live child BEFORE acknowledging release. Record a failure until after
+/// REAP/RELEASE/wait so even the release-before-observation negative control collects its child.
+fn identify_fork_child(owner: &mut Owned, line: &str) -> (u32, String, bool) {
+    let mut parts = line.split_whitespace();
+    assert_eq!(parts.next(), Some("CHILD"), "{line}");
+    let pid: u32 = parts.next().expect("pid").parse().expect("pid number");
+    let token = parts.next().expect("birth token").to_owned();
+    // Adversarial scheduling delay, NOT a readiness or exit witness.
+    thread::sleep(Duration::from_millis(50));
+    let identity_observed =
+        start_token(pid).as_deref() == Some(token.as_str()) && !exited_or_absent(pid);
+    owner.stdin.write_all(b"I").expect("identity ACK");
+    owner.stdin.flush().expect("identity ACK flush");
+    (pid, token, identity_observed)
 }
 
 fn parse_child(line: &str) -> (u32, String) {

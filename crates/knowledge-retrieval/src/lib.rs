@@ -21,8 +21,8 @@ pub use tantivy::{
 use knowledge_core::admission::{Account, Decision, Holding, Origin};
 use knowledge_core::jobs::Reservation;
 pub use retrieval_kernel::{
-    Content, Control, Coverage, Document, Hit, Locator, Mode, Query, ScopeView, SearchResult,
-    SourceKey,
+    ByteRange, Content, Control, Coverage, Document, Hit, Locator, Mode, Query,
+    RepresentationFragment, ScopeView, SearchResult, SourceKey,
 };
 use std::path::Path;
 
@@ -183,6 +183,27 @@ impl KernelAdapter {
         };
         let kernel = retrieval_kernel::Kernel::with_build_identity(source, store, build_identity)?;
         drop(setup);
+        Ok(Self { kernel })
+    }
+    /// Construct a native publisher from SAME held input handles and already-paid setup metadata.
+    /// The host retains `setup` until AFTER this adapter/source owner dies. Initialize the shared
+    /// tokenizer at startup; no late global setup reservation is made here. Work is resource credit,
+    /// not source/target permission: the actual native Directory and host retain those capabilities.
+    pub fn open_held(
+        source: &Path,
+        store: &Path,
+        build_identity: &str,
+        inputs: std::sync::Arc<dyn ByteDirectory>,
+        setup: &Work,
+        control: &Control,
+    ) -> Result<Self, Error> {
+        setup.require(64 * 1024, 0)?;
+        control.check()?;
+        inputs.check()?;
+        Self::initialize_runtime()?;
+        let kernel = retrieval_kernel::Kernel::with_build_identity(source, store, build_identity)?
+            .with_source_directory(inputs)?;
+        control.check()?;
         Ok(Self { kernel })
     }
     /// Conservative preflight requirement for a bounded shard, including caller inventory and writer.
