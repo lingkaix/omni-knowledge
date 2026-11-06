@@ -1,0 +1,210 @@
+diff --git c/src/store.rs w/src/store.rs
+index 8164010..1e2fc7e 100644
+--- c/src/store.rs
++++ w/src/store.rs
+@@ -5,7 +5,7 @@ use fs2::FileExt;
+ use serde::{Deserialize, Serialize};
+ use std::collections::BTreeSet;
+ use std::fs::{self, File, OpenOptions};
+-use std::io::{Read, Write};
++use std::io::{Read, Seek, SeekFrom, Write};
+ use std::path::{Path, PathBuf};
+ use tantivy::schema::{Field, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions};
+ use tantivy::{Index, TantivyDocument};
+@@ -167,6 +167,8 @@ impl GenerationPin {
+ /// Shared kernel owner. Source and derived storage roots are fixed at process startup.
+ pub struct Kernel {
+     pub(crate) source: File,
++    /// Optional SAME source-owner byte directory for native publication inputs, never path fallback.
++    source_bytes: Option<std::sync::Arc<dyn crate::directory::ByteDirectory>>,
+     pub(crate) store: PathBuf,
+     /// Explicit consuming build binding; None preserves historical prototype compatibility.
+     pub(crate) build_identity: Option<String>,
+@@ -181,6 +183,7 @@ impl Kernel {
+         private_dir(store)?;
+         Ok(Self {
+             source,
++            source_bytes: None,
+             store: fs::canonicalize(store).map_err(io_error)?,
+             build_identity: None,
+         })
+@@ -195,6 +198,34 @@ impl Kernel {
+         kernel.build_identity = Some(identity.to_owned());
+         Ok(kernel)
+     }
++    /// Bind actual native source handles to this publisher. Member names remain DATA, never
++    /// filesystem paths; missing/revoked handles never fall back to the legacy source root.
++    /// Caller prepays metadata/readers/runtime before constructing or using this owner.
++    /// This binds publication only; held generation queries use `SourceGeneration`.
++    pub fn with_source_directory(
++        mut self,
++        source: std::sync::Arc<dyn crate::directory::ByteDirectory>,
++    ) -> Result<Self> {
++        source.check()?;
++        self.source_bytes = Some(source);
++        Ok(self)
++    }
++    fn check_source_directory(&self) -> Result<()> {
++        if let Some(source) = &self.source_bytes {
++            source.check()?;
++        }
++        Ok(())
++    }
++    fn source_text(&self, path: &str, range: Option<&crate::ByteRange>) -> Result<TextFile> {
++        if let Some(source) = &self.source_bytes {
++            source.check()?;
++            let handle = source.open(path)?;
++            source.check()?;
++            TextFile::provided(handle, range)
++        } else {
++            TextFile::new(open_source(&self.source, path)?, range)
++        }
++    }
+     /// Combine the unchanged upstream machinery and explicit consuming fingerprint.
+     fn machinery(&self) -> String {
+         match &self.build_identity {
+@@ -290,6 +321,7 @@ impl Kernel {
+         disk_limit: u64,
+         mut checkpoint: impl FnMut(&str) -> Result<()>,
+     ) -> Result<String> {
++        self.check_source_directory()?;
+         validate_view(&view, true)?;
+         for d in &view.documents {
+             if let Content::InlineText { text: Some(text) } = &d.content
+@@ -351,7 +383,9 @@ impl Kernel {
+                         .is_ok_and(|b| digest(&b) == r.representation_digest)
+                 })
+             });
++            // Prior identity labels cannot certify a NEW native IO owner. Verify its bytes again.
+             if same
++                && self.source_bytes.is_none()
+                 && healthy
+                 && Index::open_in_dir(scope_path.join(id).join("index")).is_ok_and(|i| {
+                     i.schema() == schema().0
+@@ -424,8 +458,7 @@ impl Kernel {
+                 budget.check()?;
+                 let (mut input, detected) = match &record.document.content {
+                     Content::Text { path, range } => {
+-                        let mut source =
+-                            TextFile::new(open_source(&self.source, path)?, range.as_ref())?;
++                        let mut source = self.source_text(path, range.as_ref())?;
+                         let (hash, size, _) = inspect(&mut source, budget)?;
+                         if hash != record.document.digest || size != record.document.size {
+                             return Err(error(
+@@ -457,7 +490,7 @@ impl Kernel {
+                     Content::Representation {
+                         path, digest, size, ..
+                     } => {
+-                        let mut source = TextFile::new(open_source(&self.source, path)?, None)?;
++                        let mut source = self.source_text(path, None)?;
+                         let (actual_digest, actual_size, _) = inspect(&mut source, budget)?;
+                         if actual_digest != *digest || actual_size != *size {
+                             return Err(error(
+@@ -554,7 +587,27 @@ impl Kernel {
+                         checkpoint("chunk")?;
+                     }
+                 }
+-                if let Content::Text { path, range } = &record.document.content {
++                if self.source_bytes.is_some() {
++                    // Verify the SAME actual handle again, not a pathname/member reopen after hashing.
++                    let expected = match &record.document.content {
++                        Content::Text { .. } => {
++                            Some((&record.document.digest, record.document.size))
++                        }
++                        Content::Representation { digest, size, .. } => Some((digest, *size)),
++                        _ => None,
++                    };
++                    if let Some((expected, size)) = expected {
++                        input.seek(SeekFrom::Start(0)).map_err(io_error)?;
++                        let (digest, length) = digest_reader(&mut input, budget)?;
++                        if &digest != expected || length != size {
++                            return Err(error("conflict", "held source changed during indexing"));
++                        }
++                    }
++                    self.check_source_directory()?;
++                }
++                if self.source_bytes.is_none()
++                    && let Content::Text { path, range } = &record.document.content
++                {
+                     let mut now = TextFile::new(open_source(&self.source, path)?, range.as_ref())?;
+                     let (hash, size) = digest_reader(&mut now, budget)?;
+                     if hash != record.document.digest || size != record.document.size {
+@@ -564,9 +617,10 @@ impl Kernel {
+                         ));
+                     }
+                 }
+-                if let Content::Representation {
+-                    path, digest, size, ..
+-                } = &record.document.content
++                if self.source_bytes.is_none()
++                    && let Content::Representation {
++                        path, digest, size, ..
++                    } = &record.document.content
+                 {
+                     let mut now = TextFile::new(open_source(&self.source, path)?, None)?;
+                     let (actual_digest, actual_size) = digest_reader(&mut now, budget)?;
+@@ -580,6 +634,11 @@ impl Kernel {
+                 Ok(())
+             })();
+             if let Err(e) = process {
++                // Native input integrity/currentness failures preserve the prior generation;
++                // they are not silently successful partial native publication.
++                if self.source_bytes.is_some() {
++                    return Err(e);
++                }
+                 // A failed derived write cannot be committed as incomplete per-document coverage.
+                 if e.code == "conflict" || e.message == FILESYSTEM_GROWTH_REFUSED {
+                     return Err(e);
+@@ -662,6 +721,7 @@ impl Kernel {
+         fs::rename(&stage_path, &final_path).map_err(io_error)?;
+         sync_dir(&scope_path)?;
+         checkpoint("before-pointer")?;
++        self.check_source_directory()?;
+         let pointer = scope_path.join(".CURRENT.new");
+         write_sync(&pointer, generation.as_bytes())?;
+         fs::rename(pointer, scope_path.join("CURRENT")).map_err(io_error)?;
+diff --git c/src/text.rs w/src/text.rs
+index 333e84a..f7c12a9 100644
+--- c/src/text.rs
++++ w/src/text.rs
+@@ -434,6 +434,8 @@ pub(crate) enum TextFile {
+         position: u64,
+     },
+     Inline(std::io::Cursor<Vec<u8>>),
++    /// SAME source-owner handle across initial verification, indexing and final verification.
++    Provided(crate::directory::RangeReader),
+ }
+ impl TextFile {
+     /// Bind a full canonical file or an exact caller-admitted byte range without copying it.
+@@ -451,6 +453,15 @@ impl TextFile {
+             position: 0,
+         })
+     }
++    /// Bind the existing generic native reader, never reopen its display/member path.
++    pub fn provided(
++        handle: std::sync::Arc<dyn tantivy::directory::FileHandle>,
++        range: Option<&crate::ByteRange>,
++    ) -> Result<Self> {
++        Ok(Self::Provided(crate::directory::RangeReader::new(
++            handle, range,
++        )?))
++    }
+     /// Hold only the bounded text admitted in this request, never in a generation manifest.
+     pub fn inline(text: &Option<String>) -> Result<Self> {
+         let text = text.as_ref().ok_or_else(|| {
+@@ -472,6 +483,7 @@ impl Read for TextFile {
+     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+         match self {
+             Self::Inline(reader) => reader.read(bytes),
++            Self::Provided(reader) => reader.read(bytes),
+             Self::File {
+                 file,
+                 length,
+@@ -490,6 +502,7 @@ impl Seek for TextFile {
+     fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+         match self {
+             Self::Inline(reader) => reader.seek(from),
++            Self::Provided(reader) => reader.seek(from),
+             Self::File {
+                 file,
+                 start,

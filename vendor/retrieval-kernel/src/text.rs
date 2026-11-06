@@ -434,6 +434,8 @@ pub(crate) enum TextFile {
         position: u64,
     },
     Inline(std::io::Cursor<Vec<u8>>),
+    /// SAME source-owner handle across initial verification, indexing and final verification.
+    Provided(crate::directory::RangeReader),
 }
 impl TextFile {
     /// Bind a full canonical file or an exact caller-admitted byte range without copying it.
@@ -450,6 +452,15 @@ impl TextFile {
             length: end - start,
             position: 0,
         })
+    }
+    /// Bind the existing generic native reader, never reopen its display/member path.
+    pub fn provided(
+        handle: std::sync::Arc<dyn tantivy::directory::FileHandle>,
+        range: Option<&crate::ByteRange>,
+    ) -> Result<Self> {
+        Ok(Self::Provided(crate::directory::RangeReader::new(
+            handle, range,
+        )?))
     }
     /// Hold only the bounded text admitted in this request, never in a generation manifest.
     pub fn inline(text: &Option<String>) -> Result<Self> {
@@ -472,6 +483,7 @@ impl Read for TextFile {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Inline(reader) => reader.read(bytes),
+            Self::Provided(reader) => reader.read(bytes),
             Self::File {
                 file,
                 length,
@@ -490,6 +502,7 @@ impl Seek for TextFile {
     fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
         match self {
             Self::Inline(reader) => reader.seek(from),
+            Self::Provided(reader) => reader.seek(from),
             Self::File {
                 file,
                 start,

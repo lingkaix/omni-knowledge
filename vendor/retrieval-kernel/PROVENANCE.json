@@ -215,7 +215,7 @@
     {
       "path": "src/store.rs",
       "upstream_sha256": "17a7fb0c78fb99e3b1d86d5c9162bffaa713b0e234432364cbf3b20cb51957e8",
-      "vendored_sha256": "8f913a8966ffc53008a4ff9d6f08230c2474bb4ace98098b238ab12980f4fa98"
+      "vendored_sha256": "e9a9373ccfe96a2ba5d5a1edf883f858cab3bedd84eff4b4de355c1b601b2739"
     },
     {
       "path": "src/tests.rs",
@@ -225,7 +225,7 @@
     {
       "path": "src/text.rs",
       "upstream_sha256": "e3c705464091cc0caf030c48a54bbe7b8aa1e5f91de4dbc2c0c308ad2b5ee9e0",
-      "vendored_sha256": "1283cd305c216d33d29a77b77520df24c726fbf54fca8961acdba436d77c9d34"
+      "vendored_sha256": "ae4971bef68f2410c7d0d887085d1a3cb55e4438efe24ea3331174cb333167bd"
     },
     {
       "path": "tests/faces.rs",
