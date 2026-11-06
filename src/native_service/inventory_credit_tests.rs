@@ -3,25 +3,30 @@ use super::*;
 #[test]
 fn native_inventory_credit_survives_last_row_then_returns_after_payloads_die() {
     if std::env::var_os("OMNI_INVENTORY_CREDIT_CHILD").is_none() {
-        let output=std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact","native_service::inventory::tests::credit::native_inventory_credit_survives_last_row_then_returns_after_payloads_die","--nocapture"])
-            .env("OMNI_INVENTORY_CREDIT_CHILD","1").output().unwrap();
-        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-        assert!(
-            output.status.success(),
-            "actual inventory credit child: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        for format in ["md", "html"] {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","native_service::inventory::tests::credit::native_inventory_credit_survives_last_row_then_returns_after_payloads_die","--nocapture"])
+                .env("OMNI_INVENTORY_CREDIT_CHILD","1").env("OMNI_INVENTORY_CREDIT_FORMAT",format).output().unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            assert!(
+                output.status.success(),
+                "actual {format} inventory credit child: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         return;
     }
     let home = tempfile::tempdir().unwrap();
     let kb = KnowledgeBase::init(home.path(), "actual M1 ownership").unwrap();
-    fs::write(
-        kb.root.join("raw/owned.md"),
-        "# Actual owned source\n日本語\n",
-    )
-    .unwrap();
+    let format = std::env::var("OMNI_INVENTORY_CREDIT_FORMAT").unwrap_or_else(|_| "md".into());
+    let source_path = format!("raw/owned.{format}");
+    let body = if format == "html" {
+        "<h1>Actual owned source</h1><p>日本語</p>"
+    } else {
+        "# Actual owned source\n日本語\n"
+    };
+    fs::write(kb.root.join(&source_path), body).unwrap();
     let (service, owner, _selection) = NativeLibraryService::ordinary_local(
         kb,
         LocalPolicy {
@@ -78,7 +83,7 @@ fn native_inventory_credit_survives_last_row_then_returns_after_payloads_die() {
         .unwrap();
     let row = page
         .sources()
-        .find(|r| r.observation().stat.path.as_str() == "raw/owned.md")
+        .find(|r| r.observation().stat.path.as_str() == source_path)
         .unwrap();
     let page = match page.into_funding() {
         Err(page) => page,
@@ -97,13 +102,13 @@ fn native_inventory_credit_survives_last_row_then_returns_after_payloads_die() {
             },
         )
         .unwrap();
-    let processing = source
+    let mut processing = source
         .processing(
             digest(b"actual-source-metadata-scope"),
             digest(include_bytes!("inventory_credit_tests.rs")),
         )
         .unwrap();
-    let claim = claim(
+    let mut claim = claim(
         &processing,
         Budget {
             max_files: 1,
@@ -128,7 +133,7 @@ fn native_inventory_credit_survives_last_row_then_returns_after_payloads_die() {
         .unwrap();
     let fresh = page
         .sources()
-        .find(|r| r.observation().stat.path.as_str() == "raw/owned.md")
+        .find(|r| r.observation().stat.path.as_str() == source_path)
         .unwrap();
     let scoped = service
         .source_for_observed(
@@ -154,6 +159,23 @@ fn native_inventory_credit_survives_last_row_then_returns_after_payloads_die() {
             .is_ok()
     );
     assert_eq!(account.status().unwrap().memory_available, 0);
+    for _ in 0..8 {
+        let input = processing.extract_indexed(claim, 65536, None).unwrap();
+        assert!(input.text().unwrap().contains("Actual owned source"));
+        assert!(input.text().unwrap().contains("日本語"));
+        assert_ne!(input.source_id().unwrap(), "actual-metadata-source");
+        (processing, claim) = input.finish_stage().unwrap();
+        assert_eq!(
+            account.status().unwrap().memory_available,
+            0,
+            "all actual M3 output/metadata loans rejoin the same live claim before the next source phase"
+        );
+        assert_eq!(
+            account.status().unwrap().queue.unsettled,
+            1,
+            "read-stage return is not job completion"
+        );
+    }
     scoped_pressure.finish().unwrap();
     account
         .queue()

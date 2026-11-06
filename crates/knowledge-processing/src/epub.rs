@@ -101,7 +101,7 @@ pub fn read_epub_file_funded(
     }
     let text = crate::opaque::epub_text_in_worker(&bytes, max_bytes, &mut credits, funding)?;
     drop(bytes);
-    credits.input.release_now()?;
+    credits.release_input()?;
     let retained = credits.retained();
     Ok(Admitted {
         value: text,

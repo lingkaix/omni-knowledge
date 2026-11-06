@@ -290,7 +290,7 @@ pub fn parse_transcript_file_funded(
     );
     let result = crate::opaque::transcript_in_worker(&bytes, capacity, &mut credits, funding)?;
     drop(bytes);
-    credits.input.release_now()?;
+    credits.release_input()?;
     let retained = credits.retained();
     Ok(Admitted {
         value: result,
@@ -532,7 +532,7 @@ pub fn transcribe_file_funded(
     let segments =
         crate::opaque::transcript_in_worker(&bytes, plan.transcript_bytes, &mut credits, funding)?;
     drop(bytes);
-    credits.input.release_now()?;
+    credits.release_input()?;
     let retained = credits.retained();
     Ok(Admitted {
         value: segments,

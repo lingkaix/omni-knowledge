@@ -20,12 +20,21 @@ pub enum Funding<'a> {
         /// The same verified work facts already admitted by Core.
         expected: Key<'a>,
     },
+    /// Same actual native claim; retain successful call's working loans with its returned value
+    /// so a multi-source owner can destroy the payload and explicitly rejoin the complete phase.
+    /// This changes resource lifetime only, never authority, accounting engine or size ceilings.
+    ClaimStage {
+        /// Existing account-owned execution capability, exclusively borrowed for this call.
+        claim: &'a mut Claim,
+        /// Exact current full key of that same live execution.
+        expected: Key<'a>,
+    },
 }
 
 impl Funding<'_> {
     /// Poll the native claim state and its real deadline during every watchdog/I/O tick.
     pub(crate) fn checkpoint(&self) -> anyhow::Result<()> {
-        if let Self::Claim { claim, expected } = self {
+        if let Self::Claim { claim, expected } | Self::ClaimStage { claim, expected } = self {
             if std::time::Instant::now() >= claim.deadline() {
                 anyhow::bail!(crate::worker::WorkerFailure::Deadline);
             }
@@ -47,7 +56,7 @@ impl Funding<'_> {
                     temporary_bytes: status.storage_available,
                 })
             }
-            Self::Claim { claim, expected } => Ok(account
+            Self::Claim { claim, expected } | Self::ClaimStage { claim, expected } => Ok(account
                 .job_status(claim.job(), *expected)
                 .map_err(admission::map_error)?
                 .execution),
@@ -68,7 +77,7 @@ impl Funding<'_> {
             || need.temporary_bytes > available.temporary_bytes
         {
             return Err(match self {
-                Self::Claim { .. } => AdmitError::InsufficientCredit,
+                Self::Claim { .. } | Self::ClaimStage { .. } => AdmitError::InsufficientCredit,
                 Self::BeforeVerification if need.memory_bytes > available.memory_bytes => {
                     AdmitError::WaitingMemory
                 }
@@ -85,7 +94,7 @@ impl Funding<'_> {
         }
         let account = admission::current()?;
         let holding = match self {
-            Self::Claim { claim, expected } => account
+            Self::Claim { claim, expected } | Self::ClaimStage { claim, expected } => account
                 .split_claim(claim, *expected, need)
                 .map_err(admission::map_error)?,
             Self::BeforeVerification => match account
@@ -226,6 +235,8 @@ pub(crate) struct Credits {
     pub storage: Settled,
     /// Promised group resident memory; this is independent of the input/result/transport memory.
     pub rss: u64,
+    /// Successful continuation retains already-paid dead working loans until its value is consumed.
+    keep_working: bool,
 }
 
 impl Credits {
@@ -254,7 +265,9 @@ impl Credits {
                 return Err(AdmitError::TooLargeMemory);
             }
             return Err(match funding {
-                Funding::Claim { .. } => AdmitError::InsufficientCredit,
+                Funding::Claim { .. } | Funding::ClaimStage { .. } => {
+                    AdmitError::InsufficientCredit
+                }
                 Funding::BeforeVerification => AdmitError::WaitingMemory,
             });
         }
@@ -284,12 +297,39 @@ impl Credits {
             child,
             storage,
             rss,
+            keep_working: matches!(funding, Funding::ClaimStage { .. }),
         })
     }
 
-    /// Move only the returned-data credit to its owner; all dead working buffers settle separately.
+    /// Bytes must ALREADY be destroyed. A continuation keeps the actual loan for its enclosing
+    /// owner instead of releasing it globally between successful phases.
+    pub fn release_input(&mut self) -> Result<(), AdmitError> {
+        if self.keep_working {
+            Ok(())
+        } else {
+            self.input.release_now()
+        }
+    }
+    /// Empty output does not erase a continuation's already prepaid working loans.
+    pub fn retained_for(&mut self, has_payload: bool) -> Vec<Holding> {
+        if has_payload || self.keep_working {
+            self.retained()
+        } else {
+            Vec::new()
+        }
+    }
+    /// Ordinary calls retain output only. A successful continuation retains every real phase loan
+    /// until the owner destroys its value and explicitly rejoins the SAME live claim. No credit
+    /// is refunded/reserved or manufactured; preflight amounts and actual buffer lifetimes match.
     pub fn retained(&mut self) -> Vec<Holding> {
-        self.output.0.take().into_iter().collect()
+        let mut retained: Vec<_> = self.output.0.take().into_iter().collect();
+        if self.keep_working {
+            retained.extend(self.input.0.take());
+            retained.extend(self.transport.0.take());
+            retained.extend(self.child.0.take());
+            retained.extend(self.storage.0.take());
+        }
+        retained
     }
 }
 
