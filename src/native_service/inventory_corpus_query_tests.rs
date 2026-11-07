@@ -1581,6 +1581,12 @@ pub(super) fn run_canonical_metadata_controls(
         run.failure()
     );
     assert!(NativeMetadataRun::test_frontmatter_entries() > frontmatter_entries);
+    assert_eq!(
+        NativeMetadataRun::test_frontmatter_last_read(),
+        0,
+        "refused frontmatter admission performed IO; cumulative={}",
+        NativeMetadataRun::test_frontmatter_io_bytes()
+    );
     assert!(
         NativeMetadataRun::test_frontmatter_max_read().saturating_sub(frontmatter_read) < 65536,
         "refused frontmatter read jumped by {}",

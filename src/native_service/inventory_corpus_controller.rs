@@ -1047,9 +1047,31 @@ thread_local! {
     static TEST_OBJECTS_BEFORE_POINTER: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
     static TEST_METADATA_EVICTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_IO_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_LAST_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_CALL_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_CALL_ADMITTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
-fn record_frontmatter_read(read: u64, admitted: u64) {
+fn begin_frontmatter_observation() {
+    TEST_FRONTMATTER_CALL_READ.with(|cell| cell.set(0));
+    TEST_FRONTMATTER_CALL_ADMITTED.with(|cell| cell.set(0));
+    TEST_FRONTMATTER_LAST_READ.with(|cell| cell.set(0));
+}
+#[cfg(test)]
+fn observe_frontmatter_admission(bytes: u64) {
+    TEST_FRONTMATTER_CALL_ADMITTED.with(|cell| cell.set(cell.get().saturating_add(bytes)));
+}
+#[cfg(test)]
+fn observe_frontmatter_buffer(bytes: u64) {
+    TEST_FRONTMATTER_IO_BYTES.with(|cell| cell.set(cell.get().saturating_add(bytes)));
+    let read = TEST_FRONTMATTER_CALL_READ.with(|cell| {
+        let total = cell.get().saturating_add(bytes);
+        cell.set(total);
+        total
+    });
+    TEST_FRONTMATTER_LAST_READ.with(|cell| cell.set(read));
+    let admitted = TEST_FRONTMATTER_CALL_ADMITTED.with(std::cell::Cell::get);
     TEST_FRONTMATTER_MAX_READ.with(|max_read| {
         if read > max_read.get() {
             max_read.set(read);
@@ -1175,6 +1197,14 @@ impl NativeMetadataRun {
     #[cfg(test)]
     pub fn test_frontmatter_entries() -> u64 {
         TEST_FRONTMATTER_ENTRIES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_frontmatter_io_bytes() -> u64 {
+        TEST_FRONTMATTER_IO_BYTES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_frontmatter_last_read() -> u64 {
+        TEST_FRONTMATTER_LAST_READ.with(std::cell::Cell::get)
     }
     #[cfg(test)]
     pub fn test_pointer_entries() -> u64 {
@@ -1699,30 +1729,47 @@ impl NativeMetadataRun {
                     slot.set(Some(self.query.cause.reads.used()));
                 }
             });
+            begin_frontmatter_observation();
         }
         let head_len = len.min(6);
+        #[cfg(test)]
+        let admitted_before_head = self.query.cause.reads.used();
         self.query.cause.admit_io(&self.claim, head_len)?;
+        #[cfg(test)]
+        observe_frontmatter_admission(
+            self.query
+                .cause
+                .reads
+                .used()
+                .saturating_sub(admitted_before_head),
+        );
         let mut head_bytes = vec![0u8; head_len as usize];
         file.read_exact_at(&mut head_bytes, 0)?;
         #[cfg(test)]
-        let mut read = head_len;
+        observe_frontmatter_buffer(head_bytes.len() as u64);
         let matched =
             head_bytes.starts_with(b"---") || head_bytes.starts_with("\u{feff}---".as_bytes());
         if matched {
             let extra = len.min(64 * 1024) - head_len;
             if extra > 0 {
+                #[cfg(test)]
+                let admitted_before_rest = self.query.cause.reads.used();
                 self.query.cause.admit_io(&self.claim, extra)?;
+                #[cfg(test)]
+                observe_frontmatter_admission(
+                    self.query
+                        .cause
+                        .reads
+                        .used()
+                        .saturating_sub(admitted_before_rest),
+                );
                 let mut rest = vec![0u8; extra as usize];
                 file.read_exact_at(&mut rest, head_len)?;
                 #[cfg(test)]
-                {
-                    read += extra;
-                }
+                observe_frontmatter_buffer(rest.len() as u64);
                 head_bytes.extend_from_slice(&rest);
             }
         }
-        #[cfg(test)]
-        record_frontmatter_read(read, read);
         let (title, descriptions, tags, present) = if matched {
             parse_frontmatter_fields(&String::from_utf8_lossy(&head_bytes))
         } else {
