@@ -192,7 +192,9 @@ impl NativeSemanticRun {
             "actual selected semantic method required"
         );
         anyhow::ensure!(
-            query.required_tags.is_empty(),
+            self.owner.sources.iter().all(|s| s
+                .annotations()
+                .matches_required_tags(&query.required_tags, query.case_sensitive)),
             "actual current native tag dependency required"
         );
         if self

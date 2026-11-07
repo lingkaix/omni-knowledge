@@ -11,7 +11,8 @@ pub use job::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
     NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
-    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryAnnotations, NativeQueryPageRefusal, NativeQueryPartition,
+    NativeQueryPartitionPage, NativeQuerySource,
     NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
     NativeRefreshJob, NativeRefreshScopeError, NativeSemanticRun, NativeTupleQuery,
     NativeTupleRead,
@@ -94,6 +95,16 @@ struct InventoryOwner {
     // Never retain a Permit here: a source's delivery checks may retain this inventory.
     _funding: InventoryCredit,
 }
+impl InventoryOwner {
+    pub(super) fn path_excluded(&self, path: &str) -> bool {
+        self.policy.0.read.outside_scope.iter().any(|p| {
+            path == p.as_str()
+                || path
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|tail| tail.starts_with('/'))
+        })
+    }
+}
 #[derive(Clone)]
 struct InventoryPolicy(Arc<PolicyOwner>);
 struct PolicyOwner {
@@ -167,6 +178,10 @@ impl NativeInventoryPage {
     pub fn sources(&self) -> impl Iterator<Item = NativeObservedSource> {
         Self::source_rows(self.page.clone())
     }
+    /// Current-scan rows that are not deleted or excluded, including unavailable observations.
+    pub fn observations(&self) -> impl Iterator<Item = NativeObservedSource> {
+        Self::current_rows(self.page.clone(), false)
+    }
     /// Recover this ONE actual holding without global release/reserve, only after every row/source
     /// dependent is gone. Refusal returns the owning page unchanged. No credit refund/pool exists.
     pub fn into_funding(self) -> std::result::Result<Holding, Self> {
@@ -181,12 +196,20 @@ impl NativeInventoryPage {
         Ok(_funding.into_holding())
     }
     fn source_rows(page: Arc<PageOwner>) -> impl Iterator<Item = NativeObservedSource> {
+        Self::current_rows(page, true)
+    }
+    fn current_rows(
+        page: Arc<PageOwner>,
+        available_only: bool,
+    ) -> impl Iterator<Item = NativeObservedSource> {
         (0..page.replay.observations.len()).filter_map(move |row| {
             let observation = &page.replay.observations[row];
             (observation.scan == page.inventory.scan
                 && observation.root == page.inventory.root
+                && observation.stat.backend == page.inventory.mount.context()
+                && !page.inventory.path_excluded(observation.stat.path.as_str())
                 && observation.change != ChangeKind::Deleted
-                && observation.availability == Availability::Available)
+                && (!available_only || observation.availability == Availability::Available))
                 .then(|| NativeObservedSource {
                     page: page.clone(),
                     row,
@@ -359,7 +382,7 @@ impl NativeLibraryService {
                     .map(|p| knowledge_core::data::RelativePath::new(p.as_str()).map_err(refused))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 // Canonical native bookkeeping is never original content or a source identity.
-                for path in [".omni", ".git", "journal"] {
+                for path in [".omni", ".git", "journal", "sources"] {
                     outside_scope
                         .push(knowledge_core::data::RelativePath::new(path).map_err(refused)?);
                 }

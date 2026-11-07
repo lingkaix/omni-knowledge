@@ -511,7 +511,9 @@ impl NativeQueryPartition {
             "BM25 not requested by actual Query"
         );
         anyhow::ensure!(
-            query.required_tags.is_empty(),
+            self.owner.sources.iter().all(|s| s
+                .annotations()
+                .matches_required_tags(&query.required_tags, query.case_sensitive)),
             "actual current native tag dependency required"
         );
         let text = query
@@ -560,7 +562,9 @@ impl NativeQueryPartition {
             "actual selected literal/regex method required"
         );
         anyhow::ensure!(
-            query.required_tags.is_empty(),
+            self.owner.sources.get(source).is_some_and(|s| s
+                .annotations()
+                .matches_required_tags(&query.required_tags, query.case_sensitive)),
             "actual current native tag dependency required"
         );
         let keyword = query

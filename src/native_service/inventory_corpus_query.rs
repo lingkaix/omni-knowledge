@@ -206,19 +206,159 @@ impl QueryCause {
         Ok(())
     }
 }
+/// Canonical authored metadata bound to an actual current source or pointer FD scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeQueryAnnotations {
+    pub source_id: wire::Id,
+    pub path: wire::RelativePath,
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub annotation_path: Option<wire::RelativePath>,
+    pub digest: Option<wire::Digest>,
+    pub digest_state: wire::DigestState,
+    pub availability: wire::Availability,
+}
+impl NativeQueryAnnotations {
+    pub fn matches_required_tags(&self, required_tags: &[String], case_sensitive: bool) -> bool {
+        required_tags
+            .iter()
+            .all(|required| self.tags.iter().any(|tag| eq_text(tag, required, case_sensitive)))
+    }
+    pub fn matches_tag_keyword(&self, keyword: &str, case_sensitive: bool) -> bool {
+        keyword
+            .split([',', '，'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .any(|part| self.tags.iter().any(|tag| eq_text(tag, part, case_sensitive)))
+    }
+    pub fn matches_file_keyword(&self, keyword: &str, case_sensitive: bool) -> bool {
+        if keyword.trim().is_empty() {
+            return true;
+        }
+        contains_text(self.path.as_str(), keyword, case_sensitive)
+            || contains_text(&self.title, keyword, case_sensitive)
+            || contains_text(&self.description, keyword, case_sensitive)
+    }
+}
+fn eq_text(left: &str, right: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        left == right
+    } else {
+        left.to_lowercase() == right.to_lowercase()
+    }
+}
+fn contains_text(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        haystack.contains(needle)
+    } else {
+        haystack.to_lowercase().contains(&needle.to_lowercase())
+    }
+}
+fn canonical_annotations(
+    document: &Document,
+    pointer_title: Option<String>,
+    pointer_descriptions: Vec<String>,
+    pointer_tags: Vec<String>,
+    pointer_path: Option<wire::RelativePath>,
+) -> Result<NativeQueryAnnotations> {
+    let meta = &document.metadata;
+    let mut descriptions = Vec::new();
+    if let Some(text) = meta.get("frontmatter_description") {
+        for part in text.split('\n') {
+            let part = part.trim();
+            if !part.is_empty() && !descriptions.iter().any(|item| item == part) {
+                descriptions.push(part.to_owned());
+            }
+        }
+    }
+    for part in pointer_descriptions {
+        if !descriptions.iter().any(|item| item == &part) {
+            descriptions.push(part);
+        }
+    }
+    let mut tags = Vec::new();
+    if let Some(text) = meta.get("frontmatter_tags") {
+        for tag in serde_json::from_str::<Vec<String>>(text)? {
+            if !tag.is_empty() && !tags.iter().any(|item| item == &tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    for tag in pointer_tags {
+        if !tags.iter().any(|item| item == &tag) {
+            tags.push(tag);
+        }
+    }
+    let title = pointer_title
+        .filter(|title| !title.is_empty())
+        .or_else(|| {
+            meta.get("frontmatter_title")
+                .cloned()
+                .filter(|title| !title.is_empty())
+        })
+        .unwrap_or_else(|| document.title.clone());
+    let path = wire::RelativePath::new(
+        document
+            .locator
+            .as_deref()
+            .context("actual source logical path absent")?,
+    )?;
+    let annotation_path = if let Some(pointer) = pointer_path {
+        Some(pointer)
+    } else if path.as_str().starts_with("wiki/")
+        || path.as_str().starts_with("pages/")
+        || meta.contains_key("frontmatter_page")
+    {
+        Some(path.clone())
+    } else {
+        None
+    };
+    Ok(NativeQueryAnnotations {
+        source_id: wire::Id::new(document.key.id.clone())?,
+        path,
+        title,
+        description: descriptions.join("\n"),
+        tags,
+        annotation_path,
+        digest: Some(wire::Digest::new(document.digest.clone())?),
+        digest_state: wire::DigestState::Verified,
+        availability: wire::Availability::Available,
+    })
+}
 /// One actual M1/source/Query-scope loan. Keep it through its final component/read/delivery owner.
 pub struct NativeQuerySource {
-    source: NativeSource,
+    annotations: NativeQueryAnnotations,
     part: SourcePart,
     cause: Arc<QueryCause>,
     library: usize,
     claim_owner: std::sync::Weak<Claim>,
     next: u64,
+    source: NativeSource,
 }
 impl NativeQuerySource {
     /// Actual current original FD/scope, never a display path or naked cached version grant.
     pub fn source(&self) -> &NativeSource {
         &self.source
+    }
+    /// Canonical title, description, and tags bound to this actual source scope.
+    pub fn annotations(&self) -> &NativeQueryAnnotations {
+        &self.annotations
+    }
+    /// Whether this source's canonical tags satisfy the admitted Query.
+    pub fn matches_required_tags(&self) -> Result<bool> {
+        self.source.check()?;
+        let wire::Command::Query { query } = self.cause.libraries[self.library]
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required");
+        };
+        Ok(self
+            .annotations
+            .matches_required_tags(&query.required_tags, query.case_sensitive))
     }
     /// Exact next source-table cursor, DATA rather than source permission or completeness.
     pub fn next(&self) -> u64 {
@@ -573,7 +713,36 @@ impl NativeTupleQuery {
             "foreign Query inventory owner"
         );
         part.check_reader(&selected.reader)?;
-        let bytes = part
+        let pointer_path = format!("sources/{}.md", observed.source_id());
+        let pointer_rel = wire::RelativePath::new(&pointer_path)?;
+        let pointer = match selected
+            .reader
+            .permit
+            .check_path(&service.library, &pointer_rel)
+        {
+            Err(wire::ErrorCode::NotExposed) => None,
+            Err(code) => return Err(refused_error(code)),
+            Ok(()) => match selected
+                .reader
+                .permit
+                .with_root(&service.library, |root| {
+                    Ok(LibraryHost::open_root(root, pointer_rel.as_str()))
+                })
+                .map_err(refused_error)?
+            {
+                Ok(file) => {
+                    let meta = file.metadata()?;
+                    anyhow::ensure!(
+                        meta.is_file() && meta.len() <= wire::MAX_CONTROL_FRAME_BYTES as u64,
+                        "actual pointer metadata refused"
+                    );
+                    Some((file, meta, pointer_rel))
+                }
+                Err(wire::ErrorCode::NotFound) => None,
+                Err(code) => return Err(refused_error(code)),
+            },
+        };
+        let mut bytes = part
             .framed_bytes()
             .checked_mul(16)
             .and_then(|n| {
@@ -583,6 +752,17 @@ impl NativeTupleQuery {
             })
             .and_then(|n| n.checked_add(1024 * 1024))
             .context("Query source scope envelope overflow")?;
+        if let Some((_, meta, _)) = &pointer
+            && meta.len() > 16 * 1024
+        {
+            bytes = bytes
+                .checked_add(
+                    meta.len()
+                        .checked_mul(16)
+                        .context("Query source scope envelope overflow")?,
+                )
+                .context("Query source scope envelope overflow")?;
+        }
         let scope = selected
             .reader
             .permit
@@ -603,13 +783,49 @@ impl NativeTupleQuery {
                 .map_err(refused_error)?;
             let data = part.data.clone();
             let source = part.source(service, &scope, observed)?;
+            let (pointer_title, pointer_descriptions, pointer_tags, pointer_path) =
+                if let Some((pointer_file, pointer_meta, pointer_rel)) = pointer {
+                    self.cause.admit_object(claim)?;
+                    self.cause.admit_io(claim, pointer_meta.len())?;
+                    anyhow::ensure!(
+                        stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
+                        "pointer changed before read"
+                    );
+                    let mut pointer_bytes = vec![0u8; pointer_meta.len() as usize];
+                    std::os::unix::fs::FileExt::read_exact_at(&pointer_file, &mut pointer_bytes, 0)?;
+                    anyhow::ensure!(
+                        stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
+                        "pointer changed after read"
+                    );
+                    LibraryHost::track_version(
+                        &service.library,
+                        pointer_rel.as_str(),
+                        &pointer_file,
+                        &pointer_meta,
+                        &scope,
+                    )
+                    .map_err(refused_error)?;
+                    let (title, descriptions, tags) =
+                        parse_pointer_markdown(&String::from_utf8(pointer_bytes)?);
+                    (title, descriptions, tags, Some(pointer_rel))
+                } else {
+                    (None, Vec::new(), Vec::new(), None)
+                };
+            let annotations = canonical_annotations(
+                &data.document,
+                pointer_title,
+                pointer_descriptions,
+                pointer_tags,
+                pointer_path,
+            )?;
             Ok(NativeQuerySource {
-                source,
+                annotations,
                 part: data,
                 cause: self.cause.clone(),
                 library,
                 claim_owner: Arc::downgrade(claim),
                 next,
+                source,
             })
         })();
         match result {
@@ -630,18 +846,19 @@ impl NativeTupleQuery {
         claim: &Claim,
     ) -> std::result::Result<(), wire::authority::ScopeRejoinError> {
         let NativeQuerySource {
-            source,
+            annotations,
             part,
             cause,
             library: _,
             claim_owner,
             next: _,
+            source,
         } = source;
         let matches = Arc::ptr_eq(&cause, &self.cause)
             && claim_owner
                 .upgrade()
                 .is_some_and(|owner| std::ptr::eq(owner.as_ref(), claim));
-        drop((part, cause));
+        drop((part, annotations, cause));
         let scope = source.into_query_scope();
         if !matches {
             return Err(wire::authority::ScopeRejoinError::Retained {

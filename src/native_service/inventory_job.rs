@@ -7,7 +7,8 @@ pub use corpus::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
     NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
-    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryAnnotations, NativeQueryPageRefusal, NativeQueryPartition,
+    NativeQueryPartitionPage, NativeQuerySource,
     NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
     NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
 };

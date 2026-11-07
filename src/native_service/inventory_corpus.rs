@@ -21,7 +21,8 @@ mod query;
 pub use query::{
     NativeBm25Run, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
     NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
-    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryAnnotations, NativeQueryPageRefusal, NativeQueryPartition,
+    NativeQueryPartitionPage, NativeQuerySource,
     NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
     NativeSemanticRun, NativeTupleQuery,
 };
@@ -932,12 +933,7 @@ impl NativeCorpusDraft {
                 continue;
             }
             let path = row.stat.path.as_str();
-            if inventory.policy.0.read.outside_scope.iter().any(|p| {
-                path == p.as_str()
-                    || path
-                        .strip_prefix(p.as_str())
-                        .is_some_and(|tail| tail.starts_with('/'))
-            }) {
+            if inventory.path_excluded(path) {
                 continue;
             }
             let wire::Command::Refresh { library_id, .. } =
@@ -1009,6 +1005,12 @@ impl NativeCorpusDraft {
             .and_then(|s| s.to_str())
             .unwrap_or(hint);
         let tape_start = self.files.as_ref().expect("files").tape.metadata()?.len();
+        let (fm_title, fm_descriptions, fm_tags, has_frontmatter) =
+            if extraction.format == "markdown" || hint.ends_with(".md") {
+                parse_frontmatter_fields(text)
+            } else {
+                (None, Vec::new(), Vec::new(), false)
+            };
         self.wait_growth(text.len() as u64, Some(input), progress)?;
         let before = tape_start;
         let mut target = self.files.as_ref().expect("files").tape.as_ref();
@@ -1036,6 +1038,21 @@ impl NativeCorpusDraft {
             );
             metadata.insert("representation_start".into(), position.to_string());
             metadata.insert("processing_status".into(), extraction.status.clone());
+            if has_frontmatter {
+                metadata.insert("frontmatter_page".into(), "1".into());
+                if let Some(title) = &fm_title {
+                    metadata.insert("frontmatter_title".into(), title.clone());
+                }
+                if !fm_descriptions.is_empty() {
+                    metadata.insert(
+                        "frontmatter_description".into(),
+                        fm_descriptions.join("\n"),
+                    );
+                }
+                if !fm_tags.is_empty() {
+                    metadata.insert("frontmatter_tags".into(), serde_json::to_string(&fm_tags)?);
+                }
+            }
             let content = if text.is_empty() {
                 Content::Unavailable
             } else {
@@ -1266,9 +1283,8 @@ fn metadata_only(row: &Observation) -> bool {
     row.availability != Availability::Available
         || matches!(row.verification, knowledge_storage::Verification::Failed(_))
 }
-fn stamp(file: &File) -> Result<[u64; 8]> {
-    let m = file.metadata()?;
-    Ok([
+fn stamp_from_meta(m: &std::fs::Metadata) -> [u64; 8] {
+    [
         m.dev(),
         m.ino(),
         m.len(),
@@ -1277,7 +1293,68 @@ fn stamp(file: &File) -> Result<[u64; 8]> {
         m.ctime() as u64,
         m.ctime_nsec() as u64,
         m.nlink(),
-    ])
+    ]
+}
+fn stamp(file: &File) -> Result<[u64; 8]> {
+    Ok(stamp_from_meta(&file.metadata()?))
+}
+fn push_distinct(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|item| item == value) {
+        values.push(value.to_owned());
+    }
+}
+pub(super) fn parse_frontmatter_fields(
+    text: &str,
+) -> (Option<String>, Vec<String>, Vec<String>, bool) {
+    let (fm, _) = crate::extract::markdown_frontmatter(text);
+    if fm.is_null() {
+        return (None, Vec::new(), Vec::new(), false);
+    }
+    let title = fm
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let mut descriptions = Vec::new();
+    for key in ["description", "legacy_description"] {
+        if let Some(value) = fm
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            push_distinct(&mut descriptions, value);
+        }
+    }
+    let mut tags = Vec::new();
+    for key in ["tags", "legacy_tags"] {
+        let Some(value) = fm.get(key) else { continue };
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if let Some(tag) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    push_distinct(&mut tags, tag);
+                }
+            }
+        } else if let Some(text) = value.as_str() {
+            for tag in text.split([',', '，']) {
+                let tag = tag.trim();
+                if !tag.is_empty() {
+                    push_distinct(&mut tags, tag);
+                }
+            }
+        }
+    }
+    (title, descriptions, tags, true)
+}
+pub(super) fn parse_pointer_markdown(text: &str) -> (Option<String>, Vec<String>, Vec<String>) {
+    let (title, mut descriptions, tags, _) = parse_frontmatter_fields(text);
+    let (_, body) = crate::extract::markdown_frontmatter(text);
+    let body = body.trim();
+    if !body.is_empty() {
+        push_distinct(&mut descriptions, body);
+    }
+    (title, descriptions, tags)
 }
 fn frame_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     let data = serde_json::to_vec(value)?;

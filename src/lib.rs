@@ -2804,8 +2804,9 @@ pub mod native_service {
         NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
         NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeObservedSource,
         NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
-        NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
-        NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+        NativeQueryAnnotations, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
+        NativeQueryPageRefusal, NativeQueryPartition,
+        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
         NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
         NativeRefreshScopeError, NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
     };
