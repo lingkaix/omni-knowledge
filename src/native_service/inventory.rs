@@ -10,9 +10,9 @@ pub(super) use job::RefreshCause;
 pub use job::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativePartitionResult, NativeQueryLibrary, NativeQueryLoans,
-    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
-    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
-    NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
+    NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage,
+    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::{
     admission::Holding,
@@ -27,6 +27,8 @@ use knowledge_storage::{
 };
 use omni_service::authority::SelectionLease;
 use std::sync::Arc;
+#[cfg(test)]
+thread_local! {static TEST_QUERY_INPUT_OBJECTS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};}
 
 /// Actual native inventory owner, immutable context epoch and complete persisted scan.
 /// This is neither a serialized observation nor permission to select another library/receiver.
@@ -62,6 +64,7 @@ struct InventoryOwner {
     root: (u64, u64),
     check_budget: Budget,
     input_bytes: u64,
+    input_objects: u64,
     // Current opaque owner epoch and actual context credit survive every dependent page/source.
     // Never retain a Permit here: a source's delivery checks may retain this inventory.
     _funding: InventoryCredit,
@@ -114,6 +117,12 @@ impl NativeInventoryPage {
     /// Native read spend including predecessor/read-ahead, not a logical cursor delta.
     pub fn read_bytes(&self) -> u64 {
         self.page.replay.read_bytes
+    }
+    /// Existing M1 metadata-object units, distinct from returned files/representations.
+    pub fn read_objects(&self) -> u64 {
+        (self.page.replay.observations.len()
+            + self.page.replay.checkpoints.len()
+            + self.page.replay.event_cursors.len()) as u64
     }
     /// True only when this actual journal reader reached its EOF.
     pub fn complete(&self) -> bool {
@@ -191,6 +200,10 @@ impl NativeObservedSource {
     }
 }
 impl NativeInventory {
+    #[cfg(test)]
+    pub(super) fn test_input_objects() -> u64 {
+        TEST_QUERY_INPUT_OBJECTS.get()
+    }
     /// Replay one paid page from the actual durable M1 stream; never accumulate journal history.
     /// The incoming holding covers the complete page plus wrapper before native inspection.
     pub fn page(
@@ -200,6 +213,31 @@ impl NativeInventory {
         funding: Holding,
     ) -> Result<NativeInventoryPage> {
         let funding = InventoryCredit(Some(funding));
+        let replay = self.replay_page(offset, budget, &funding)?;
+        Ok(self.paid_page(replay, funding))
+    }
+    // SAME decoder/FD/permissions, but an aggregate caller gets its actual incoming loan back.
+    pub(super) fn page_owning(
+        &self,
+        offset: u64,
+        budget: Budget,
+        funding: Holding,
+    ) -> std::result::Result<NativeInventoryPage, (anyhow::Error, Holding)> {
+        match self.replay_page(offset, budget, &funding) {
+            Ok(replay) => Ok(self.paid_page(replay, InventoryCredit(Some(funding)))),
+            Err(error) => Err((error, funding)),
+        }
+    }
+    fn paid_page(&self, replay: Replay, funding: InventoryCredit) -> NativeInventoryPage {
+        NativeInventoryPage {
+            page: Arc::new(PageOwner {
+                replay,
+                inventory: self.owner.clone(),
+                _funding: funding,
+            }),
+        }
+    }
+    fn replay_page(&self, offset: u64, budget: Budget, funding: &Holding) -> Result<Replay> {
         anyhow::ensure!(
             funding.remaining()?.memory_bytes
                 >= budget
@@ -213,18 +251,12 @@ impl NativeInventory {
             &self.owner.mount,
             offset,
             &Preflight {
-                holding: &funding,
+                holding: funding,
                 budget,
             },
         )?;
         self.owner.policy.0.lease.check().map_err(refused_error)?;
-        Ok(NativeInventoryPage {
-            page: Arc::new(PageOwner {
-                replay,
-                inventory: self.owner.clone(),
-                _funding: funding,
-            }),
-        })
+        Ok(replay)
     }
     /// Actual complete durable scan ID for progress, never authorization or a global writer clock.
     pub fn scan(&self) -> &str {
@@ -403,11 +435,38 @@ impl NativeLibraryService {
         let mut found = false;
         loop {
             permit.check().map_err(refused_error)?;
+            let remaining = Budget {
+                max_files: requested.max_files.saturating_sub(records),
+                max_bytes: requested.max_bytes.saturating_sub(bytes),
+                max_millis: deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(u128::from(requested.max_millis)) as u64,
+                max_memory_bytes: requested.max_memory_bytes,
+            };
             anyhow::ensure!(
-                Instant::now() < deadline,
-                "query inventory deadline elapsed"
+                remaining.max_files > 0 && remaining.max_bytes > 0 && remaining.max_millis > 0,
+                knowledge_storage::Error::Budget
             );
-            let replay = store.replay_tracking_readonly(&mount, offset, preflight)?;
+            let replay = store.replay_tracking_readonly(
+                &mount,
+                offset,
+                &Preflight {
+                    holding: preflight.holding,
+                    budget: remaining,
+                },
+            )?;
+            #[cfg(test)]
+            TEST_QUERY_INPUT_OBJECTS.set(
+                TEST_QUERY_INPUT_OBJECTS.get()
+                    + (replay.observations.len()
+                        + replay.checkpoints.len()
+                        + replay.event_cursors.len()) as u64,
+            );
+            anyhow::ensure!(
+                Instant::now() < deadline && replay.issue != Some(knowledge_storage::Error::Budget),
+                knowledge_storage::Error::Budget
+            );
             anyhow::ensure!(
                 replay.issue.is_none(),
                 "query inventory evidence requires recovery"
@@ -424,7 +483,7 @@ impl NativeLibraryService {
                 .context("query inventory records overflow")?;
             anyhow::ensure!(
                 bytes <= requested.max_bytes && records <= requested.max_files,
-                "query inventory evidence budget exhausted"
+                knowledge_storage::Error::Budget
             );
             for checkpoint in &replay.checkpoints {
                 if checkpoint.scan == scan {
@@ -459,6 +518,7 @@ impl NativeLibraryService {
                 scan: scan.to_owned(),
                 root,
                 input_bytes: bytes,
+                input_objects: records,
                 check_budget: Budget {
                     max_files: 1,
                     max_bytes: 128 * 1024,
@@ -547,6 +607,7 @@ impl NativeLibraryService {
                     scan,
                     root,
                     input_bytes: 0,
+                    input_objects: 0,
                     check_budget,
                     _funding: context_funding,
                 }),

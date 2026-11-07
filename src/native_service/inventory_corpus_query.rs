@@ -2,7 +2,7 @@
 use super::*;
 #[path = "inventory_corpus_query_budget.rs"]
 mod budget;
-pub(super) use budget::{QueryBudgetExhausted, ReadAllowance};
+pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
 #[path = "inventory_corpus_controller.rs"]
 mod controller;
 pub use controller::{NativeBm25Run, NativeQueryStep};
@@ -34,6 +34,43 @@ impl NativeQueryLibrary {
         }
     }
 }
+/// Actual page allocation loan, never an owning-work-free error code.
+pub enum NativeQueryPageLoan {
+    /// Decoder never published a page; its actual incoming credit remains owned.
+    Funding(Holding),
+    /// Actual page/data/pins remain owned until its last consumer dies.
+    Page(NativeInventoryPage),
+}
+/// A failed page factory retains its actual input credit or its actual produced page.
+pub struct NativeQueryPageRefusal {
+    cause: anyhow::Error,
+    loan: NativeQueryPageLoan,
+}
+impl std::fmt::Debug for NativeQueryPageRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for NativeQueryPageRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "native Query page refused while retaining its actual loan: {}",
+            self.cause
+        )
+    }
+}
+impl std::error::Error for NativeQueryPageRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+impl NativeQueryPageRefusal {
+    /// Return the actual owner; destroy page data before exact same-Claim rejoin.
+    pub fn into_parts(self) -> (anyhow::Error, NativeQueryPageLoan) {
+        (self.cause, self.loan)
+    }
+}
 pub struct NativeTupleQuery {
     cause: Arc<QueryCause>,
 }
@@ -48,13 +85,20 @@ struct QueryCause {
     deadline: Instant,
     reads: ReadAllowance,
     // DATA baseline of separately funded pre-submission inputs, never a permission/epoch cache.
-    execution_base: std::sync::OnceLock<u64>,
+    execution_base: std::sync::OnceLock<DataAmount>,
     _funding: Work,
 }
 impl QueryCause {
     fn admit_io(&self, claim: &Claim, bytes: u64) -> Result<()> {
         self.check_scope_claim(claim)?;
-        self.reads.admit(bytes, self.execution_limit(claim)?)?;
+        self.reads
+            .admit(bytes, self.execution_limit(claim)?.bytes)?;
+        self.check_scope_claim(claim)
+    }
+    fn admit_object(&self, claim: &Claim) -> Result<()> {
+        self.check_scope_claim(claim)?;
+        self.reads
+            .admit_object(self.execution_limit(claim)?.objects)?;
         self.check_scope_claim(claim)
     }
     fn admit_planning(&self, bytes: u64) -> Result<()> {
@@ -64,15 +108,28 @@ impl QueryCause {
         );
         self.reads.admit(bytes, self.request_budget.max_bytes)
     }
-    fn execution_limit(&self, claim: &Claim) -> Result<u64> {
+    fn admit_planning_object(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.execution_base.get().is_none(),
+            "query quote metadata requires pre-submission ownership"
+        );
+        self.reads.admit_object(self.request_budget.max_files)
+    }
+    fn execution_limit(&self, claim: &Claim) -> Result<DataAmount> {
         let base = *self
             .execution_base
             .get()
             .context("actual aggregate Query submission required")?;
-        Ok(self
-            .request_budget
-            .max_bytes
-            .min(base.saturating_add(claim.budget().max_bytes)))
+        Ok(DataAmount {
+            bytes: self
+                .request_budget
+                .max_bytes
+                .min(base.bytes.saturating_add(claim.budget().max_bytes)),
+            objects: self
+                .request_budget
+                .max_files
+                .min(base.objects.saturating_add(claim.budget().max_files)),
+        })
     }
     fn key(&self) -> Key<'_> {
         Key {
@@ -275,7 +332,14 @@ impl NativeTupleQuery {
                 .and_then(|n| n.checked_add(scope.inventory.owner.input_bytes))
                 .ok_or(QueryBudgetExhausted)
         })?;
-        anyhow::ensure!(spent <= query.budget.max_bytes.get(), QueryBudgetExhausted);
+        let objects = inputs.libraries.iter().try_fold(0u64, |n, scope| {
+            n.checked_add(scope.inventory.owner.input_objects)
+                .ok_or(QueryBudgetExhausted)
+        })?;
+        anyhow::ensure!(
+            spent <= query.budget.max_bytes.get() && objects <= query.budget.max_files.get(),
+            QueryBudgetExhausted
+        );
         Ok(Self {
             cause: Arc::new(QueryCause {
                 descriptor,
@@ -295,7 +359,10 @@ impl NativeTupleQuery {
                     .map(|scope| scope.reader.deadline)
                     .min()
                     .expect("actual nonempty Query libraries"),
-                reads: ReadAllowance::new(spent),
+                reads: ReadAllowance::from_amount(DataAmount {
+                    bytes: spent,
+                    objects,
+                }),
                 execution_base: std::sync::OnceLock::new(),
                 libraries: inputs.libraries,
                 _funding: inputs.funding,
@@ -331,7 +398,7 @@ impl NativeTupleQuery {
         );
         self.cause
             .execution_base
-            .get_or_init(|| self.cause.reads.used());
+            .get_or_init(|| self.cause.reads.amount());
         Ok(Account::current()?.submit(Submission {
             key: self.key(),
             operation_id: plan.operation_id,
@@ -351,42 +418,71 @@ impl NativeTupleQuery {
         budget: Budget,
         funding: Holding,
     ) -> Result<NativeInventoryPage> {
-        let funding = InventoryCredit(Some(funding));
-        self.cause.check_claim(claim)?;
-        let scope = self
-            .cause
-            .libraries
-            .get(library)
-            .context("actual Query library index")?;
-        let b = claim.budget();
-        anyhow::ensure!(
-            budget.max_files <= b.max_files
-                && budget.max_bytes <= b.max_bytes
-                && budget.max_millis <= b.max_millis
-                && budget.max_memory_bytes <= b.max_memory_bytes,
-            "Query page exceeds actual claim budget"
-        );
-        self.cause
-            .reads
-            .with_remaining(self.cause.execution_limit(claim)?, |remaining| {
-                self.cause.check_scope_claim(claim)?;
-                let page = scope.inventory.page(
-                    offset,
-                    Budget {
-                        max_bytes: budget.max_bytes.min(remaining),
-                        ..budget
-                    },
-                    funding.into_holding(),
-                )?;
-                if page.issue() == Some(&knowledge_storage::Error::Budget)
-                    || (!page.complete() && page.next_offset() == offset)
-                {
-                    return Err(QueryBudgetExhausted.into());
-                }
-                let spent = page.read_bytes();
-                self.cause.check_scope_claim(claim)?;
-                Ok((page, spent))
-            })
+        let mut funding = Some(funding);
+        let mut retained: Option<NativeInventoryPage> = None;
+        let result = (|| -> Result<NativeInventoryPage> {
+            self.cause.check_claim(claim)?;
+            let scope = self
+                .cause
+                .libraries
+                .get(library)
+                .context("actual Query library index")?;
+            let b = claim.budget();
+            anyhow::ensure!(
+                budget.max_files <= b.max_files
+                    && budget.max_bytes <= b.max_bytes
+                    && budget.max_millis <= b.max_millis
+                    && budget.max_memory_bytes <= b.max_memory_bytes,
+                "Query page exceeds actual claim budget"
+            );
+            self.cause
+                .reads
+                .with_remaining(self.cause.execution_limit(claim)?, |remaining| {
+                    self.cause.check_scope_claim(claim)?;
+                    match scope.inventory.page_owning(
+                        offset,
+                        Budget {
+                            max_bytes: budget.max_bytes.min(remaining.bytes),
+                            max_files: budget.max_files.min(remaining.objects),
+                            ..budget
+                        },
+                        funding.take().expect("actual incoming page credit"),
+                    ) {
+                        Ok(page) => retained = Some(page),
+                        Err((cause, credit)) => {
+                            funding = Some(credit);
+                            return Err(cause);
+                        }
+                    }
+                    let page = retained.as_ref().expect("actual decoder page");
+                    if page.issue() == Some(&knowledge_storage::Error::Budget)
+                        || (!page.complete() && page.next_offset() == offset)
+                    {
+                        return Err(QueryBudgetExhausted.into());
+                    }
+                    let spent = DataAmount {
+                        bytes: page.read_bytes(),
+                        objects: page.read_objects(),
+                    };
+                    self.cause.check_scope_claim(claim)?;
+                    Ok((retained.take().expect("actual successful page"), spent))
+                })
+        })();
+        result.map_err(|cause| {
+            let budget = cause.is::<QueryBudgetExhausted>()
+                || cause.downcast_ref::<knowledge_storage::Error>()
+                    == Some(&knowledge_storage::Error::Budget);
+            let loan = match retained {
+                Some(page) => NativeQueryPageLoan::Page(page),
+                None => NativeQueryPageLoan::Funding(funding.expect("actual refused page credit")),
+            };
+            let error = anyhow::Error::new(NativeQueryPageRefusal { cause, loan });
+            if budget {
+                error.context(QueryBudgetExhausted)
+            } else {
+                error
+            }
+        })
     }
     /// Already prepaid tuple metadata supplies the exact framed quote. A fresh SAME-Claim SDK
     /// scope precedes retained metadata copies and actual original-source FD inspection.
@@ -408,15 +504,40 @@ impl NativeTupleQuery {
             Arc::ptr_eq(&observed.page.inventory, &selected.inventory.owner),
             "foreign Query inventory owner"
         );
+        self.cause.admit_object(claim)?;
         let Some((part, next)) = selected
             .reader
             .part_admitted(offset, &|n| self.cause.admit_io(claim, n))?
         else {
             return Ok(None);
         };
-        let bytes = next
-            .checked_sub(offset)
-            .and_then(|n| n.checked_mul(16))
+        self.source_part(service, claim, library, observed, part, next)
+            .map(Some)
+    }
+    // Reuse the SAME actual decoded FD/receipt, never cached permission or a path/hash reopen.
+    fn source_part(
+        &self,
+        service: &NativeLibraryService,
+        claim: &Arc<Claim>,
+        library: usize,
+        observed: NativeObservedSource,
+        part: super::reader::TuplePart,
+        next: u64,
+    ) -> Result<NativeQuerySource> {
+        self.cause.check_claim(claim)?;
+        let selected = self
+            .cause
+            .libraries
+            .get(library)
+            .context("actual Query library index")?;
+        anyhow::ensure!(
+            Arc::ptr_eq(&observed.page.inventory, &selected.inventory.owner),
+            "foreign Query inventory owner"
+        );
+        part.check_reader(&selected.reader)?;
+        let bytes = part
+            .framed_bytes()
+            .checked_mul(16)
             .and_then(|n| {
                 n.checked_add(
                     (observed.observation().stat.path.as_str().len() as u64).checked_mul(32)?,
@@ -438,34 +559,23 @@ impl NativeTupleQuery {
             .map_err(refused_error)?;
         let checked = self.cause.clone();
         let live = claim.clone();
-        let result = (|| -> Result<Option<NativeQuerySource>> {
+        let result = (|| -> Result<NativeQuerySource> {
             scope
                 .retain_check(Arc::new(move || checked.check_scope_claim(&live).is_ok()))
                 .map_err(refused_error)?;
             let data = part.data.clone();
             let source = part.source(service, &scope, observed)?;
-            Ok(Some(NativeQuerySource {
+            Ok(NativeQuerySource {
                 source,
                 part: data,
                 cause: self.cause.clone(),
                 library,
                 claim_owner: Arc::downgrade(claim),
                 next,
-            }))
+            })
         })();
         match result {
-            Ok(Some(source)) => Ok(Some(source)),
-            Ok(None) => {
-                scope
-                    .rejoin_processing_scope(claim, self.key())
-                    .map_err(|scope| {
-                        anyhow::Error::new(super::super::NativeRefreshScopeError {
-                            scope,
-                            cause: anyhow::anyhow!("Query source EOF cleanup refused"),
-                        })
-                    })?;
-                Ok(None)
-            }
+            Ok(source) => Ok(source),
             Err(cause) => match scope.rejoin_processing_scope(claim, self.key()) {
                 Ok(()) => Err(cause),
                 Err(scope) => Err(anyhow::Error::new(super::super::NativeRefreshScopeError {

@@ -97,6 +97,7 @@ impl NativeTupleQuery {
         let mut max_row = 0;
         while at < file.metadata()?.len() {
             lib.reader.check()?;
+            self.cause.admit_planning_object()?;
             let (part, next) =
                 read_frame_admitted::<SourcePart>(&file, at, &|n| self.cause.admit_planning(n))?;
             let path = part
@@ -259,6 +260,20 @@ impl NativeBm25Run {
         partition::test_component_open_count()
     }
     #[cfg(test)]
+    pub fn test_part_reads(&self) -> u64 {
+        NativeTupleRead::test_part_read_count()
+    }
+    #[cfg(test)]
+    pub fn test_owned_page_objects(&self) -> u64 {
+        self.data.as_ref().map_or(0, |d| {
+            d.page.as_ref().map_or(0, |(_, p)| p.read_objects())
+                + d.pinned_pages
+                    .iter()
+                    .map(NativeInventoryPage::read_objects)
+                    .sum::<u64>()
+        })
+    }
+    #[cfg(test)]
     pub fn test_scope_clone(&self) -> Option<Permit> {
         self.data
             .as_ref()?
@@ -319,6 +334,11 @@ impl NativeBm25Run {
     /// Conservative admitted data bytes, including prior input metadata, NOT completed-IO/RSS.
     pub fn bytes_admitted(&self) -> u64 {
         self.query.cause.reads.used()
+    }
+    /// Conservative source/metadata examinations, including input work and unavailable entries.
+    /// This is not a distinct returned-file count; failed opaque spans retain their possible work.
+    pub fn objects_admitted(&self) -> u64 {
+        self.query.cause.reads.amount().objects
     }
     /// Actual catalog partitions examined, not an invented original-file count.
     pub fn partitions(&self) -> u64 {
@@ -488,6 +508,7 @@ impl NativeBm25Run {
         for expected in &shard.parts {
             let library = &self.query.cause.libraries[self.library];
             let cursor = self.data.as_ref().expect("actual owner").source;
+            self.query.cause.admit_object(&self.claim)?;
             let (part, after) = library
                 .reader
                 .part_admitted(cursor, &|n| self.query.cause.admit_io(&self.claim, n))?
@@ -496,7 +517,6 @@ impl NativeBm25Run {
                 part.data == *expected && expected.page_offset == shard.page_offset,
                 "source/catalog producer receipts differ"
             );
-            drop(part);
             let observed = self
                 .data
                 .as_ref()
@@ -512,17 +532,16 @@ impl NativeBm25Run {
                             == expected.document.locator.as_deref()
                 })
                 .context("actual M1 page source absent")?;
-            let result = self
-                .query
-                .source(service, &self.claim, self.library, observed, cursor);
+            let result =
+                self.query
+                    .source_part(service, &self.claim, self.library, observed, part, after);
             match result {
-                Ok(Some(source)) => self
+                Ok(source) => self
                     .data
                     .as_mut()
                     .expect("actual owner")
                     .pending
                     .push(source),
-                Ok(None) => bail!("selected source frame disappeared"),
                 Err(error) => {
                     // An actual owning scope refusal is NEVER downgraded to an omitted DTO row.
                     if error
@@ -784,14 +803,26 @@ impl NativeBm25Run {
             data.pending
                 .extend(std::mem::take(&mut data.sources).into_values());
             if let Some(error) = data.failure.take() {
-                match error.downcast::<crate::native_service::NativeRefreshScopeError>() {
-                    Ok(owned) => match owned.scope {
-                        wire::authority::ScopeRejoinError::Retained { scope, .. } => {
-                            data.scopes.push(*scope)
+                match error.downcast::<NativeQueryPageRefusal>() {
+                    Ok(owned) => {
+                        let (cause, loan) = owned.into_parts();
+                        data.failure = Some(cause);
+                        match loan {
+                            NativeQueryPageLoan::Funding(holding) => data.credits.push(holding),
+                            NativeQueryPageLoan::Page(page) => data.pinned_pages.push(page),
                         }
-                        wire::authority::ScopeRejoinError::Released(_) => {}
-                    },
-                    Err(error) => drop(error),
+                    }
+                    Err(error) => {
+                        match error.downcast::<crate::native_service::NativeRefreshScopeError>() {
+                            Ok(owned) => match owned.scope {
+                                wire::authority::ScopeRejoinError::Retained { scope, .. } => {
+                                    data.scopes.push(*scope)
+                                }
+                                wire::authority::ScopeRejoinError::Released(_) => {}
+                            },
+                            Err(error) => drop(error),
+                        }
+                    }
                 }
             }
         }

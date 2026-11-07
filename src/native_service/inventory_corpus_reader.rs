@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 
 const READER_MEMORY: u64 = 8 * 1024 * 1024;
 #[cfg(test)]
-thread_local! {static TEST_UNPINNED_HEADERS:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};}
+thread_local! {
+    static TEST_UNPINNED_HEADERS:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};
+    static TEST_SOURCE_PART_READS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+}
 struct Inputs {
     permit: Arc<Permit>,
     funding: Option<Work>,
@@ -212,8 +215,24 @@ pub(super) struct TuplePart {
     physical: Arc<Physical>,
     source_rows: Arc<File>,
     rows_version: [u64; 8],
+    framed_bytes: u64,
 }
 impl TuplePart {
+    pub(super) fn framed_bytes(&self) -> u64 {
+        self.framed_bytes
+    }
+    pub(super) fn check_reader(&self, reader: &NativeTupleRead) -> Result<()> {
+        anyhow::ensure!(
+            Arc::ptr_eq(&self.physical, &reader.physical),
+            "foreign actual tuple-part owner"
+        );
+        reader.check()?;
+        anyhow::ensure!(
+            stamp(&self.source_rows)? == self.rows_version,
+            "source table changed after actual decode"
+        );
+        Ok(())
+    }
     fn check(&self, file: &File) -> Result<()> {
         self.physical.check()?;
         anyhow::ensure!(
@@ -254,6 +273,10 @@ impl TuplePart {
     }
 }
 impl NativeTupleRead {
+    #[cfg(test)]
+    pub(super) fn test_part_read_count() -> u64 {
+        TEST_SOURCE_PART_READS.get()
+    }
     /// Bind one opaque cached part to a SEPARATE actual current M1 row and Query read scope.
     /// Checks actual original FD/stamp without whole-NAS body hashing; stale requires Refresh.
     /// Returned source retains this aggregate metadata/pin owner through its last read/delivery.
@@ -296,6 +319,8 @@ impl NativeTupleRead {
             "source cursor is outside selected tuple"
         );
         let (data, next) = read_frame_admitted::<SourcePart>(&file, offset, admit)?;
+        #[cfg(test)]
+        TEST_SOURCE_PART_READS.set(TEST_SOURCE_PART_READS.get() + 1);
         self.check()?;
         anyhow::ensure!(
             stamp(&file)? == version,
@@ -307,6 +332,7 @@ impl NativeTupleRead {
                 physical: self.physical.clone(),
                 source_rows: file,
                 rows_version: version,
+                framed_bytes: next - offset,
             },
             next,
         )))

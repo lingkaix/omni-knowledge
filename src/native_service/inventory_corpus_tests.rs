@@ -120,6 +120,8 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             "query-byte-budget",
             "query-byte-phase",
             "query-range-budget",
+            "query-object-budget",
+            "query-input-object-budget",
             "query-drop-tail",
             "waiting",
             "waiting-after-progress",

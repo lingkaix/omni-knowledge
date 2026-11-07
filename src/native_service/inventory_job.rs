@@ -6,9 +6,9 @@ use crate::native_service::source::{refused_error, selected_context};
 pub use corpus::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativePartitionResult, NativeQueryLibrary, NativeQueryLoans,
-    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
-    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeTupleQuery,
-    NativeTupleRead,
+    NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage,
+    NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeQueryStep, NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};

@@ -81,22 +81,31 @@ pub(super) fn run(
     // Even a synchronous failed preflight must not lose its actual Holding via Holding::drop.
     let before_bad = account.status().unwrap().reserved.memory_bytes;
     let bad = holding(1024, 0);
-    assert!(
-        query
-            .page(
-                &claim,
-                usize::MAX,
-                0,
-                Budget {
-                    max_files: 1,
-                    max_bytes: 1024,
-                    max_millis: 1000,
-                    max_memory_bytes: 1024
-                },
-                bad
-            )
-            .is_err()
+    let refused = match query.page(
+        &claim,
+        usize::MAX,
+        0,
+        Budget {
+            max_files: 1,
+            max_bytes: 1024,
+            max_millis: 1000,
+            max_memory_bytes: 1024,
+        },
+        bad,
+    ) {
+        Ok(_) => panic!("foreign library page must refuse"),
+        Err(error) => error.downcast::<NativeQueryPageRefusal>().unwrap(),
+    };
+    assert_eq!(
+        account.status().unwrap().reserved.memory_bytes,
+        before_bad + 1024,
+        "actual input credit must remain owned until explicit caller cleanup"
     );
+    let (_, loan) = refused.into_parts();
+    match loan {
+        NativeQueryPageLoan::Funding(mut actual) => actual.finish().unwrap(),
+        NativeQueryPageLoan::Page(_) => panic!("foreign library refusal cannot publish a page"),
+    }
     assert_eq!(account.status().unwrap().reserved.memory_bytes, before_bad);
     let mut cursor = 0;
     let (page, actual) = loop {
@@ -396,7 +405,10 @@ pub(super) fn run_whole_bm25(
     let changed = mode == "query-source-change";
     let tiny = mode == "query-byte-budget";
     let range_limited = mode == "query-range-budget";
-    let limited = tiny || range_limited;
+    let object_limited = mode == "query-object-budget";
+    let limited = tiny || range_limited || object_limited;
+    let input_limited = mode == "query-input-object-budget";
+    let input_before = NativeInventory::test_input_objects();
     let byte_budget = match mode {
         "query-byte-budget" => 1,
         "query-byte-phase" => 22 * 1024 * 1024,
@@ -405,24 +417,42 @@ pub(super) fn run_whole_bm25(
     };
     let account = Account::current().unwrap();
     let mut scratch = holding(4 * 1024 * 1024, 0);
-    let inventory = service
-        .inventory_for_query(
-            owner,
-            permit,
-            "wiki",
-            scan,
-            holding(2 * 1024 * 1024, 0),
-            &Preflight {
-                holding: &scratch,
-                budget: Budget {
-                    max_files: 1000,
-                    max_bytes: 64 * 1024 * 1024,
-                    max_millis: 60000,
-                    max_memory_bytes: 4 * 1024 * 1024,
-                },
+    let inventory = service.inventory_for_query(
+        owner,
+        permit,
+        "wiki",
+        scan,
+        holding(2 * 1024 * 1024, 0),
+        &Preflight {
+            holding: &scratch,
+            budget: Budget {
+                max_files: if input_limited { 70 } else { 1000 },
+                max_bytes: 64 * 1024 * 1024,
+                max_millis: 60000,
+                max_memory_bytes: 4 * 1024 * 1024,
             },
-        )
-        .unwrap();
+        },
+    );
+    if input_limited {
+        let examined = NativeInventory::test_input_objects() - input_before;
+        let error = match inventory {
+            Err(error) => error,
+            Ok(_) => panic!("actual input object ceiling cannot authorize a complete inventory"),
+        };
+        scratch.finish().unwrap();
+        eprintln!("actual native M1 input objects decoded={examined} under ceiling70");
+        assert!(
+            examined <= 70,
+            "native input pages must admit remaining actual metadata objects BEFORE replay, not inspect over budget then refuse"
+        );
+        assert_eq!(
+            error.downcast_ref::<knowledge_storage::Error>(),
+            Some(&knowledge_storage::Error::Budget),
+            "input ceiling needs a fixed typed budget refusal, not recovery/source absence"
+        );
+        return;
+    }
+    let inventory = inventory.unwrap();
     let reader = service
         .open_corpus_tuple(owner, permit.clone(), ready(NativeTupleRead::requirement()))
         .unwrap();
@@ -443,7 +473,7 @@ pub(super) fn run_whole_bm25(
             operation_id: "actual-whole-bm25",
             job_id: "actual-whole-bm25-job",
             budget: Budget {
-                max_files: 1000,
+                max_files: if object_limited { 70 } else { 1000 },
                 max_bytes: byte_budget,
                 max_millis: 60000,
                 max_memory_bytes: need.memory_bytes,
@@ -511,6 +541,8 @@ pub(super) fn run_whole_bm25(
     }
     let opened = walk.test_component_opens();
     let metadata_reads = walk.test_frame_read_bytes();
+    let part_reads = walk.test_part_reads();
+    let object_base = walk.objects_admitted();
     let start = Instant::now();
     let mut stopped = false;
     loop {
@@ -530,11 +562,12 @@ pub(super) fn run_whole_bm25(
         }
     }
     eprintln!(
-        "actual whole-library BM25 elapsed={:?} partitions={} unavailable_parts={} admitted-data-bytes={}",
+        "actual whole-library BM25 elapsed={:?} partitions={} unavailable_parts={} admitted-data-bytes={} admitted-objects={}",
         start.elapsed(),
         walk.partitions(),
         walk.unavailable_parts(),
-        walk.bytes_admitted()
+        walk.bytes_admitted(),
+        walk.objects_admitted()
     );
     if limited {
         assert!(
@@ -557,6 +590,25 @@ pub(super) fn run_whole_bm25(
                 opened,
                 "no generation payload may open after insufficient actual byte admission"
             );
+        } else if object_limited {
+            let decoded = walk.test_part_reads() - part_reads;
+            let pages = walk.test_owned_page_objects();
+            let admitted = walk.objects_admitted() - object_base;
+            eprintln!(
+                "actual runtime source-frame decodes={decoded}, owned M1 metadataobjects={pages}, admitted={admitted}"
+            );
+            assert!(
+                decoded + pages <= admitted,
+                "actual source metadata object must be admitted BEFORE native FD decoding, not after duplicate inspections"
+            );
+            assert!(
+                walk.test_frame_read_bytes() > metadata_reads,
+                "object control must actually examine native metadata before exhaustion"
+            );
+            assert!(
+                walk.partitions() < shards,
+                "insufficient object allowance cannot claim the full walk"
+            );
         } else {
             assert!(
                 walk.test_component_opens() > opened,
@@ -567,6 +619,7 @@ pub(super) fn run_whole_bm25(
             walk.test_component_opens(),
             walk.test_frame_read_bytes(),
             walk.bytes_admitted(),
+            walk.objects_admitted(),
         );
         assert!(
             walk.step(service).is_failed(),
@@ -576,7 +629,8 @@ pub(super) fn run_whole_bm25(
             (
                 walk.test_component_opens(),
                 walk.test_frame_read_bytes(),
-                walk.bytes_admitted()
+                walk.bytes_admitted(),
+                walk.objects_admitted()
             ),
             observed
         );
