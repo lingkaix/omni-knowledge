@@ -23,8 +23,8 @@ pub use query::{
     NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
     NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
     NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
-    NativeWholeSemanticRun,
+    NativeQueryStageResources, NativeQueryStep, NativeScanOccurrence, NativeScanRun,
+    NativeSemanticRun, NativeTupleQuery, NativeWholeSemanticRun, NativeQueryController,
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;

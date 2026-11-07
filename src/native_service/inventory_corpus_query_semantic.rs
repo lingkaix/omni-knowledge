@@ -336,6 +336,10 @@ impl NativeSemanticRun {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_WHOLE_SEMANTIC_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 /// One whole-library semantic pass: keyword vector, one `rows.bin` scan, and the winning sources.
 /// Evidence, the vector result, and errors die before source scopes and Claim loans rejoin.
 pub struct NativeWholeSemanticRun {
@@ -1166,6 +1170,8 @@ impl NativeWholeSemanticRun {
                 part_offsets: std::collections::BTreeMap::new(),
                 callback_error: None,
             };
+            #[cfg(test)]
+            TEST_WHOLE_SEMANTIC_PASSES.with(|count| count.set(count.get() + 1));
             let queried = store.query_rows(vector, limit, |row| stream.accept(row));
             if let Some(error) = stream.callback_error.take() {
                 return Err(error);
@@ -1521,6 +1527,10 @@ impl NativeWholeSemanticRun {
         self.query.cause.reads.amount().objects
     }
     #[cfg(test)]
+    pub fn test_whole_passes() -> u64 {
+        TEST_WHOLE_SEMANTIC_PASSES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
     pub fn test_component_opens(&self) -> u64 {
         super::test_component_open_count()
     }
@@ -1541,6 +1551,17 @@ impl NativeWholeSemanticRun {
             .as_mut()
             .map(|data| std::mem::take(&mut data.sources))
             .unwrap_or_default()
+    }
+    /// Pages kept alive by transferred semantic observers. `finish` cannot recover them.
+    pub(in crate::native_service) fn take_retained_pages(&mut self) -> Vec<NativeInventoryPage> {
+        let Some(data) = self.data.as_mut() else {
+            return Vec::new();
+        };
+        let mut pages = std::mem::take(&mut data.pinned_pages);
+        if let Some((_, page)) = data.page.take() {
+            pages.push(page);
+        }
+        pages
     }
     /// Destroy evidence, the vector result, and errors, then close sources and rejoin loans.
     /// A live scope, page, reader, or embedding returns this owner.

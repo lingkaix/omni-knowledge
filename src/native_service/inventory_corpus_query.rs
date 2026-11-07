@@ -8,7 +8,10 @@ mod budget;
 pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
 #[path = "inventory_corpus_controller.rs"]
 mod controller;
-pub use controller::{NativeBm25Run, NativeMetadataRun, NativeQueryStep};
+pub use controller::{
+    NativeBm25Run, NativeMetadataRun, NativeQueryController, NativeQueryStep, NativeScanOccurrence,
+    NativeScanRun,
+};
 #[path = "inventory_corpus_query_embedding.rs"]
 mod keyword_embedding;
 pub use keyword_embedding::NativeQueryEmbedding;

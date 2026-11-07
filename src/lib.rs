@@ -2808,7 +2808,8 @@ pub mod native_service {
         NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
         NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
         NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-        NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
+        NativeQueryController, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
+        NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

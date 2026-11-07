@@ -1028,6 +1028,16 @@ fn open_live(
     scan: &str,
     request: LiveQueryOptions<'_>,
 ) -> LiveQuery {
+    open_live_quoted(service, owner, session, scan, request, false)
+}
+fn open_live_quoted(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    request: LiveQueryOptions<'_>,
+    quote_all: bool,
+) -> LiveQuery {
     let command = metadata_command(service, &request);
     let permit = service.native_scope(session, &command, None).unwrap();
     let scratch = holding(4 * 1024 * 1024, 0);
@@ -1057,7 +1067,9 @@ fn open_live(
         ready(NativeTupleQuery::metadata_requirement()),
     )
     .unwrap();
-    let reservation = if request.bm25 {
+    let reservation = if quote_all {
+        query.requirement_all().unwrap()
+    } else if request.bm25 {
         query.bm25_requirement(0).unwrap()
     } else {
         Reservation {
@@ -2167,4 +2179,767 @@ pub(super) fn run_canonical_metadata_controls(
         .unwrap_or_else(|_| panic!("deadline metadata finish retained a scope"));
     drop((query, claim));
     live.finish();
+}
+fn pump_scan(service: &NativeLibraryService, run: &mut NativeScanRun) {
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            panic!(
+                "scan failed: {:#} bytes={} objects={}",
+                run.failure().unwrap(),
+                run.bytes_admitted(),
+                run.objects_admitted()
+            );
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+}
+fn pump_bm25(service: &NativeLibraryService, run: &mut NativeBm25Run) -> Vec<(String, String, Option<f32>)> {
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            panic!("bm25 list failed: {:#}", run.failure().unwrap());
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+    run.hits()
+        .unwrap()
+        .map(|hit| {
+            let path = run
+                .source_annotations(&hit.key.id)
+                .unwrap()
+                .unwrap()
+                .path
+                .as_str()
+                .to_owned();
+            (hit.key.id.clone(), path, hit.score)
+        })
+        .collect()
+}
+fn finish_run<T>(
+    run: std::result::Result<(NativeTupleQuery, Arc<knowledge_core::jobs::Claim>), T>,
+    what: &str,
+) {
+    run.unwrap_or_else(|_| panic!("{what} finish retained a scope"));
+}
+pub(super) fn run_delivery_controls(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    source_root: &std::path::Path,
+    scan: &str,
+) {
+    let literal_unavailable = assert_window_token(service, owner, session, scan, false);
+    assert_window_token(service, owner, session, scan, true);
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["omni-window-token"],
+            methods: &["literal"],
+            required_tags: &["missing-window-tag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "delivery-tag-miss",
+        },
+    );
+    let mut run = live
+        .query
+        .start_scan(live.claim.clone(), 0, wire::SearchMethod::Literal, 0)
+        .unwrap();
+    pump_scan(service, &mut run);
+    assert!(
+        run.ranked().unwrap().is_empty(),
+        "required-tag miss must omit the window token"
+    );
+    assert_eq!(
+        run.unavailable_parts(),
+        literal_unavailable,
+        "tag mismatches are not unavailable parts"
+    );
+    finish_run(run.finish(), "tag-miss scan");
+    live.finish();
+    let one_path = source_root.join("raw/one.md");
+    let original_one = fs::read(&one_path).unwrap();
+    let before = ranked_literal(
+        service,
+        owner,
+        session,
+        scan,
+        "Native first",
+        &[],
+        "delivery-literal-before",
+    );
+    assert!(
+        before.paths.iter().any(|path| path == "raw/one.md"),
+        "unique one.md phrase missing before mutation: {:?}",
+        before.paths
+    );
+    fs::write(&one_path, "mutated original without the marker\n").unwrap();
+    let after = ranked_literal(
+        service,
+        owner,
+        session,
+        scan,
+        "Native first",
+        &[],
+        "delivery-literal-after",
+    );
+    assert!(
+        !after.paths.iter().any(|path| path == "raw/one.md"),
+        "changed original must be omitted"
+    );
+    assert!(
+        after.unavailable > before.unavailable,
+        "changed original must count unavailable before={} after={}",
+        before.unavailable,
+        after.unavailable
+    );
+    fs::write(&one_path, original_one).unwrap();
+    let native = {
+        let live = open_live(
+            service,
+            owner,
+            session,
+            scan,
+            LiveQueryOptions {
+                keywords: &["alpha"],
+                methods: &["bm25"],
+                required_tags: &[],
+                case_sensitive: false,
+                limit: 5,
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+                max_millis: 120000,
+                bm25: true,
+                job: "delivery-native-bm25",
+            },
+        );
+        let mut run = live.query.start_bm25(live.claim.clone(), 0, 0).unwrap();
+        let rows = pump_bm25(service, &mut run);
+        finish_run(run.finish(), "native bm25");
+        live.finish();
+        rows
+    };
+    let single = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["bm25"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 5,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "delivery-single-bm25",
+        },
+    );
+    let mut controller = single
+        .query
+        .start_controller(service, single.claim.clone())
+        .unwrap();
+    assert!(
+        controller.failure().is_none(),
+        "single-list controller: {:#}",
+        controller.failure().unwrap()
+    );
+    let result = controller.search_result().unwrap();
+    assert_eq!(result.groups.len(), 1);
+    assert_eq!(&result.groups[0].library_id, service.library_id());
+    assert_eq!(
+        result.groups[0].generation_id.as_ref().map(|id| id.as_str()),
+        Some(scan)
+    );
+    assert!(result.groups[0].partitioning_id.is_some());
+    assert_eq!(
+        result.groups[0].coverage.enumeration,
+        wire::Enumeration::Complete
+    );
+    assert_eq!(
+        result.groups[0].coverage.result_extent,
+        wire::ResultExtent::TopK
+    );
+    assert_eq!(result.groups[0].files.len(), native.len().min(5));
+    for (file, (id, _, score)) in result.groups[0].files.iter().zip(&native) {
+        assert_eq!(file.source.source_id.as_str(), id);
+        match (file.score.as_ref(), score) {
+            (None, None) => {}
+            (Some(got), Some(expected)) => assert_eq!(got.get(), *expected as f64),
+            other => panic!("single list changed the native score: {other:?}"),
+        }
+    }
+    let encoded = controller
+        .encode_response(wire::Id::new("delivery-single").unwrap())
+        .unwrap();
+    assert!(encoded.starts_with(b"{"));
+    finish_run(controller.finish(), "single controller");
+    single.finish();
+    let mut lists = Vec::new();
+    let mut paths = std::collections::BTreeMap::new();
+    for (index, (method, keyword)) in [
+        (wire::SearchMethod::Bm25, 0usize),
+        (wire::SearchMethod::Bm25, 1),
+        (wire::SearchMethod::Literal, 0),
+        (wire::SearchMethod::Literal, 1),
+        (wire::SearchMethod::Files, 0),
+        (wire::SearchMethod::Files, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rows = method_rows(service, owner, session, scan, method, keyword, index);
+        lists.push(rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+        for (id, path) in rows {
+            paths.entry(id).or_insert(path);
+        }
+    }
+    let fused = open_live_quoted(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha", "page-00"],
+            methods: &["bm25", "literal", "files"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 20000,
+            max_bytes: 512 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "delivery-fused",
+        },
+        true,
+    );
+    let controller = fused
+        .query
+        .start_controller(service, fused.claim.clone())
+        .unwrap();
+    assert!(
+        controller.failure().is_none(),
+        "fused controller: {:#}",
+        controller.failure().unwrap()
+    );
+    let result = controller.search_result().unwrap();
+    let group = &result.groups[0];
+    assert_eq!(&group.library_id, service.library_id());
+    let expected = fused_order(&paths, &lists, 10);
+    let got: Vec<String> = group
+        .files
+        .iter()
+        .map(|file| file.source.source_id.as_str().to_owned())
+        .collect();
+    assert_eq!(got, expected, "RRF order diverged");
+    assert!(
+        group.files.iter().any(|file| {
+            file.evidence
+                .iter()
+                .any(|item| matches!(item.locator, wire::Locator::OriginalLines { .. }))
+        }),
+        "fused delivery has no located evidence"
+    );
+    assert!(
+        group.files.iter().any(|file| {
+            let located = file
+                .evidence
+                .iter()
+                .any(|item| matches!(item.locator, wire::Locator::OriginalLines { .. }));
+            let unlocated = file
+                .evidence
+                .iter()
+                .any(|item| matches!(item.locator, wire::Locator::Unlocated));
+            located && !unlocated && file.source.path.as_str().contains("page-00")
+        }),
+        "located page evidence still kept an unlocated duplicate"
+    );
+    let cloned = controller
+        .test_scope_clone()
+        .unwrap_or_else(|| panic!("winning delivery scope missing"));
+    let controller = match controller.finish() {
+        Err(controller) => *controller,
+        Ok(_) => panic!("scope clone must block finish"),
+    };
+    drop(cloned);
+    finish_run(controller.finish(), "fused controller");
+    fused.finish();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["literal"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 5,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "delivery-cancel",
+        },
+    );
+    Account::current()
+        .unwrap()
+        .queue()
+        .cancel(live.job, live.query.key())
+        .unwrap();
+    match live
+        .query
+        .start_scan(live.claim.clone(), 0, wire::SearchMethod::Literal, 0)
+    {
+        Err(_) => {}
+        Ok(mut run) => {
+            assert!(run.step(service).is_failed(), "cancelled scan kept running");
+            finish_run(run.finish(), "cancelled scan");
+        }
+    }
+    live.finish();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["literal"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 5,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 1,
+            bm25: true,
+            job: "delivery-deadline",
+        },
+    );
+    std::thread::sleep(Duration::from_millis(5));
+    match live
+        .query
+        .start_scan(live.claim.clone(), 0, wire::SearchMethod::Literal, 0)
+    {
+        Err(_) => {}
+        Ok(mut run) => {
+            assert!(run.step(service).is_failed(), "expired scan kept running");
+            finish_run(run.finish(), "expired scan");
+        }
+    }
+    live.finish();
+}
+struct LiteralRank {
+    paths: Vec<String>,
+    unavailable: u64,
+}
+fn assert_window_token(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    regex: bool,
+) -> u64 {
+    let method = if regex { "regex" } else { "literal" };
+    let keyword = if regex {
+        "omni-window-t[a-z]+"
+    } else {
+        "omni-window-token"
+    };
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[keyword],
+            methods: &[method],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: if regex {
+                "delivery-window-regex"
+            } else {
+                "delivery-window-literal"
+            },
+        },
+    );
+    let wire_method = if regex {
+        wire::SearchMethod::Regex
+    } else {
+        wire::SearchMethod::Literal
+    };
+    let mut run = live
+        .query
+        .start_scan(live.claim.clone(), 0, wire_method, 0)
+        .unwrap();
+    pump_scan(service, &mut run);
+    let ranked = run.ranked().unwrap();
+    assert_eq!(ranked.len(), 1, "{method} window hits={ranked:?}");
+    let path = run
+        .source_annotations(&ranked[0])
+        .unwrap()
+        .unwrap()
+        .path
+        .as_str()
+        .to_owned();
+    assert_eq!(path, "raw/long.md");
+    let occurrences = run.occurrences(&ranked[0]).unwrap();
+    assert!(
+        occurrences
+            .iter()
+            .any(|item| !item.metadata && item.start.unwrap_or(0) >= 1024 * 1024),
+        "{method} occurrence was not in a later window: {occurrences:?}"
+    );
+    let unavailable = run.unavailable_parts();
+    finish_run(run.finish(), method);
+    live.finish();
+    unavailable
+}
+fn ranked_literal(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    keyword: &str,
+    required_tags: &[&str],
+    job: &'static str,
+) -> LiteralRank {
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[keyword],
+            methods: &["literal"],
+            required_tags,
+            case_sensitive: false,
+            limit: 20,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job,
+        },
+    );
+    let mut run = live
+        .query
+        .start_scan(live.claim.clone(), 0, wire::SearchMethod::Literal, 0)
+        .unwrap();
+    pump_scan(service, &mut run);
+    let paths = run
+        .ranked()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            run.source_annotations(id)
+                .unwrap()
+                .unwrap()
+                .path
+                .as_str()
+                .to_owned()
+        })
+        .collect();
+    let unavailable = run.unavailable_parts();
+    finish_run(run.finish(), "literal rank");
+    live.finish();
+    LiteralRank { paths, unavailable }
+}
+fn method_rows(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    method: wire::SearchMethod,
+    keyword: usize,
+    index: usize,
+) -> Vec<(String, String)> {
+    let method_name = match method {
+        wire::SearchMethod::Bm25 => "bm25",
+        wire::SearchMethod::Literal => "literal",
+        wire::SearchMethod::Files => "files",
+        other => panic!("unexpected list method {other:?}"),
+    };
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha", "page-00"],
+            methods: &[method_name],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: method != wire::SearchMethod::Files,
+            job: match index {
+                0 => "delivery-list-0",
+                1 => "delivery-list-1",
+                2 => "delivery-list-2",
+                3 => "delivery-list-3",
+                4 => "delivery-list-4",
+                _ => "delivery-list-5",
+            },
+        },
+    );
+    let rows = match method {
+        wire::SearchMethod::Bm25 => {
+            let mut run = live.query.start_bm25(live.claim.clone(), 0, keyword).unwrap();
+            let rows = pump_bm25(service, &mut run);
+            finish_run(run.finish(), "list bm25");
+            rows.into_iter().map(|(id, path, _)| (id, path)).collect()
+        }
+        wire::SearchMethod::Literal => {
+            let mut run = live
+                .query
+                .start_scan(live.claim.clone(), 0, method, keyword)
+                .unwrap();
+            pump_scan(service, &mut run);
+            let rows = run
+                .ranked()
+                .unwrap()
+                .iter()
+                .map(|id| {
+                    let path = run
+                        .source_annotations(id)
+                        .unwrap()
+                        .unwrap()
+                        .path
+                        .as_str()
+                        .to_owned();
+                    (id.clone(), path)
+                })
+                .collect();
+            finish_run(run.finish(), "list literal");
+            rows
+        }
+        wire::SearchMethod::Files => {
+            let mut run = live
+                .query
+                .start_metadata_for(live.claim.clone(), 0, Some((method, keyword)))
+                .unwrap();
+            loop {
+                let step = run.step(service);
+                if step.is_failed() {
+                    panic!("list files failed: {:#}", run.failure().unwrap());
+                }
+                if step.is_complete() {
+                    break;
+                }
+            }
+            let rows = run
+                .hits()
+                .unwrap()
+                .map(|hit| (hit.source_id.as_str().to_owned(), hit.path.as_str().to_owned()))
+                .collect();
+            finish_run(run.finish(), "list files");
+            rows
+        }
+        other => panic!("unexpected list method {other:?}"),
+    };
+    live.finish();
+    rows
+}
+fn fused_order(
+    paths: &std::collections::BTreeMap<String, String>,
+    lists: &[Vec<String>],
+    limit: usize,
+) -> Vec<String> {
+    let mut fused = knowledge_search::fuse_ranks(lists);
+    fused.sort_by(|left, right| {
+        right.1.total_cmp(&left.1).then_with(|| {
+            let left_path = paths.get(&left.0).map(String::as_str).unwrap_or("");
+            let right_path = paths.get(&right.0).map(String::as_str).unwrap_or("");
+            left_path.cmp(right_path).then(left.0.cmp(&right.0))
+        })
+    });
+    fused.into_iter().take(limit).map(|(id, _)| id).collect()
+}
+pub(super) fn run_whole_semantic_controls(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    source_root: &std::path::Path,
+    scan: &str,
+    model: &NativeEmbeddingSelection,
+) {
+    let one_path = source_root.join("raw/one.md");
+    let original = fs::read(&one_path).unwrap();
+    let (before_ids, before_unavailable, one_id) =
+        semantic_pass(service, owner, session, scan, model, "whole-semantic-before");
+    let _ = before_ids;
+    fs::write(&one_path, "mutated semantic original without alpha\n").unwrap();
+    let (after_ids, after_unavailable, _) =
+        semantic_pass(service, owner, session, scan, model, "whole-semantic-after");
+    fs::write(&one_path, original).unwrap();
+    assert!(
+        !after_ids.iter().any(|id| id == &one_id),
+        "mutated non-current original remained a semantic hit"
+    );
+    assert!(
+        after_unavailable > before_unavailable,
+        "mutated original was not counted unavailable before={before_unavailable} after={after_unavailable}"
+    );
+}
+fn semantic_pass(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    model: &NativeEmbeddingSelection,
+    job: &str,
+) -> (Vec<String>, u64, String) {
+    let command = wire::decode_request(
+        &serde_json::to_vec(&serde_json::json!({
+            "wire_version": 1,
+            "request_id": job,
+            "command": {
+                "op": "query",
+                "query": {
+                    "library_ids": [service.library_id().as_str()],
+                    "keywords": ["alpha"],
+                    "methods": ["semantic"],
+                    "required_tags": [],
+                    "case_sensitive": false,
+                    "limit": 50,
+                    "budget": {
+                        "max_files": 8000,
+                        "max_bytes": "268435456",
+                        "max_millis": 120000,
+                        "max_memory_bytes": "1073741824"
+                    },
+                    "image_query": null
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+    .command;
+    let permit = service.native_scope(session, &command, None).unwrap();
+    let mut scratch = holding(4 * 1024 * 1024, 0);
+    let inventory = service
+        .inventory_for_query(
+            owner,
+            &permit,
+            "wiki",
+            scan,
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    let one_id = observed(&inventory, "raw/one.md").source_id().to_owned();
+    let reader = service
+        .open_corpus_tuple(owner, permit, ready(NativeTupleRead::requirement()))
+        .unwrap();
+    let query = NativeTupleQuery::prepare(
+        vec![NativeQueryLibrary::new(
+            reader,
+            inventory,
+            Some(model.clone()),
+        )],
+        ready(NativeTupleQuery::metadata_requirement()),
+    )
+    .unwrap();
+    let memory = query
+        .vector_requirement(0)
+        .unwrap()
+        .memory_bytes
+        .saturating_add(160 * 1024 * 1024);
+    let account = Account::current().unwrap();
+    let submitted = query
+        .submit(NativeJobPlan {
+            operation_id: job,
+            job_id: job,
+            budget: Budget {
+                max_files: 8000,
+                max_bytes: 256 * 1024 * 1024,
+                max_millis: 120000,
+                max_memory_bytes: memory,
+            },
+            reservation: Reservation {
+                memory_bytes: memory,
+                temporary_bytes: 0,
+            },
+            priority: knowledge_core::jobs::Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    let claim = Arc::new(
+        account
+            .queue()
+            .claim(Instant::now())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{job} was not claimable")),
+    );
+    let passes = NativeWholeSemanticRun::test_whole_passes();
+    let run = query.start_semantic(service, claim.clone(), 0, 0);
+    assert!(
+        run.failure().is_none(),
+        "{job}: {:#}",
+        run.failure().unwrap()
+    );
+    assert_eq!(
+        NativeWholeSemanticRun::test_whole_passes(),
+        passes + 1,
+        "{job} must scan rows once"
+    );
+    let ids = run
+        .hits()
+        .unwrap()
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    assert!(!ids.is_empty(), "{job} returned no semantic hits");
+    let unavailable = run.unavailable_parts();
+    let (query, returned) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("{job} finish retained a scope"));
+    drop(claim);
+    let claim = Arc::try_unwrap(returned).unwrap_or_else(|_| panic!("{job} claim retained"));
+    account
+        .queue()
+        .settle(
+            &claim,
+            query.key(),
+            knowledge_core::jobs::Outcome::Cancelled,
+        )
+        .unwrap();
+    account
+        .queue()
+        .retire(submitted.job, query.key())
+        .unwrap_or_else(|error| panic!("{job} was not terminal: {error:?}"));
+    drop(query);
+    scratch.finish().unwrap();
+    (ids, unavailable, one_id)
 }

@@ -33,7 +33,7 @@ fn contract_model(
         embedding_space: "contract-only-not-WeMM".into(),
         timeout_seconds: 5,
     };
-    let server = server::Server::start_for(&config, None, false, Duration::from_secs(240));
+    let server = server::Server::start_for(&config, None, false, Duration::from_secs(360));
     config.endpoint = server.endpoint.clone();
     let identity = ModelIdentity {
         provider: "deterministic-contract-only".into(),
@@ -224,6 +224,11 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             "---\ntitle: Bound Title\ndescription: \"First\\n  indented\"\nlegacy_description: \"First\"\ntags: [BoundTag]\nlegacy_tags: [legacy-kept]\n---\nactual frontmatter bound alpha\n",
         )
         .unwrap();
+        let mut long_file = fs::OpenOptions::new()
+            .append(true)
+            .open(source_root.join("raw/long.md"))
+            .unwrap();
+        std::io::Write::write_all(&mut long_file, b"\nomni-window-token\n").unwrap();
     }
     let seed = reconcile(
         &service,
@@ -898,6 +903,16 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
                 .as_ref()
                 .expect("vectors mode keeps the contract model"),
         );
+        query_job::run_whole_semantic_controls(
+            &service,
+            &owner,
+            &session,
+            &source_root,
+            reopened["scan"].as_str().unwrap(),
+            model
+                .as_ref()
+                .expect("vectors mode keeps the contract model"),
+        );
     }
     if mode == "normal" {
         query_job::run_canonical_metadata_controls(
@@ -907,6 +922,13 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             &source_root,
             &query_inventory,
             &stat_inventory,
+        );
+        query_job::run_delivery_controls(
+            &service,
+            &owner,
+            &session,
+            &source_root,
+            query_inventory.scan(),
         );
     }
     assert!(

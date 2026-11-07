@@ -14,7 +14,8 @@ pub use job::{
     NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
     NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
     NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-    NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
+    NativeQueryController, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
+    NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
 };
 use knowledge_core::{
     admission::Holding,

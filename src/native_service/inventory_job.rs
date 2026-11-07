@@ -9,8 +9,9 @@ pub use corpus::{
     NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
     NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
     NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
-    NativeTupleRead, NativeWholeSemanticRun,
+    NativeQueryStageResources, NativeQueryStep, NativeScanOccurrence, NativeScanRun,
+    NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
+    NativeQueryController,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};
