@@ -65,6 +65,35 @@ impl Drop for FundedTextProvider {
     }
 }
 
+/// Failed work retaining the actual admitted provider/client/runtime/credit owner.
+/// The typed cause remains in the error source chain and its paid data dies BEFORE the provider.
+/// Pre-admission failures stay unchanged; credit is absent only after an explicit owner transfer.
+pub struct ProviderRefusal {
+    cause: anyhow::Error,
+    provider: Option<FundedTextProvider>,
+}
+impl ProviderRefusal {
+    /// Transfer the actual owner while leaving the original error chain intact. A second call
+    /// returns None; it neither proves settlement nor supplies replacement credit.
+    pub fn take_provider(&mut self) -> Option<FundedTextProvider> {
+        self.provider.take()
+    }
+}
+impl std::fmt::Debug for ProviderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("funded provider refusal with retained owner")
+    }
+}
+impl std::fmt::Display for ProviderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("funded provider refused")
+    }
+}
+impl std::error::Error for ProviderRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
 /// One vector and the SAME actual provider/runtime/credit owner. Vector bytes die first.
 /// Copying a borrowed vector into another owner requires that consumer's separately prepaid buffer.
 pub struct EmbeddedText {
@@ -111,44 +140,98 @@ impl FundedTextProvider {
         funding.checkpoint()?;
         let need = Self::requirement(config)?;
         let mut credits = Credits::new(funding, 0, need.memory_bytes, 0, Some(0), 0)?;
-        ensure!(
-            tokio::runtime::Handle::try_current().is_err(),
-            "funded provider requires its owning synchronous executor, not nested runtime execution"
-        );
-        let endpoint = super::validated_endpoint(config)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .context("cannot create owned provider runtime")?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .pool_max_idle_per_host(0)
-            .build()
-            .context("cannot create owned provider transport")?;
-        Ok(Self {
-            transport: Some(Transport {
+        Self::open_prepaid(config, credits.retained())
+    }
+    /// Consume ACTUAL prepaid Core Holdings, for an enclosing native owner retaining a shared
+    /// live Claim. No mutable-Claim substitute, global reserve or another resource pool is made.
+    /// The complete client/runtime envelope is checked BEFORE native construction; any refusal
+    /// retains these exact Holdings in its real provider owner, including an insufficient quote.
+    pub fn open_prepaid(config: &EmbeddingConfig, retained: Vec<Holding>) -> Result<Self> {
+        let mut provider = Self {
+            transport: None,
+            retained,
+        };
+        let transport = (|| {
+            let need = Self::requirement(config)?;
+            let available = provider.retained.iter().try_fold(0_u64, |sum, holding| {
+                sum.checked_add(holding.remaining()?.memory_bytes)
+                    .context("provider credit overflow")
+            })?;
+            ensure!(
+                available >= need.memory_bytes,
+                "actual complete prepaid provider envelope required"
+            );
+            ensure!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "funded provider requires its owning synchronous executor, not nested runtime execution"
+            );
+            let endpoint = super::validated_endpoint(config)?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .context("cannot create owned provider runtime")?;
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .pool_max_idle_per_host(0)
+                .build()
+                .context("cannot create owned provider transport")?;
+            Ok::<_, anyhow::Error>(Transport {
                 client: Some(client),
                 runtime: Some(runtime),
                 config: config.clone(),
                 endpoint,
-            }),
-            retained: credits.retained(),
-        })
+            })
+        })();
+        match transport {
+            Ok(transport) => {
+                provider.transport = Some(transport);
+                Ok(provider)
+            }
+            Err(cause) => Err(anyhow::Error::new(ProviderRefusal {
+                cause,
+                provider: Some(provider),
+            })),
+        }
     }
     /// One bounded content request. Every HTTP wait and response refill polls the host's actual
     /// currentness/stop/deadline; cancellation drops the future, then destroys its owned IO runtime.
     /// Successful output retains the whole real owner until destroyed, never a bare uncharged Vec.
     pub fn embed_text(self, text: &str, control: &impl EmbeddingControl) -> Result<EmbeddedText> {
+        match self.request_vector(text, control) {
+            Ok(vector) => Ok(EmbeddedText {
+                vector: Some(vector),
+                provider: Some(self),
+            }),
+            Err(cause) => Err(anyhow::Error::new(ProviderRefusal {
+                cause,
+                provider: Some(self),
+            })),
+        }
+    }
+    /// Destroy the actual client/runtime/tasks/IO before returning the real paid Holdings.
+    /// A live vector must first be destroyed through `EmbeddedText::into_provider`. Inside an
+    /// ambient runtime return this actual owner for a synchronous executor, not a completion marker.
+    pub fn into_holdings(mut self) -> std::result::Result<Vec<Holding>, Box<Self>> {
+        if self.transport.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+            return Err(Box::new(self));
+        }
+        drop(self.transport.take());
+        Ok(std::mem::take(&mut self.retained))
+    }
+    fn request_vector(&self, text: &str, control: &impl EmbeddingControl) -> Result<Vec<f32>> {
         checkpoint(control)?;
         ensure!(!text.trim().is_empty(), "Embedding text must not be empty");
         ensure!(
             text.len() <= MAX_TEXT_BYTES,
             "Embedding text exceeds48KiB; split it into chunks"
         );
-        let transport = self.transport.as_ref().expect("live affine transport");
+        let transport = self
+            .transport
+            .as_ref()
+            .context("provider construction refused")?;
         let outcome = transport
             .runtime
             .as_ref()
@@ -156,10 +239,7 @@ impl FundedTextProvider {
             .block_on(transport.request(text, control));
         let vector = outcome.map_err(|cause| anyhow::Error::new(ProviderRequestError { cause }))?;
         checkpoint(control)?;
-        Ok(EmbeddedText {
-            vector: Some(vector),
-            provider: Some(self),
-        })
+        Ok(vector)
     }
 }
 fn checkpoint(control: &impl EmbeddingControl) -> Result<()> {

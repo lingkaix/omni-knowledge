@@ -180,6 +180,15 @@ fn missing_index_and_current_metadata_have_distinct_read_only_states() {
     let pointer = fs::read(kb.root.join(".omni/current.json")).unwrap();
     let marker = fs::read(kb.root.join(CONFIG_FILE)).unwrap();
     let source = fs::read(kb.root.join("index.md")).unwrap();
+    let reference = kernel_reference(&kb);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(native_generation(&kb).join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["machinery"].as_str().unwrap(),
+        knowledge_retrieval::consumer_machinery(reference["consumer"].as_str().unwrap()).unwrap(),
+        "the actual written schema/machinery is the shared kernel recipe"
+    );
     let report = probe.inspect(&kb.root);
     assert_eq!(
         report.folder.state,

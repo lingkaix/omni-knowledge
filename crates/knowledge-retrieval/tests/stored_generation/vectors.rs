@@ -6,6 +6,32 @@ use knowledge_search::{
     AccountGrant, ModelIdentity, VectorMetric, VectorNormalization, VectorRow, VectorStore,
 };
 
+#[derive(Debug)]
+struct RowOpenProbe {
+    actual: Arc<dyn knowledge_retrieval::ByteDirectory>,
+    rows: Arc<std::sync::atomic::AtomicU64>,
+}
+impl knowledge_retrieval::ByteDirectory for RowOpenProbe {
+    fn check(&self) -> std::result::Result<(), knowledge_retrieval::KernelError> {
+        self.actual.check()
+    }
+    fn exists(&self, name: &str) -> std::result::Result<bool, knowledge_retrieval::KernelError> {
+        self.actual.exists(name)
+    }
+    fn open(
+        &self,
+        name: &str,
+    ) -> std::result::Result<
+        Arc<dyn tantivy::directory::FileHandle>,
+        knowledge_retrieval::KernelError,
+    > {
+        if name == "rows.bin" {
+            self.rows.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.actual.open(name)
+    }
+}
+
 fn fixture_representation() -> knowledge_search::RepresentationIdentity {
     knowledge_search::RepresentationIdentity {
         digest: "11".repeat(32),
@@ -71,6 +97,32 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
             },
         })
         .collect();
+    let mut row_plan = knowledge_search::VectorBuildPlan {
+        rows: 0,
+        metadata_bytes: 0,
+        max_row_bytes: 1,
+    };
+    for row in &rows {
+        row_plan
+            .include(
+                knowledge_search::VectorCandidate {
+                    source_id: &row.source_id,
+                    source_digest: &row.source_digest,
+                    representation: &row.representation,
+                    locator: &row.locator,
+                },
+                1,
+            )
+            .unwrap();
+    }
+    let reader_quote = row_plan.query_requirement(&model, 1).unwrap();
+    let mut more_rows = row_plan.clone();
+    more_rows.rows = 1_000_000;
+    assert_eq!(
+        reader_quote,
+        more_rows.query_requirement(&model, 1).unwrap(),
+        "bounded mature reader quote is not corpus residency"
+    );
     let writer = VectorStore::build(
         &root,
         &model,
@@ -208,6 +260,8 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
         memory_bytes: 2 * 1024 * 1024,
         temporary_bytes: 0,
     };
+    assert_eq!(reader_quote.temporary_bytes, 0);
+    assert!(reader_quote.memory_bytes <= vector_need.memory_bytes);
     let need = Reservation {
         memory_bytes: directory_need.memory_bytes + vector_need.memory_bytes,
         temporary_bytes: 0,
@@ -248,13 +302,50 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
         segment.read_bytes(0..8193).is_err(),
         "range ceiling must precede allocation, even inside a larger admitted extent"
     );
-    let reader = VectorStore::open_directory(
-        components.clone(),
-        &generation,
-        &model,
-        &AccountGrant::from_work(vector_work),
-    )
-    .unwrap();
+    let vector_work = Arc::new(vector_work);
+    let wrong_model = ModelIdentity {
+        revision: "different-actual-space".into(),
+        ..model.clone()
+    };
+    assert!(
+        VectorStore::open_directory_held(
+            &components,
+            &generation,
+            &wrong_model,
+            &vector_work,
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(
+        account.status().unwrap().memory_available,
+        0,
+        "failed native component open retains its ACTUAL prepaid scope"
+    );
+    assert_eq!(vector_work.remaining().unwrap(), vector_need);
+    let rows_opened = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let probed: Arc<dyn knowledge_retrieval::ByteDirectory> = Arc::new(RowOpenProbe {
+        actual: components.clone(),
+        rows: rows_opened.clone(),
+    });
+    let mismatched =
+        VectorStore::open_directory_held(&probed, &generation, &model, &vector_work, Some(0));
+    eprintln!(
+        "actual mismatched tuple row-bound refusal={} native row-table opens={}",
+        mismatched.is_err(),
+        rows_opened.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(
+        mismatched.is_err(),
+        "actual enclosing tuple row-count bound must match BEFORE opening its row table"
+    );
+    assert_eq!(rows_opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(account.status().unwrap().memory_available, 0);
+    assert_eq!(vector_work.remaining().unwrap(), vector_need);
+    drop((probed, mismatched));
+    let reader =
+        VectorStore::open_directory_held(&components, &generation, &model, &vector_work, None)
+            .unwrap();
     let result = reader
         .query_filtered(&[1.0, 0.0], 1, |id| Ok(id == "source-b"))
         .unwrap();
@@ -271,7 +362,10 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
         })
         .unwrap();
     assert_eq!(locations, 2048);
-    drop(pressure);
+    let vector_work = Arc::try_unwrap(vector_work)
+        .err()
+        .expect("live actual result returns the SAME resource owner");
+    assert_eq!(account.status().unwrap().memory_available, 0);
     owner
         .set_policy(
             &selection,
@@ -292,6 +386,24 @@ fn actual_vector_segments_read_from_the_same_held_archive_without_extraction() {
     );
     account.queue().cancel(claim.job(), key).unwrap();
     drop(result);
+    let mut vector_work = Arc::try_unwrap(vector_work)
+        .ok()
+        .expect("last vector result/data/FD/pin consumer ended");
+    vector_work.rejoin(&claim, key).unwrap();
+    assert_eq!(
+        account.status().unwrap().memory_available,
+        0,
+        "actual continuation rejoins without global release/reserve gap"
+    );
+    assert_eq!(
+        account
+            .job_status(claim.job(), key)
+            .unwrap()
+            .execution
+            .memory_bytes,
+        vector_need.memory_bytes
+    );
+    drop(pressure);
     drop(components);
     drop(directory);
     drop(control);

@@ -6,12 +6,15 @@ pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
 #[path = "inventory_corpus_controller.rs"]
 mod controller;
 pub use controller::{NativeBm25Run, NativeQueryStep};
+#[path = "inventory_corpus_query_embedding.rs"]
+mod keyword_embedding;
+pub use keyword_embedding::NativeQueryEmbedding;
 #[path = "inventory_corpus_partition.rs"]
 mod partition;
 use knowledge_core::jobs::{Key, Submission, Submitted};
 pub use partition::{
     NativePartitionResult, NativeQueryLoans, NativeQueryPartition, NativeQueryPartitionPage,
-    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeSemanticRun,
 };
 use std::collections::BTreeSet;
 /// Actual selected tuple/M1/model owners for one labelled library; no manifest or ID reconstruction.
@@ -168,6 +171,18 @@ impl QueryCause {
     // check current metadata/root/original FD dependencies. Do not recursively repeat all of
     // those SAME checks here. No permission/epoch TTL or boolean grant cache is introduced.
     fn check_scope_claim(&self, claim: &Claim) -> Result<()> {
+        self.check_execution(claim)?;
+        for scope in &self.libraries {
+            if let Some(model) = &scope.model {
+                model.check()?;
+            }
+        }
+        Ok(())
+    }
+    // Mature CPU ticks poll the REAL execution token/budget/stop/deadline without issuing
+    // duplicate native metadata IO. Full current model/SDK/member/source checks remain at
+    // every actual Directory/range IO and before/after operations and result exposure.
+    fn check_execution(&self, claim: &Claim) -> Result<()> {
         self.reads.check()?;
         let b = &self.request_budget;
         let a = claim.budget();
@@ -184,11 +199,6 @@ impl QueryCause {
                 && claim.stop_requested(self.key())?.is_none(),
             "actual aggregate Query claim stopped"
         );
-        for scope in &self.libraries {
-            if let Some(model) = &scope.model {
-                model.check()?;
-            }
-        }
         Ok(())
     }
 }

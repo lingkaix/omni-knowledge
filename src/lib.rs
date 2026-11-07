@@ -1187,6 +1187,16 @@ mod admitted {
         hash.update(include_bytes!(
             "native_service/inventory_corpus_query_budget.rs"
         ));
+        hash.update(include_bytes!(
+            "native_service/inventory_corpus_query_embedding.rs"
+        ));
+        hash.update(include_bytes!(
+            "native_service/inventory_corpus_query_semantic.rs"
+        ));
+        hash.update(include_bytes!("../crates/knowledge-search/src/vectors.rs"));
+        hash.update(include_bytes!(
+            "../crates/knowledge-search/src/vectors/rows.rs"
+        ));
         hash.update(include_bytes!("../crates/knowledge-retrieval/src/lib.rs"));
         hash.update(include_bytes!(
             "../crates/knowledge-retrieval/src/stored.rs"
@@ -2790,10 +2800,11 @@ pub mod native_service {
     pub use inventory::{
         NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
         NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeObservedSource,
-        NativePartitionResult, NativeQueryLibrary, NativeQueryLoans, NativeQueryPageLoan,
-        NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
-        NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
-        NativeRefreshJob, NativeRefreshScopeError, NativeTupleQuery, NativeTupleRead,
+        NativePartitionResult, NativeQueryEmbedding, NativeQueryLibrary, NativeQueryLoans,
+        NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
+        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
+        NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
+        NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

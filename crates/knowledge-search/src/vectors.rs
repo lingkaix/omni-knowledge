@@ -316,7 +316,27 @@ impl VectorStore {
     ) -> Result<Self, VectorError> {
         validate_identity(identity)?;
         grant.covers(64 * 1024, 0).map_err(VectorError::Grant)?;
-        let work = grant.take().map_err(VectorError::Grant)?;
+        let work = std::sync::Arc::new(grant.take().map_err(VectorError::Grant)?);
+        Self::open_directory_held(&directory, generation, identity, &work, None)
+    }
+    /// Use an actual already-paid enclosing lifetime, without taking its resource owner away.
+    /// The caller retains BOTH actual directory and Work on failure; live stores/pins retain the
+    /// SAME Work until their last consumer. This reserves nothing and grants no source permission.
+    /// The enclosing host must prepay its complete simultaneous peak and serialize consumers or
+    /// include their combined peak; sharing this owner does not multiply its spendable memory.
+    /// An enclosing immutable tuple may bind its exact row count before row-table access; this
+    /// is DATA consistency/admission, not a source permission or a new corpus ceiling.
+    pub fn open_directory_held(
+        directory: &std::sync::Arc<dyn knowledge_retrieval::ByteDirectory>,
+        generation: &str,
+        identity: &ModelIdentity,
+        work: &std::sync::Arc<Work>,
+        expected_rows: Option<u64>,
+    ) -> Result<Self, VectorError> {
+        validate_identity(identity)?;
+        if work.remaining().map_err(invalid)?.memory_bytes < 64 * 1024 {
+            return Err(VectorError::Grant(GrantError::TooSmall));
+        }
         if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(invalid("invalid selected generation"));
         }
@@ -338,7 +358,12 @@ impl VectorStore {
             return Err(invalid("selected vector generation hash mismatch"));
         }
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
-        check_manifest(&manifest, identity, &work)?;
+        check_manifest(&manifest, identity, work)?;
+        if expected_rows.is_some_and(|rows| manifest.rows != rows) {
+            return Err(invalid(
+                "vector row count differs from actual enclosing tuple",
+            ));
+        }
         let metadata = Component::Directory(
             directory
                 .open("rows.bin")
@@ -366,7 +391,7 @@ impl VectorStore {
             metadata,
             segment,
             native: source,
-            _work: std::sync::Arc::new(work),
+            _work: work.clone(),
         })
     }
     /// Compatibility input slice; native producers use the owned, bounded stream below.
@@ -1337,15 +1362,20 @@ fn identity_bound(identity: &ModelIdentity) -> Result<u64, VectorError> {
     .ok_or_else(|| invalid("identity serialization bound overflow"))
 }
 fn reader_need(manifest: &Manifest, files: usize) -> Result<u64, VectorError> {
-    manifest
-        .max_row_bytes
+    reader_need_parts(&manifest.identity, manifest.max_row_bytes, files)
+}
+fn reader_need_parts(
+    identity: &ModelIdentity,
+    max_row_bytes: u64,
+    files: usize,
+) -> Result<u64, VectorError> {
+    max_row_bytes
         .checked_mul(10)
-        .and_then(|n| n.checked_add((manifest.identity.dimension as u64).checked_mul(16)?))
-        .and_then(|n| n.checked_add(identity_bound(&manifest.identity).ok()?.checked_mul(8)?))
+        .and_then(|n| n.checked_add((identity.dimension as u64).checked_mul(16)?))
+        .and_then(|n| n.checked_add(identity_bound(identity).ok()?.checked_mul(8)?))
         .and_then(|n| {
             n.checked_add(
-                (files as u64)
-                    .checked_mul(manifest.max_row_bytes.checked_mul(8)?.checked_add(256)?)?,
+                (files as u64).checked_mul(max_row_bytes.checked_mul(8)?.checked_add(256)?)?,
             )
         })
         .and_then(|n| n.checked_add(65536))

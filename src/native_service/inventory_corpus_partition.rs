@@ -1,6 +1,9 @@
 //! FD-qualified partition adapters over the SAME mature kernel/range readers, not another index.
 use super::*;
+#[path = "inventory_corpus_query_semantic.rs"]
+mod semantic;
 use knowledge_retrieval::{ArchiveSource, HeldRangeReaders, SearchResult, SourceGeneration};
+pub use semantic::NativeSemanticRun;
 /// Complete mature kernel and range peaks. Source SDK/page/tuple/descriptor loans are additional.
 pub struct NativeQueryStageResources {
     /// Data-only bound; the actual combined loan comes atomically from the live Claim.
@@ -117,8 +120,8 @@ impl StageOwner {
     fn control(self: &Arc<Self>) -> Control {
         let owner = self.clone();
         Control::guarded(
-            self.claim.deadline(),
-            Arc::new(move || owner.check_io().is_ok()),
+            self.claim.deadline().min(self.cause.deadline),
+            Arc::new(move || owner.cause.check_execution(&owner.claim).is_ok()),
         )
     }
 }
@@ -217,6 +220,22 @@ pub struct NativeQueryPartitionPage {
     pub next: u64,
 }
 impl NativeQueryStage {
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_vector_bounds(&self) -> Vec<(String, String, u64, u64)> {
+        self.0
+            .sources
+            .iter()
+            .filter(|s| s.part.embedding_rows > 0)
+            .map(|s| {
+                (
+                    s.part.document.key.id.clone(),
+                    s.part.representation_digest.clone(),
+                    s.part.representation_start,
+                    s.part.representation_start + s.part.tape_length,
+                )
+            })
+            .collect()
+    }
     #[cfg(test)]
     pub(in crate::native_service) fn test_component_opens(&self) -> u64 {
         TEST_COMPONENT_OPENS.with(std::cell::Cell::get)
@@ -508,6 +527,80 @@ impl NativeQueryPartition {
                 limit: query.limit.get() as usize,
             },
             &control,
+        )?;
+        self.owner.check()?;
+        Ok(NativePartitionResult {
+            result,
+            partition: self,
+        })
+    }
+    /// Scan one ACTUAL already-admitted source through the SAME mature Exact/Regex engine.
+    /// Raw occurrence limits and coverage stay explicit; they are not distinct-file ranking.
+    /// The outer controller must visit every admitted representation and retain real locators.
+    pub fn scan(
+        self,
+        method: wire::SearchMethod,
+        keyword: usize,
+        source: usize,
+    ) -> Result<NativePartitionResult> {
+        self.owner.check()?;
+        let wire::Command::Query { query } = self.owner.cause.libraries[self.owner.library]
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required")
+        };
+        anyhow::ensure!(
+            matches!(
+                method,
+                wire::SearchMethod::Literal | wire::SearchMethod::Regex
+            ) && query.methods.contains(&method),
+            "actual selected literal/regex method required"
+        );
+        anyhow::ensure!(
+            query.required_tags.is_empty(),
+            "actual current native tag dependency required"
+        );
+        let keyword = query
+            .keywords
+            .get(keyword)
+            .context("actual Query keyword required")?;
+        let (mode, text) = match method {
+            wire::SearchMethod::Literal if query.case_sensitive => {
+                (knowledge_retrieval::Mode::Exact, keyword.clone())
+            }
+            wire::SearchMethod::Literal => (
+                knowledge_retrieval::Mode::Regex,
+                format!("(?i:{})", regex::escape(keyword)),
+            ),
+            wire::SearchMethod::Regex if query.case_sensitive => {
+                (knowledge_retrieval::Mode::Regex, keyword.clone())
+            }
+            wire::SearchMethod::Regex => {
+                (knowledge_retrieval::Mode::Regex, format!("(?i:{keyword})"))
+            }
+            _ => unreachable!("closed actual scan method"),
+        };
+        let document = self
+            .view
+            .documents
+            .get(source)
+            .context("actual admitted source slot")?
+            .clone();
+        let result = self.generation.search(
+            knowledge_retrieval::Query {
+                mode,
+                query: text,
+                scopes: vec![ScopeView {
+                    scope: self.view.scope.clone(),
+                    documents: vec![document],
+                    unavailable_objects: 0,
+                }],
+                limit: query.limit.get() as usize,
+            },
+            &self.owner.control(),
         )?;
         self.owner.check()?;
         Ok(NativePartitionResult {

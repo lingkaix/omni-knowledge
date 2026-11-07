@@ -573,21 +573,20 @@ fn consumer_identity() -> String {
 
 /// The pinned kernel's schema/settings/dictionary/upstream-lock compatibility recipe, without
 /// constructing a kernel, opening a writer, changing modes or initializing any tokenizer/model.
-fn machinery_identity(consumer: &str) -> String {
-    let upstream = hex::encode(Sha256::digest(include_bytes!(
-        "../vendor/upstream/openkit-b67cd0f2.Cargo.lock"
-    )));
-    let native = hex::encode(Sha256::digest(format!("schema=5;text-ranges=disjoint-v1;source-representation=v1;word-filter=any-alnum;token-bytes=49152;sidecar=identity-markdown-v1;chunks=16384;score=max-bm25-title2-gram0.1;normalization=lowercase;grams=1-3;dictionary=a7ba9f645ffe7094e56ae1c4a81d100df8fbb1e28bbe1792622e9728e162db3d;lock={upstream}").as_bytes()));
-    hex::encode(Sha256::digest(
-        format!("{native};consumer={consumer}").as_bytes(),
-    ))
+fn machinery_identity(consumer: &str) -> Result<String> {
+    // The SAME pure consuming-kernel recipe, not a copied schema/dictionary constant that
+    // can drift from the actual writer. This performs no account/model/tokenizer setup.
+    Ok(knowledge_retrieval::consumer_machinery(consumer)?)
 }
 
 /// Exact pinned native schema, including field order/types/analyzers, not the retired root schema.
 fn native_schema() -> tantivy::schema::Schema {
-    use tantivy::schema::{IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions};
+    use tantivy::schema::{
+        FAST, INDEXED, IndexRecordOption, STORED, Schema, TextFieldIndexing, TextOptions,
+    };
     let mut schema = Schema::builder();
-    for field in ["document", "ordinal", "start", "end", "unit"] {
+    schema.add_u64_field("document", STORED | INDEXED | FAST);
+    for field in ["ordinal", "start", "end", "unit"] {
         schema.add_u64_field(field, STORED);
     }
     for language in ["zh", "ja", "unicode"] {
@@ -679,7 +678,7 @@ fn validate_lexical_metadata(
         "Native cache volume changed"
     );
     let corpus = native_open(&cache, Path::new(&reference.corpus), true)?;
-    let machinery = machinery_identity(&reference.consumer);
+    let machinery = machinery_identity(&reference.consumer)?;
     let mut covered = vec![false; summary.records.len()];
     for number in 0..reference.generations.len() {
         if start.elapsed() > SCAN_BUDGET {

@@ -4,11 +4,12 @@ pub(super) fn run(
     service: &NativeLibraryService,
     owner: &Owner,
     permit: &Permit,
-    scan: &str,
-    path: &str,
+    scan_and_path: (&str, &str),
     foreign: &NativeInventory,
     mutation: Option<std::path::PathBuf>,
+    model: Option<NativeEmbeddingSelection>,
 ) {
+    let (scan, path) = scan_and_path;
     let account = Account::current().unwrap();
     let mut scratch = holding(4 * 1024 * 1024, 0);
     let inventory = service
@@ -48,12 +49,14 @@ pub(super) fn run(
             .memory_bytes
         + 18 * 1024 * 1024;
     let need = need.max(192 * 1024 * 1024);
+    let semantic = model.is_some();
     let query = NativeTupleQuery::prepare(
-        vec![NativeQueryLibrary::new(reader, inventory, None)],
+        vec![NativeQueryLibrary::new(reader, inventory, model)],
         ready(NativeTupleQuery::metadata_requirement()),
     )
     .unwrap();
     assert!(!query.descriptor().unwrap().is_empty());
+    let vector_need = semantic.then(|| query.vector_requirement(0).unwrap());
     query
         .submit(NativeJobPlan {
             operation_id: "actual-cold-query",
@@ -177,6 +180,99 @@ pub(super) fn run(
         }
     };
     assert_eq!(account.status().unwrap().memory_available, 0);
+    let embedding_before = account
+        .job_status(claim.job(), query.key())
+        .unwrap()
+        .execution;
+    let mut embedding = query.embed_keyword(claim.clone(), 0, 0);
+    if semantic {
+        assert!(
+            embedding.failure().is_none(),
+            "actual selected Query/model/Claim embedding: {:?}",
+            embedding.failure()
+        );
+        assert_eq!(
+            embedding.vector().unwrap(),
+            &[5.0, 1.0],
+            "numeric contract-only ALPHA, not semantic quality/loaded WeMM"
+        );
+        let available = account
+            .job_status(claim.job(), query.key())
+            .unwrap()
+            .execution;
+        let mut blocked = account
+            .split_claim(
+                &claim,
+                query.key(),
+                Reservation {
+                    memory_bytes: available.memory_bytes - 1,
+                    temporary_bytes: 0,
+                },
+            )
+            .unwrap();
+        assert!(
+            embedding.materialize().is_err(),
+            "one byte cannot pay the next vector buffer"
+        );
+        assert_eq!(
+            account
+                .job_status(claim.job(), query.key())
+                .unwrap()
+                .execution
+                .memory_bytes,
+            1
+        );
+        assert_eq!(embedding.vector().unwrap(), &[5.0, 1.0]);
+        account
+            .rejoin_claim(&mut blocked, &claim, query.key())
+            .unwrap();
+        embedding.materialize().unwrap();
+        assert_eq!(embedding.vector().unwrap(), &[5.0, 1.0]);
+        let copied = account
+            .job_status(claim.job(), query.key())
+            .unwrap()
+            .execution;
+        assert_eq!(
+            copied.memory_bytes,
+            embedding_before.memory_bytes - 4112,
+            "actual provider dies/rejoins while the new live vector keeps its own prepaid buffer"
+        );
+        embedding.materialize().unwrap();
+        assert_eq!(
+            account
+                .job_status(claim.job(), query.key())
+                .unwrap()
+                .execution,
+            copied
+        );
+        assert_eq!(account.status().unwrap().memory_available, 0);
+    } else {
+        assert!(
+            embedding.failure().is_some(),
+            "an unselected semantic method cannot contact a receiver"
+        );
+        assert!(embedding.vector().is_err());
+    }
+    assert_eq!(account.status().unwrap().memory_available, 0);
+    let mut semantic_embedding = if semantic {
+        Some(embedding)
+    } else {
+        let (actual_query, actual_claim) = embedding
+            .finish()
+            .unwrap_or_else(|_| panic!("actual Query embedding owner remains live"));
+        assert!(Arc::ptr_eq(&actual_claim, &claim));
+        assert_eq!(
+            account
+                .job_status(claim.job(), query.key())
+                .unwrap()
+                .execution,
+            embedding_before,
+            "actual failed provider loan returns to the SAME Claim"
+        );
+        drop((actual_query, actual_claim));
+        None
+    };
+    assert_eq!(account.status().unwrap().memory_available, 0);
     let remaining = account
         .job_status(claim.job(), query.key())
         .unwrap()
@@ -229,6 +325,13 @@ pub(super) fn run(
     assert!(skipped.partition.is_none());
     assert!(skipped.next > partition_at);
     drop(skipped);
+    if let Some(embedding) = semantic_embedding.as_ref() {
+        let run = empty.semantic(embedding, vector_need.unwrap());
+        assert!(run.failure().is_none());
+        assert!(run.hits().unwrap().is_empty());
+        run.finish()
+            .unwrap_or_else(|_| panic!("actual empty semantic stage still retained"));
+    }
     assert_eq!(
         empty.test_component_opens(),
         opened,
@@ -265,6 +368,76 @@ pub(super) fn run(
             },
         )
         .unwrap();
+    let semantic_run = if let Some(embedding) = semantic_embedding.take() {
+        let before_reader = account
+            .job_status(claim.job(), query.key())
+            .unwrap()
+            .execution;
+        let need = vector_need.unwrap();
+        let actual_bounds = stage.test_vector_bounds();
+        let run = stage.semantic(&embedding, need);
+        assert!(
+            run.failure().is_none(),
+            "actual native model/vector/source bridge: {:?}",
+            run.failure()
+        );
+        assert!(
+            !run.hits().unwrap().is_empty(),
+            "actual selected numeric model and original scopes must reach mature cosine"
+        );
+        assert!(
+            run.hits()
+                .unwrap()
+                .iter()
+                .all(|(id, _)| actual_bounds.iter().any(|b| &b.0 == id)),
+            "a mature vector rank from outside the ACTUAL admitted native source set is not eligible"
+        );
+        let mut evidence = 0;
+        run.visit_evidence(|hit| {
+            assert!(hit.locator.starts_with("representation:"));
+            let (start, end) = hit
+                .locator
+                .rsplit_once('@')
+                .unwrap()
+                .1
+                .split_once("..")
+                .unwrap();
+            let (start, end) = (start.parse::<u64>().unwrap(), end.parse::<u64>().unwrap());
+            assert!(
+                actual_bounds
+                    .iter()
+                    .any(|(id, digest, a, b)| id == &hit.source_id
+                        && digest == &hit.representation.digest
+                        && *a <= start
+                        && start < end
+                        && end <= *b),
+                "equal-byte representation windows must keep their ACTUAL admitted global span"
+            );
+            evidence += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(evidence >= run.hits().unwrap().len());
+        assert_eq!(
+            account
+                .job_status(claim.job(), query.key())
+                .unwrap()
+                .execution
+                .memory_bytes,
+            before_reader.memory_bytes - need.memory_bytes
+        );
+        assert_eq!(account.status().unwrap().memory_available, 0);
+        // The mature result has its OWN paid query-vector copy. Only now may this earlier
+        // materialized input die and its actual buffer loan return to the continuing Claim.
+        let (actual_query, actual_claim) = embedding
+            .finish()
+            .unwrap_or_else(|_| panic!("actual native semantic input still retained"));
+        assert!(Arc::ptr_eq(&actual_claim, &claim));
+        drop((actual_query, actual_claim));
+        Some(run)
+    } else {
+        None
+    };
     let started = Instant::now();
     let partition = stage
         .partition(partition_at)
@@ -314,6 +487,46 @@ pub(super) fn run(
             "actual same-FD/native-source/tuple/kernel query must retrieve admitted alpha: {:?}",
             result.result().unwrap()
         );
+        // SAME actual SourceGeneration, admitted source/FD/Claim and working envelope. Destroy
+        // the previous result before another scan; neither raw occurrences nor this one-source
+        // primitive claim to be a complete all-method/library response.
+        let literal = result
+            .into_partition()
+            .scan(wire::SearchMethod::Literal, 0, 0)
+            .unwrap();
+        assert!(
+            !literal.result().unwrap().hits.is_empty(),
+            "actual case-insensitive ALPHA literal"
+        );
+        assert_eq!(
+            literal.result().unwrap().mode,
+            knowledge_retrieval::Mode::Regex
+        );
+        let escaped = literal
+            .into_partition()
+            .scan(wire::SearchMethod::Literal, 1, 0)
+            .unwrap();
+        assert!(
+            escaped.result().unwrap().hits.is_empty(),
+            "literal alpha.* must be escaped, not treated as a pattern"
+        );
+        let result = escaped
+            .into_partition()
+            .scan(wire::SearchMethod::Regex, 1, 0)
+            .unwrap();
+        assert!(
+            !result.result().unwrap().hits.is_empty(),
+            "actual raw alpha.* regex must match the same admitted source"
+        );
+        assert!(
+            result
+                .result()
+                .unwrap()
+                .hits
+                .iter()
+                .any(|hit| matches!(hit.locator, knowledge_retrieval::Locator::Text { .. })),
+            "mature original representation occurrence coordinates survive"
+        );
         assert_eq!(
             account.status().unwrap().memory_available,
             0,
@@ -332,6 +545,14 @@ pub(super) fn run(
         drop(result);
         stage
     };
+    if let Some(run) = semantic_run {
+        assert!(
+            run.check().is_err(),
+            "actual cancellation revokes native semantic delivery"
+        );
+        run.finish()
+            .unwrap_or_else(|_| panic!("actual semantic reader still retained"));
+    }
     let NativeQueryLoans {
         job: stage_job,
         sources,

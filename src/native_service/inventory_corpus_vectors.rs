@@ -7,7 +7,7 @@ use knowledge_search::{
     VectorModality, VectorRow, VectorStore,
 };
 
-fn representation(part: &SourcePart) -> Result<RepresentationIdentity> {
+pub(super) fn representation(part: &SourcePart) -> Result<RepresentationIdentity> {
     let Content::Representation { processor, .. } = &part.document.content else {
         bail!("vector rows require actual M3 representation bytes")
     };
@@ -17,7 +17,7 @@ fn representation(part: &SourcePart) -> Result<RepresentationIdentity> {
         modality: VectorModality::Text,
     })
 }
-fn locator(part: &SourcePart, start: u64, end: u64) -> String {
+pub(super) fn locator(part: &SourcePart, start: u64, end: u64) -> String {
     format!(
         "representation:{}@{}..{}",
         part.representation_digest, start, end

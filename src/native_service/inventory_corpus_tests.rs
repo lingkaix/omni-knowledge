@@ -262,7 +262,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             &owner,
             permit,
             inventory,
-            model,
+            model.clone(),
             holding(NativeRefreshJob::metadata_requirement().memory_bytes, 0),
         )
         .unwrap();
@@ -526,6 +526,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
                 .settle(&claim, job.key(), knowledge_core::jobs::Outcome::Failed)
                 .unwrap();
             drop(job);
+            drop(model);
             drop(fixture);
             drop(facts);
             test_metadata.finish().unwrap();
@@ -689,7 +690,12 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     // The Refresh pressure oracle ends after actual aggregate settlement. The independent
     // cold Query below prepays its own complete peak, then applies its own FULL pressure.
     pressure.finish().unwrap();
-    let query_command=wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"actual-cold-tuple-query","command":{"op":"query","query":{"library_ids":[service.library_id().as_str()],"keywords":["alpha"],"methods":["files","bm25"],"required_tags":[],"case_sensitive":false,"limit":10,"budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"},"image_query":null}}})).unwrap()).unwrap().command;
+    let methods = if embeddings {
+        vec!["files", "bm25", "literal", "regex", "semantic"]
+    } else {
+        vec!["files", "bm25", "literal", "regex"]
+    };
+    let query_command=wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"actual-cold-tuple-query","command":{"op":"query","query":{"library_ids":[service.library_id().as_str()],"keywords":["ALPHA","alpha.*"],"methods":methods,"required_tags":[],"case_sensitive":false,"limit":10,"budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"},"image_query":null}}})).unwrap()).unwrap().command;
     let query_permit = service
         .native_scope(&session, &query_command, None)
         .unwrap();
@@ -758,14 +764,17 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         &service,
         &owner,
         &job_permit,
-        reopened["scan"].as_str().unwrap(),
-        if mode == "query-source-change" {
-            "raw/two.html"
-        } else {
-            "raw/one.md"
-        },
+        (
+            reopened["scan"].as_str().unwrap(),
+            if mode == "query-source-change" {
+                "raw/two.html"
+            } else {
+                "raw/one.md"
+            },
+        ),
         &query_inventory,
         (mode == "query-source-change").then(|| source_root.join("raw/two.html")),
+        model.clone(),
     );
     let mut whole_command = query_command.clone();
     if let wire::Command::Query { query } = &mut whole_command {
@@ -936,6 +945,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
     drop(mutation_directory);
     drop(reopened);
     drop(reader);
+    drop(model);
     drop(fixture);
     drop(facts);
     test_metadata.finish().unwrap();

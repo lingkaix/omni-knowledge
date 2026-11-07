@@ -48,6 +48,24 @@ impl VectorBuildPlan {
         self.max_row_bytes = self.max_row_bytes.max(bound);
         Ok(())
     }
+    /// The SAME mature reader formula, bounded by actual row metadata facts and distinct-file K.
+    /// This is quote DATA, not admission or model/source authority; opening still validates the
+    /// selected real manifest and Work before payload IO. It allocates no corpus/vector buffers.
+    pub fn query_requirement(
+        &self,
+        identity: &super::ModelIdentity,
+        files: usize,
+    ) -> Result<knowledge_core::jobs::Reservation, VectorError> {
+        super::validate_identity(identity)?;
+        if files == 0 || self.max_row_bytes == 0 || self.max_row_bytes > u32::MAX as u64 {
+            return Err(invalid("invalid reader metadata plan"));
+        }
+        let files = files.min(usize::try_from(self.rows).map_err(invalid)?);
+        Ok(knowledge_core::jobs::Reservation {
+            memory_bytes: super::reader_need_parts(identity, self.max_row_bytes, files)?,
+            temporary_bytes: 0,
+        })
+    }
     /// The SAME complete quote used by the existing vector writer, before buffers, IO or next().
     pub fn requirement(
         &self,
