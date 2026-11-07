@@ -33,7 +33,7 @@ fn contract_model(
         embedding_space: "contract-only-not-WeMM".into(),
         timeout_seconds: 5,
     };
-    let server = server::Server::start_for(&config, None, false, Duration::from_secs(120));
+    let server = server::Server::start_for(&config, None, false, Duration::from_secs(240));
     config.endpoint = server.endpoint.clone();
     let identity = ModelIdentity {
         provider: "deterministic-contract-only".into(),
@@ -70,6 +70,15 @@ fn contract_model(
             _work: work,
         },
     )
+}
+pub(super) fn refresh_reconciled_inventory(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    id: &str,
+) -> NativeInventory {
+    let permit = corpus_refresh(service, session, id, false);
+    super::reconcile(service, owner, permit)
 }
 fn corpus_refresh(
     service: &NativeLibraryService,
@@ -209,6 +218,13 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         (None, None)
     };
     let session = service.connect(TransportFacts::OwnerStdio).unwrap();
+    if mode == "normal" {
+        fs::write(
+            source_root.join("raw/page-002.md"),
+            "---\ntitle: Bound Title\ndescription: \"First\\n  indented\"\nlegacy_description: \"First\"\ntags: [BoundTag]\nlegacy_tags: [legacy-kept]\n---\nactual frontmatter bound alpha\n",
+        )
+        .unwrap();
+    }
     let seed = reconcile(
         &service,
         &owner,
@@ -872,6 +888,17 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         Ok(_) => panic!("missing actual original cannot authorize cached payload"),
     };
     fs::rename(&hidden_path, &original_path).unwrap();
+    if mode == "vectors" {
+        query_job::run_semantic_tag_exclusion(
+            &service,
+            &owner,
+            &session,
+            reopened["scan"].as_str().unwrap(),
+            model
+                .as_ref()
+                .expect("vectors mode keeps the contract model"),
+        );
+    }
     if mode == "normal" {
         query_job::run_canonical_metadata_controls(
             &service,

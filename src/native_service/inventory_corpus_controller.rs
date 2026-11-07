@@ -1035,20 +1035,27 @@ enum RowBuild {
         unavailable: bool,
     },
 }
-struct AnnotationDraft {
-    source_id: String,
-    path: wire::RelativePath,
-    page_title: Option<String>,
-    page_descriptions: Vec<String>,
-    page_tags: Vec<String>,
-    has_frontmatter: bool,
-    pointer_title: Option<String>,
-    pointer_descriptions: Vec<String>,
-    pointer_tags: Vec<String>,
-    pointer_path: Option<wire::RelativePath>,
-    digest: Option<wire::Digest>,
-    digest_state: wire::DigestState,
-    availability: wire::Availability,
+#[cfg(test)]
+thread_local! {
+    static TEST_FRONTMATTER_MAX_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_MAX_ADMITTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_FRONTMATTER_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_POINTER_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_POINTER_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_BYTES_BEFORE_FRONTMATTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+    static TEST_OBJECTS_BEFORE_POINTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+    static TEST_METADATA_EVICTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn record_frontmatter_read(read: u64, admitted: u64) {
+    TEST_FRONTMATTER_MAX_READ.with(|max_read| {
+        if read > max_read.get() {
+            max_read.set(read);
+            TEST_FRONTMATTER_MAX_ADMITTED.with(|max_admitted| max_admitted.set(admitted));
+        }
+    });
 }
 /// Actual M1 metadata discovery owner. Annotations and scopes die before page and Claim credit.
 pub struct NativeMetadataRun {
@@ -1156,6 +1163,60 @@ impl NativeMetadataRun {
         self.data
             .as_ref()
             .map_or(0, |data| data.unavailable_sources)
+    }
+    #[cfg(test)]
+    pub fn test_frontmatter_max_read() -> u64 {
+        TEST_FRONTMATTER_MAX_READ.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_frontmatter_max_admitted() -> u64 {
+        TEST_FRONTMATTER_MAX_ADMITTED.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_frontmatter_entries() -> u64 {
+        TEST_FRONTMATTER_ENTRIES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_pointer_entries() -> u64 {
+        TEST_POINTER_ENTRIES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_pointer_read_bytes() -> u64 {
+        TEST_POINTER_READ_BYTES.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_bytes_before_frontmatter() -> u64 {
+        TEST_BYTES_BEFORE_FRONTMATTER.with(|slot| slot.get().unwrap_or(0))
+    }
+    #[cfg(test)]
+    pub fn test_objects_before_pointer() -> u64 {
+        TEST_OBJECTS_BEFORE_POINTER.with(|slot| slot.get().unwrap_or(0))
+    }
+    #[cfg(test)]
+    pub fn test_evictions() -> u64 {
+        TEST_METADATA_EVICTIONS.with(std::cell::Cell::get)
+    }
+    #[cfg(test)]
+    pub fn test_pinned_pages(&self) -> usize {
+        self.data.as_ref().map_or(0, |data| data.pinned_pages.len())
+    }
+    #[cfg(test)]
+    pub fn test_reclaimable_pages(&self) -> usize {
+        self.data.as_ref().map_or(0, |data| {
+            data.pinned_pages
+                .iter()
+                .filter(|page| Arc::strong_count(&page.page) == 1)
+                .count()
+        })
+    }
+    #[cfg(test)]
+    pub fn test_scope_clone(&self) -> Option<Permit> {
+        self.data
+            .as_ref()?
+            .rows
+            .values()
+            .next()
+            .map(|row| row.scope.clone())
     }
     fn check(&self) -> Result<()> {
         self.query.cause.check_claim(&self.claim)?;
@@ -1419,6 +1480,7 @@ impl NativeMetadataRun {
         }
         let offset = self.data.as_ref().expect("actual owner").offset;
         self.release_page()?;
+        self.collect_pages()?;
         let page = self.read_inventory_page(offset)?;
         let observations: Vec<_> = page.observations().collect();
         let complete = page.complete();
@@ -1429,6 +1491,7 @@ impl NativeMetadataRun {
         }
         if complete {
             self.release_page()?;
+            self.collect_pages()?;
             self.data.as_mut().expect("actual owner").done = true;
             return Ok(true);
         }
@@ -1603,7 +1666,7 @@ impl NativeMetadataRun {
             } else {
                 (None, Vec::new(), Vec::new(), None)
             };
-        let annotations = union_annotations(AnnotationDraft {
+        let annotations = super::query_annotations(super::QueryAnnotationDraft {
             source_id,
             path,
             page_title,
@@ -1628,27 +1691,43 @@ impl NativeMetadataRun {
         }
     }
     fn read_page_frontmatter(&self, file: &File, len: u64) -> Result<PageFrontmatter> {
+        #[cfg(test)]
+        {
+            TEST_FRONTMATTER_ENTRIES.with(|count| count.set(count.get() + 1));
+            TEST_BYTES_BEFORE_FRONTMATTER.with(|slot| {
+                if slot.get().is_none() {
+                    slot.set(Some(self.query.cause.reads.used()));
+                }
+            });
+        }
         let head_len = len.min(6);
         self.query.cause.admit_io(&self.claim, head_len)?;
         let mut head_bytes = vec![0u8; head_len as usize];
         file.read_exact_at(&mut head_bytes, 0)?;
-        if !(head_bytes.starts_with(b"---") || head_bytes.starts_with("\u{feff}---".as_bytes())) {
-            return Ok(PageFrontmatter {
-                title: None,
-                descriptions: Vec::new(),
-                tags: Vec::new(),
-                present: false,
-            });
+        #[cfg(test)]
+        let mut read = head_len;
+        let matched =
+            head_bytes.starts_with(b"---") || head_bytes.starts_with("\u{feff}---".as_bytes());
+        if matched {
+            let extra = len.min(64 * 1024) - head_len;
+            if extra > 0 {
+                self.query.cause.admit_io(&self.claim, extra)?;
+                let mut rest = vec![0u8; extra as usize];
+                file.read_exact_at(&mut rest, head_len)?;
+                #[cfg(test)]
+                {
+                    read += extra;
+                }
+                head_bytes.extend_from_slice(&rest);
+            }
         }
-        let fm_len = len.min(64 * 1024);
-        let extra = fm_len - head_len;
-        if extra > 0 {
-            self.query.cause.admit_io(&self.claim, extra)?;
-        }
-        let mut fm_bytes = vec![0u8; fm_len as usize];
-        file.read_exact_at(&mut fm_bytes, 0)?;
-        let (title, descriptions, tags, present) =
-            parse_frontmatter_fields(&String::from_utf8_lossy(&fm_bytes));
+        #[cfg(test)]
+        record_frontmatter_read(read, read);
+        let (title, descriptions, tags, present) = if matched {
+            parse_frontmatter_fields(&String::from_utf8_lossy(&head_bytes))
+        } else {
+            (None, Vec::new(), Vec::new(), false)
+        };
         Ok(PageFrontmatter {
             title,
             descriptions,
@@ -1663,6 +1742,15 @@ impl NativeMetadataRun {
         pointer: PointerOpen,
     ) -> Result<PointerMarkdown> {
         let (pointer_file, pointer_meta, pointer_rel) = pointer;
+        #[cfg(test)]
+        {
+            TEST_POINTER_ENTRIES.with(|count| count.set(count.get() + 1));
+            TEST_OBJECTS_BEFORE_POINTER.with(|slot| {
+                if slot.get().is_none() {
+                    slot.set(Some(self.query.cause.reads.amount().objects));
+                }
+            });
+        }
         self.query.cause.admit_object(&self.claim)?;
         self.query.cause.admit_io(&self.claim, pointer_meta.len())?;
         anyhow::ensure!(
@@ -1670,6 +1758,8 @@ impl NativeMetadataRun {
             "pointer changed before read"
         );
         let mut pointer_bytes = vec![0u8; pointer_meta.len() as usize];
+        #[cfg(test)]
+        TEST_POINTER_READ_BYTES.with(|count| count.set(count.get() + pointer_meta.len()));
         pointer_file.read_exact_at(&mut pointer_bytes, 0)?;
         anyhow::ensure!(
             stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
@@ -1772,6 +1862,8 @@ impl NativeMetadataRun {
         } else {
             None
         };
+        #[cfg(test)]
+        let displaced = evict.as_ref().is_some_and(|previous| previous != &key);
         if let Some(evict) = evict
             && let Some(old) = self
                 .data
@@ -1785,8 +1877,15 @@ impl NativeMetadataRun {
             if let Err(error) = self.rejoin_scope(old.scope) {
                 return Err(self.abandon_scope(scope, error));
             }
+            #[cfg(test)]
+            if displaced {
+                TEST_METADATA_EVICTIONS.with(|count| count.set(count.get() + 1));
+            }
             let data = self.data.as_mut().expect("actual owner");
             data.metadata_used = data.metadata_used.saturating_sub(released);
+            if let Err(error) = self.collect_pages() {
+                return Err(self.abandon_scope(scope, error));
+            }
         }
         let used = match self
             .data
@@ -1931,51 +2030,4 @@ fn map_unavailable(obs: &knowledge_storage::Observation) -> wire::Availability {
         Some(Unavailable::Deleted) => wire::Availability::Deleted,
         Some(Unavailable::Unknown) | None => wire::Availability::Unknown,
     }
-}
-fn union_annotations(draft: AnnotationDraft) -> Result<NativeQueryAnnotations> {
-    let mut descriptions = draft.page_descriptions;
-    for part in draft.pointer_descriptions {
-        if !descriptions.iter().any(|item| item == &part) {
-            descriptions.push(part);
-        }
-    }
-    let mut tags = draft.page_tags;
-    for tag in draft.pointer_tags {
-        if !tags.iter().any(|item| item == &tag) {
-            tags.push(tag);
-        }
-    }
-    let fallback = draft
-        .path
-        .as_str()
-        .rsplit('/')
-        .next()
-        .unwrap_or(draft.path.as_str())
-        .to_owned();
-    let title = draft
-        .pointer_title
-        .filter(|title| !title.is_empty())
-        .or(draft.page_title.filter(|title| !title.is_empty()))
-        .unwrap_or(fallback);
-    let annotation_path = if let Some(pointer) = draft.pointer_path {
-        Some(pointer)
-    } else if draft.path.as_str().starts_with("wiki/")
-        || draft.path.as_str().starts_with("pages/")
-        || draft.has_frontmatter
-    {
-        Some(draft.path.clone())
-    } else {
-        None
-    };
-    Ok(NativeQueryAnnotations {
-        source_id: wire::Id::new(draft.source_id)?,
-        path: draft.path,
-        title,
-        description: descriptions.join("\n"),
-        tags,
-        annotation_path,
-        digest: draft.digest,
-        digest_state: draft.digest_state,
-        availability: draft.availability,
-    })
 }

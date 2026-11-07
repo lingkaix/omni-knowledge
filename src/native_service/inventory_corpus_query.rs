@@ -247,6 +247,68 @@ impl NativeQueryAnnotations {
             || contains_text(&self.description, keyword, case_sensitive)
     }
 }
+pub(super) struct QueryAnnotationDraft {
+    pub(super) source_id: String,
+    pub(super) path: wire::RelativePath,
+    pub(super) page_title: Option<String>,
+    pub(super) page_descriptions: Vec<String>,
+    pub(super) page_tags: Vec<String>,
+    pub(super) has_frontmatter: bool,
+    pub(super) pointer_title: Option<String>,
+    pub(super) pointer_descriptions: Vec<String>,
+    pub(super) pointer_tags: Vec<String>,
+    pub(super) pointer_path: Option<wire::RelativePath>,
+    pub(super) digest: Option<wire::Digest>,
+    pub(super) digest_state: wire::DigestState,
+    pub(super) availability: wire::Availability,
+}
+pub(super) fn query_annotations(draft: QueryAnnotationDraft) -> Result<NativeQueryAnnotations> {
+    let mut descriptions = draft.page_descriptions;
+    for part in draft.pointer_descriptions {
+        if !descriptions.iter().any(|item| item == &part) {
+            descriptions.push(part);
+        }
+    }
+    let mut tags = draft.page_tags;
+    for tag in draft.pointer_tags {
+        if !tags.iter().any(|item| item == &tag) {
+            tags.push(tag);
+        }
+    }
+    let fallback = draft
+        .path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or(draft.path.as_str())
+        .to_owned();
+    let title = draft
+        .pointer_title
+        .filter(|title| !title.is_empty())
+        .or(draft.page_title.filter(|title| !title.is_empty()))
+        .unwrap_or(fallback);
+    let annotation_path = if let Some(pointer) = draft.pointer_path {
+        Some(pointer)
+    } else if draft.path.as_str().starts_with("wiki/")
+        || draft.path.as_str().starts_with("pages/")
+        || draft.has_frontmatter
+    {
+        Some(draft.path.clone())
+    } else {
+        None
+    };
+    Ok(NativeQueryAnnotations {
+        source_id: wire::Id::new(draft.source_id)?,
+        path: draft.path,
+        title,
+        description: descriptions.join("\n"),
+        tags,
+        annotation_path,
+        digest: draft.digest,
+        digest_state: draft.digest_state,
+        availability: draft.availability,
+    })
+}
 fn eq_text(left: &str, right: &str, case_sensitive: bool) -> bool {
     if case_sensitive {
         left == right
@@ -269,64 +331,33 @@ fn canonical_annotations(
     pointer_path: Option<wire::RelativePath>,
 ) -> Result<NativeQueryAnnotations> {
     let meta = &document.metadata;
-    let mut descriptions = Vec::new();
-    if let Some(text) = meta.get("frontmatter_description") {
-        for part in text.split('\n') {
-            let part = part.trim();
-            if !part.is_empty() && !descriptions.iter().any(|item| item == part) {
-                descriptions.push(part.to_owned());
-            }
-        }
-    }
-    for part in pointer_descriptions {
-        if !descriptions.iter().any(|item| item == &part) {
-            descriptions.push(part);
-        }
-    }
-    let mut tags = Vec::new();
-    if let Some(text) = meta.get("frontmatter_tags") {
-        for tag in serde_json::from_str::<Vec<String>>(text)? {
-            if !tag.is_empty() && !tags.iter().any(|item| item == &tag) {
-                tags.push(tag);
-            }
-        }
-    }
-    for tag in pointer_tags {
-        if !tags.iter().any(|item| item == &tag) {
-            tags.push(tag);
-        }
-    }
-    let title = pointer_title
-        .filter(|title| !title.is_empty())
-        .or_else(|| {
-            meta.get("frontmatter_title")
-                .cloned()
-                .filter(|title| !title.is_empty())
-        })
-        .unwrap_or_else(|| document.title.clone());
+    let page_descriptions = meta
+        .get("frontmatter_descriptions")
+        .map(|text| serde_json::from_str::<Vec<String>>(text))
+        .transpose()?
+        .unwrap_or_default();
+    let page_tags = meta
+        .get("frontmatter_tags")
+        .map(|text| serde_json::from_str::<Vec<String>>(text))
+        .transpose()?
+        .unwrap_or_default();
     let path = wire::RelativePath::new(
         document
             .locator
             .as_deref()
             .context("actual source logical path absent")?,
     )?;
-    let annotation_path = if let Some(pointer) = pointer_path {
-        Some(pointer)
-    } else if path.as_str().starts_with("wiki/")
-        || path.as_str().starts_with("pages/")
-        || meta.contains_key("frontmatter_page")
-    {
-        Some(path.clone())
-    } else {
-        None
-    };
-    Ok(NativeQueryAnnotations {
-        source_id: wire::Id::new(document.key.id.clone())?,
+    query_annotations(QueryAnnotationDraft {
+        source_id: document.key.id.clone(),
         path,
-        title,
-        description: descriptions.join("\n"),
-        tags,
-        annotation_path,
+        page_title: meta.get("frontmatter_title").cloned(),
+        page_descriptions,
+        page_tags,
+        has_frontmatter: meta.contains_key("frontmatter_page"),
+        pointer_title,
+        pointer_descriptions,
+        pointer_tags,
+        pointer_path,
         digest: Some(wire::Digest::new(document.digest.clone())?),
         digest_state: wire::DigestState::Verified,
         availability: wire::Availability::Available,

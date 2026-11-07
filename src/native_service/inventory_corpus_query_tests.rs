@@ -979,11 +979,7 @@ impl LiveQuery {
 }
 fn metadata_command(
     service: &NativeLibraryService,
-    keywords: &[&str],
-    methods: &[&str],
-    required_tags: &[&str],
-    case_sensitive: bool,
-    limit: u64,
+    request: &LiveQueryOptions<'_>,
 ) -> wire::Command {
     wire::decode_request(
         &serde_json::to_vec(&serde_json::json!({
@@ -993,14 +989,14 @@ fn metadata_command(
                 "op": "query",
                 "query": {
                     "library_ids": [service.library_id().as_str()],
-                    "keywords": keywords,
-                    "methods": methods,
-                    "required_tags": required_tags,
-                    "case_sensitive": case_sensitive,
-                    "limit": limit,
+                    "keywords": request.keywords,
+                    "methods": request.methods,
+                    "required_tags": request.required_tags,
+                    "case_sensitive": request.case_sensitive,
+                    "limit": request.limit,
                     "budget": {
-                        "max_files": 1000,
-                        "max_bytes": "67108864",
+                        "max_files": request.max_files,
+                        "max_bytes": request.max_bytes.to_string(),
                         "max_millis": 120000,
                         "max_memory_bytes": "1073741824"
                     },
@@ -1032,14 +1028,7 @@ fn open_live(
     scan: &str,
     request: LiveQueryOptions<'_>,
 ) -> LiveQuery {
-    let command = metadata_command(
-        service,
-        request.keywords,
-        request.methods,
-        request.required_tags,
-        request.case_sensitive,
-        request.limit,
-    );
+    let command = metadata_command(service, &request);
     let permit = service.native_scope(session, &command, None).unwrap();
     let scratch = holding(4 * 1024 * 1024, 0);
     let inventory = service
@@ -1052,8 +1041,8 @@ fn open_live(
             &Preflight {
                 holding: &scratch,
                 budget: Budget {
-                    max_files: 1000,
-                    max_bytes: 8 * 1024 * 1024,
+                    max_files: request.max_files,
+                    max_bytes: request.max_bytes.min(8 * 1024 * 1024),
                     max_millis: 60000,
                     max_memory_bytes: 4 * 1024 * 1024,
                 },
@@ -1144,7 +1133,12 @@ fn drive_bm25(
     loop {
         let step = run.step(service);
         if step.is_failed() {
-            panic!("canonical bm25 failed: {:#}", run.failure().unwrap());
+            panic!(
+                "canonical bm25 failed: {:#} bytes={} objects={}",
+                run.failure().unwrap(),
+                run.bytes_admitted(),
+                run.objects_admitted()
+            );
         }
         if step.is_complete() {
             break;
@@ -1160,7 +1154,7 @@ fn drive_bm25(
         run.source_annotations(id)
             .unwrap()
             .cloned()
-            .unwrap_or_else(|| panic!("missing annotations for {id}"))
+            .unwrap_or_else(|| panic!("missing annotations for {id}; hits={ids:?}"))
     });
     let (query, claim) = run
         .finish()
@@ -1195,6 +1189,273 @@ fn observation_id(inventory: &NativeInventory, wanted: &str) -> String {
         assert!(next > offset, "inventory replay made no progress");
         offset = next;
     }
+}
+fn inventory_page_keys(inventory: &NativeInventory) -> Vec<Vec<(String, String)>> {
+    let mut offset = 0u64;
+    let mut pages = Vec::new();
+    loop {
+        let page = inventory
+            .page(
+                offset,
+                Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 1024 * 1024,
+                },
+                holding(2 * 1024 * 1024, 0),
+            )
+            .unwrap();
+        let next = page.next_offset();
+        let complete = page.complete();
+        pages.push(
+            page.observations()
+                .map(|row| {
+                    (
+                        row.observation().stat.path.as_str().to_owned(),
+                        row.source_id().to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        if complete {
+            break;
+        }
+        assert!(next > offset, "inventory replay made no progress");
+        offset = next;
+    }
+    pages
+}
+fn later_page_has_earlier_key(pages: &[Vec<(String, String)>]) -> bool {
+    pages.iter().enumerate().any(|(index, page)| {
+        page.iter().any(|key| {
+            pages
+                .iter()
+                .take(index)
+                .any(|earlier| earlier.iter().any(|previous| key < previous))
+        })
+    })
+}
+pub(super) fn run_semantic_tag_exclusion(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    model: &NativeEmbeddingSelection,
+) {
+    let query_rows_before = NativeSemanticRun::test_semantic_query_rows();
+    let command = wire::decode_request(
+        &serde_json::to_vec(&serde_json::json!({
+            "wire_version": 1,
+            "request_id": "canonical-semantic-tag-exclusion",
+            "command": {
+                "op": "query",
+                "query": {
+                    "library_ids": [service.library_id().as_str()],
+                    "keywords": ["alpha"],
+                    "methods": ["semantic"],
+                    "required_tags": ["missing-semantic-tag"],
+                    "case_sensitive": true,
+                    "limit": 10,
+                    "budget": {
+                        "max_files": 1000,
+                        "max_bytes": "67108864",
+                        "max_millis": 120000,
+                        "max_memory_bytes": "1073741824"
+                    },
+                    "image_query": null
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+    .command;
+    let permit = service.native_scope(session, &command, None).unwrap();
+    let mut scratch = holding(4 * 1024 * 1024, 0);
+    let inventory = service
+        .inventory_for_query(
+            owner,
+            &permit,
+            "wiki",
+            scan,
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    let reader = service
+        .open_corpus_tuple(owner, permit, ready(NativeTupleRead::requirement()))
+        .unwrap();
+    let (source_at, _) = reader.test_source_partition("raw/one.md").unwrap();
+    let query = NativeTupleQuery::prepare(
+        vec![NativeQueryLibrary::new(
+            reader,
+            inventory,
+            Some(model.clone()),
+        )],
+        ready(NativeTupleQuery::metadata_requirement()),
+    )
+    .unwrap();
+    let vector_need = query.vector_requirement(0).unwrap();
+    let stage_need = NativeQueryStageResources::requirement(1024 * 1024)
+        .unwrap()
+        .memory_bytes;
+    // Stage quote plus the live embedding provider loan, the pinned page, and the source scope.
+    let memory = stage_need.saturating_add(160 * 1024 * 1024);
+    let account = Account::current().unwrap();
+    let submitted = query
+        .submit(NativeJobPlan {
+            operation_id: "canonical-semantic-tag-exclusion",
+            job_id: "canonical-semantic-tag-exclusion-job",
+            budget: Budget {
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+                max_millis: 120000,
+                max_memory_bytes: memory,
+            },
+            reservation: Reservation {
+                memory_bytes: memory,
+                temporary_bytes: 0,
+            },
+            priority: knowledge_core::jobs::Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    assert!(submitted.created);
+    let claim = Arc::new(
+        account
+            .queue()
+            .claim(Instant::now())
+            .unwrap()
+            .expect("semantic tag exclusion was not claimable"),
+    );
+    let mut cursor = 0u64;
+    let (page, observed) = loop {
+        let funded = account
+            .split_claim(
+                &claim,
+                query.key(),
+                Reservation {
+                    memory_bytes: 2 * 1024 * 1024,
+                    temporary_bytes: 0,
+                },
+            )
+            .unwrap();
+        let page = query
+            .page(
+                &claim,
+                0,
+                cursor,
+                Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 1024 * 1024,
+                },
+                funded,
+            )
+            .unwrap();
+        let found = page
+            .sources()
+            .find(|row| row.observation().stat.path.as_str() == "raw/one.md");
+        if let Some(observed) = found {
+            break (page, observed);
+        }
+        assert!(
+            !page.complete(),
+            "raw/one.md absent from semantic inventory"
+        );
+        cursor = page.next_offset();
+        let mut funded = page
+            .into_funding()
+            .unwrap_or_else(|_| panic!("unconsumed semantic page remained pinned"));
+        account
+            .rejoin_claim(&mut funded, &claim, query.key())
+            .unwrap();
+    };
+    let source = query
+        .source(service, &claim, 0, observed, source_at)
+        .unwrap()
+        .unwrap();
+    let embedding = query.embed_keyword(claim.clone(), 0, 0);
+    assert!(
+        embedding.failure().is_none(),
+        "semantic tag exclusion embedding: {:?}",
+        embedding.failure()
+    );
+    let stage = query
+        .stage(
+            claim.clone(),
+            0,
+            vec![source],
+            NativeQueryStageResources {
+                window: 1024 * 1024,
+            },
+        )
+        .unwrap_or_else(|error| panic!("semantic tag exclusion stage: {error}"));
+    let run = stage.semantic(&embedding, vector_need);
+    let failure = run
+        .failure()
+        .map(|error| format!("{error:#}"))
+        .unwrap_or_else(|| panic!("tagged semantic exclusion reached delivery"));
+    assert!(
+        failure.contains("tag"),
+        "semantic exclusion must refuse before cosine, got {failure}"
+    );
+    assert_eq!(
+        NativeSemanticRun::test_semantic_query_rows(),
+        query_rows_before,
+        "required-tag mismatch must not reach cosine"
+    );
+    run.finish()
+        .unwrap_or_else(|_| panic!("refused semantic run retained a reader"));
+    let (_query, embedding_claim) = embedding
+        .finish()
+        .unwrap_or_else(|_| panic!("semantic embedding owner remains live"));
+    drop(embedding_claim);
+    let loans = stage
+        .into_loans()
+        .unwrap_or_else(|_| panic!("semantic stage retained after the refused run"));
+    drop((loans.job, loans.claim));
+    for source in loans.sources {
+        query
+            .finish_source(source, &claim)
+            .unwrap_or_else(|_| panic!("semantic source scope retained"));
+    }
+    loans
+        .work
+        .expect("semantic stage loan")
+        .rejoin(&claim, query.key())
+        .unwrap();
+    let mut funded = page
+        .into_funding()
+        .unwrap_or_else(|_| panic!("semantic page still retained after its source"));
+    account
+        .rejoin_claim(&mut funded, &claim, query.key())
+        .unwrap();
+    let claim = Arc::try_unwrap(claim).unwrap_or_else(|_| panic!("semantic claim retained"));
+    account
+        .queue()
+        .settle(
+            &claim,
+            query.key(),
+            knowledge_core::jobs::Outcome::Cancelled,
+        )
+        .unwrap();
+    account
+        .queue()
+        .retire(submitted.job, query.key())
+        .unwrap_or_else(|error| panic!("semantic tag exclusion job was not terminal: {error:?}"));
+    drop(query);
+    scratch.finish().unwrap();
 }
 pub(super) fn run_canonical_metadata_controls(
     service: &NativeLibraryService,
@@ -1279,6 +1540,105 @@ pub(super) fn run_canonical_metadata_controls(
     assert_eq!(hit.digest_state, wire::DigestState::Verified);
     assert_eq!(hit.availability, wire::Availability::Available);
     assert!(!hit.tags.iter().any(|tag| tag == "hidden-sidecar-tag"));
+    let bytes_before_frontmatter = NativeMetadataRun::test_bytes_before_frontmatter();
+    let objects_before_pointer = NativeMetadataRun::test_objects_before_pointer();
+    assert!(NativeMetadataRun::test_frontmatter_entries() >= 1);
+    assert!(NativeMetadataRun::test_pointer_entries() >= 1);
+    let frontmatter_entries = NativeMetadataRun::test_frontmatter_entries();
+    let frontmatter_read = NativeMetadataRun::test_frontmatter_max_read();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: bytes_before_frontmatter + 1,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-frontmatter-byte-boundary",
+        },
+    );
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            break;
+        }
+        assert!(
+            !step.is_complete(),
+            "frontmatter byte ceiling completed before the reader refused"
+        );
+    }
+    assert!(
+        run.budget_exhausted(),
+        "frontmatter byte boundary: {:?}",
+        run.failure()
+    );
+    assert!(NativeMetadataRun::test_frontmatter_entries() > frontmatter_entries);
+    assert!(
+        NativeMetadataRun::test_frontmatter_max_read().saturating_sub(frontmatter_read) < 65536,
+        "refused frontmatter read jumped by {}",
+        NativeMetadataRun::test_frontmatter_max_read().saturating_sub(frontmatter_read)
+    );
+    assert!(
+        run.bytes_admitted() < bytes_before_frontmatter + 65536,
+        "refused frontmatter call admitted {}",
+        run.bytes_admitted()
+    );
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("frontmatter byte boundary finish retained a scope"));
+    drop((query, claim));
+    live.finish();
+    let pointer_entries = NativeMetadataRun::test_pointer_entries();
+    let pointer_read = NativeMetadataRun::test_pointer_read_bytes();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: objects_before_pointer,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-pointer-object-boundary",
+        },
+    );
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            break;
+        }
+        assert!(
+            !step.is_complete(),
+            "pointer object ceiling completed without refusing the pointer"
+        );
+    }
+    assert!(
+        run.budget_exhausted(),
+        "pointer object boundary: {:?}",
+        run.failure()
+    );
+    assert!(NativeMetadataRun::test_pointer_entries() > pointer_entries);
+    assert_eq!(NativeMetadataRun::test_pointer_read_bytes(), pointer_read);
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("pointer object boundary finish retained a scope"));
+    drop((query, claim));
+    live.finish();
     let live = open_live(
         service,
         owner,
@@ -1527,34 +1887,60 @@ pub(super) fn run_canonical_metadata_controls(
     assert_eq!(denied.tags, vec!["DeniedAssetTag".to_owned()]);
     assert!(!hits.iter().any(|hit| hit.path.as_str() == "raw/two.html"));
     assert!(unavailable >= 2, "unavailable sources={unavailable}");
+    let bound_description = "First\n  indented\nFirst";
+    let bound_path = source_root.join("raw/page-002.md");
+    let original_page = fs::read(&bound_path).unwrap();
+    let bound_id = observed(query_inventory, "raw/page-002.md")
+        .source_id()
+        .to_owned();
     let live = open_live(
         service,
         owner,
         session,
         scan,
         LiveQueryOptions {
-            keywords: &[],
+            keywords: &["BoundTag"],
             methods: &["files", "tags"],
-            required_tags: &[],
-            case_sensitive: false,
+            required_tags: &["BoundTag"],
+            case_sensitive: true,
             limit: 10,
             max_files: 1000,
-            max_bytes: 1,
+            max_bytes: 64 * 1024 * 1024,
             max_millis: 120000,
             bm25: false,
-            job: "canonical-one-byte",
+            job: "canonical-bound-metadata",
         },
     );
     let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
-    assert!(run.step(service).is_failed());
-    assert!(
-        run.budget_exhausted(),
-        "one-byte metadata: {:?}",
-        run.failure()
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            panic!("bound metadata failed: {:#}", run.failure().unwrap());
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+    let hits = run.hits().unwrap().cloned().collect::<Vec<_>>();
+    let bound = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "raw/page-002.md")
+        .unwrap_or_else(|| panic!("edited page-002 missing from metadata hits"));
+    assert_eq!(bound.description, bound_description);
+    assert_eq!(bound.title, "Bound Title");
+    assert_eq!(
+        bound.tags,
+        vec!["BoundTag".to_owned(), "legacy-kept".to_owned()]
     );
+    let cloned = run.test_scope_clone().expect("retained metadata scope");
+    let run = match run.finish() {
+        Err(run) => run,
+        Ok(_) => panic!("live metadata scope must block finish"),
+    };
+    drop(cloned);
     let (query, claim) = run
         .finish()
-        .unwrap_or_else(|_| panic!("one-byte metadata finish retained a scope"));
+        .unwrap_or_else(|_| panic!("metadata finish after the scope clone died"));
     drop((query, claim));
     live.finish();
     let live = open_live(
@@ -1563,37 +1949,185 @@ pub(super) fn run_canonical_metadata_controls(
         session,
         scan,
         LiveQueryOptions {
+            keywords: &["frontmatter"],
+            methods: &["bm25"],
+            required_tags: &["BoundTag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-bound-bm25",
+        },
+    );
+    let (ids, _, annotations) = drive_bm25(service, &live, Some(&bound_id));
+    live.finish();
+    assert!(ids.iter().any(|id| id == &bound_id));
+    let annotations = annotations.unwrap();
+    assert_eq!(annotations.description, bound_description);
+    assert_eq!(annotations.title, "Bound Title");
+    assert_eq!(
+        annotations.tags,
+        vec!["BoundTag".to_owned(), "legacy-kept".to_owned()]
+    );
+    fs::write(
+        sources.join(format!("{bound_id}.md")),
+        "---\ndescription: \"First\\n  indented\"\n---\n",
+    )
+    .unwrap();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["BoundTag"],
+            methods: &["files", "tags"],
+            required_tags: &["BoundTag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-bound-pointer-metadata",
+        },
+    );
+    let (hits, _) = drive_metadata(service, &live);
+    live.finish();
+    let bound = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "raw/page-002.md")
+        .unwrap_or_else(|| panic!("pointer union lost page-002"));
+    assert_eq!(bound.description, bound_description);
+    assert_eq!(bound.title, "Bound Title");
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["frontmatter"],
+            methods: &["bm25"],
+            required_tags: &["BoundTag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-bound-pointer-bm25",
+        },
+    );
+    let (_, _, annotations) = drive_bm25(service, &live, Some(&bound_id));
+    live.finish();
+    let annotations = annotations.unwrap();
+    assert_eq!(annotations.description, bound_description);
+    assert_eq!(annotations.title, "Bound Title");
+    let current = fs::read_to_string(&bound_path).unwrap();
+    assert!(current.starts_with("---"));
+    let mut edited = current.replacen("title: Bound Title\n", "title: Bound Title Edited\n", 1);
+    edited.push_str(&"x".repeat(65543usize.saturating_sub(edited.len())));
+    assert!(edited.starts_with("---"));
+    assert!(edited.len() > 65542);
+    assert!(edited.contains("title: Bound Title Edited\n"));
+    fs::write(&bound_path, edited).unwrap();
+    let refreshed =
+        super::refresh_reconciled_inventory(service, owner, session, "canonical-bound-title");
+    let edited_scan = refreshed.scan();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        edited_scan,
+        LiveQueryOptions {
+            keywords: &["BoundTag"],
+            methods: &["files", "tags"],
+            required_tags: &["BoundTag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-bound-edited-metadata",
+        },
+    );
+    let (hits, _) = drive_metadata(service, &live);
+    live.finish();
+    let bound = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "raw/page-002.md")
+        .unwrap_or_else(|| panic!("padded page-002 missing from metadata hits"));
+    assert_eq!(bound.title, "Bound Title Edited");
+    assert_eq!(bound.description, bound_description);
+    assert!(NativeMetadataRun::test_frontmatter_entries() >= 1);
+    assert_eq!(NativeMetadataRun::test_frontmatter_max_read(), 65536);
+    assert_eq!(NativeMetadataRun::test_frontmatter_max_admitted(), 65536);
+    drop(refreshed);
+    fs::write(&bound_path, original_page).unwrap();
+    let pages = inventory_page_keys(query_inventory);
+    assert!(pages.len() > 1, "corpus inventory pages={}", pages.len());
+    assert!(
+        later_page_has_earlier_key(&pages),
+        "metadata reclamation needs a later page with an earlier path key"
+    );
+    let reclaim_scan = scan.to_owned();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        &reclaim_scan,
+        LiveQueryOptions {
             keywords: &[],
             methods: &["files", "tags"],
             required_tags: &[],
             case_sensitive: false,
-            limit: 10,
-            max_files: 1,
+            limit: 1,
+            max_files: 1000,
             max_bytes: 64 * 1024 * 1024,
             max_millis: 120000,
             bm25: false,
-            job: "canonical-one-object",
+            job: "canonical-page-reclamation",
         },
     );
     let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    let evictions_before = NativeMetadataRun::test_evictions();
+    let mut visited = 0u64;
     loop {
         let step = run.step(service);
+        visited += 1;
         if step.is_failed() {
+            panic!("page reclamation failed: {:#}", run.failure().unwrap());
+        }
+        if step.is_complete() {
             break;
         }
-        assert!(
-            !step.is_complete(),
-            "one-object metadata completed without refusing another pointer object"
-        );
     }
+    assert!(visited > 1, "metadata pages visited={visited}");
     assert!(
-        run.budget_exhausted(),
-        "one-object metadata: {:?}",
-        run.failure()
+        NativeMetadataRun::test_evictions() > evictions_before,
+        "a later smaller path must evict the previous metadata candidate"
+    );
+    assert_eq!(
+        run.test_reclaimable_pages(),
+        0,
+        "evicted metadata pages must be collected while a real candidate remains"
+    );
+    assert!(
+        run.test_pinned_pages() <= 1,
+        "pinned metadata pages={}",
+        run.test_pinned_pages()
+    );
+    eprintln!(
+        "metadata page reclamation visited={visited} evicted={} pinned={}",
+        NativeMetadataRun::test_evictions() - evictions_before,
+        run.test_pinned_pages()
     );
     let (query, claim) = run
         .finish()
-        .unwrap_or_else(|_| panic!("one-object metadata finish retained a scope"));
+        .unwrap_or_else(|_| panic!("page reclamation finish retained a scope or page"));
     drop((query, claim));
     live.finish();
     let live = open_live(

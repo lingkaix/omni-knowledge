@@ -81,6 +81,10 @@ impl NativeTupleQuery {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SEMANTIC_QUERY_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 /// Actual vector result/error, reader Work and same source/range/model/Claim owners. Data dies
 /// before explicit same-Claim rejoin. No status quote or bare numeric vector grants permission.
 pub struct NativeSemanticRun {
@@ -248,6 +252,8 @@ impl NativeSemanticRun {
             self.work.as_ref().expect("actual vector reader loan"),
             Some(lib.reader.physical.data.vector_rows),
         )?;
+        #[cfg(test)]
+        TEST_SEMANTIC_QUERY_ROWS.with(|count| count.set(count.get() + 1));
         self.result = Some(store.query_rows(vector, query.limit.get() as usize, |row| {
             self.owner.vector_eligible(row)
         })?);
@@ -255,6 +261,10 @@ impl NativeSemanticRun {
     }
     pub fn failure(&self) -> Option<&anyhow::Error> {
         self.failure.as_ref()
+    }
+    #[cfg(test)]
+    pub fn test_semantic_query_rows() -> u64 {
+        TEST_SEMANTIC_QUERY_ROWS.with(std::cell::Cell::get)
     }
     pub fn check(&self) -> Result<()> {
         anyhow::ensure!(
