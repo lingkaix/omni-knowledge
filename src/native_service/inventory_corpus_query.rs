@@ -18,6 +18,7 @@ use knowledge_core::jobs::{Key, Submission, Submitted};
 pub use partition::{
     NativePartitionResult, NativeQueryLoans, NativeQueryPartition, NativeQueryPartitionPage,
     NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeSemanticRun,
+    NativeWholeSemanticRun,
 };
 use std::collections::BTreeSet;
 /// Actual selected tuple/M1/model owners for one labelled library; no manifest or ID reconstruction.

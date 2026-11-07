@@ -24,6 +24,7 @@ pub use query::{
     NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
     NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
     NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
+    NativeWholeSemanticRun,
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;

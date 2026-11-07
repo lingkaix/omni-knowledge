@@ -3,7 +3,7 @@ use super::*;
 #[path = "inventory_corpus_query_semantic.rs"]
 mod semantic;
 use knowledge_retrieval::{ArchiveSource, HeldRangeReaders, SearchResult, SourceGeneration};
-pub use semantic::NativeSemanticRun;
+pub use semantic::{NativeSemanticRun, NativeWholeSemanticRun};
 /// Complete mature kernel and range peaks. Source SDK/page/tuple/descriptor loans are additional.
 pub struct NativeQueryStageResources {
     /// Data-only bound; the actual combined loan comes atomically from the live Claim.

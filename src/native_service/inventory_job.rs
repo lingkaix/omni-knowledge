@@ -10,7 +10,7 @@ pub use corpus::{
     NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
     NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
     NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
-    NativeTupleRead,
+    NativeTupleRead, NativeWholeSemanticRun,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};
