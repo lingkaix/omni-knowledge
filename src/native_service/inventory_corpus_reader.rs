@@ -8,6 +8,9 @@ const READER_MEMORY: u64 = 8 * 1024 * 1024;
 thread_local! {
     static TEST_UNPINNED_HEADERS:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};
     static TEST_SOURCE_PART_READS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+    static TEST_INPUT_OPENS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+    static TEST_INPUT_BYTES:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+    static TEST_INPUT_OBJECTS:std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
 }
 struct Inputs {
     permit: Arc<Permit>,
@@ -38,6 +41,7 @@ pub(super) struct Physical {
     readers_version: [u64; 8],
     pub(super) input_reads: query::ReadAllowance,
     input_limit: u64,
+    input_objects_limit: u64,
     // Actual descriptors/pins and all metadata above die before their one paid resource lifetime.
     _funding: Work,
 }
@@ -82,11 +86,16 @@ fn read_small(
     admit(before[2])?;
     let mut bytes = vec![0; usize::try_from(before[2])?];
     file.read_exact_at(&mut bytes, 0)?;
+    #[cfg(test)]
+    TEST_INPUT_BYTES.set(TEST_INPUT_BYTES.get() + bytes.len() as u64);
     check()?;
     anyhow::ensure!(stamp(file)? == before, "tuple metadata changed while read");
     Ok(bytes)
 }
 impl Physical {
+    pub(super) fn metadata_memory(&self) -> Result<u64> {
+        Ok(self._funding.remaining()?.memory_bytes)
+    }
     pub(super) fn member_exists_admitted(
         &self,
         name: &str,
@@ -189,10 +198,16 @@ impl Physical {
         let mut count = 0;
         while offset < self.members_version[2] {
             check()?;
+            self.input_reads.admit_object(self.input_objects_limit)?;
             let (member, next) =
                 read_frame_admitted::<tuple::Member>(&self.members, offset, &|n| {
                     self.input_reads.admit(n, self.input_limit)
                 })?;
+            #[cfg(test)]
+            {
+                TEST_INPUT_BYTES.set(TEST_INPUT_BYTES.get() + next - offset);
+                TEST_INPUT_OBJECTS.set(TEST_INPUT_OBJECTS.get() + 1);
+            }
             let file = tuple::open_member(&self.stage, &member.name)?;
             let metadata = file.metadata()?;
             anyhow::ensure!(
@@ -273,6 +288,14 @@ impl TuplePart {
     }
 }
 impl NativeTupleRead {
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_input_probes() -> (u64, u64, u64) {
+        (
+            TEST_INPUT_OPENS.get(),
+            TEST_INPUT_BYTES.get(),
+            TEST_INPUT_OBJECTS.get(),
+        )
+    }
     #[cfg(test)]
     pub(super) fn test_part_read_count() -> u64 {
         TEST_SOURCE_PART_READS.get()
@@ -465,6 +488,15 @@ impl NativeLibraryService {
         permit: Permit,
         funding: Work,
     ) -> Result<NativeTupleRead> {
+        self.open_corpus_tuple_limited(owner, permit, funding, None)
+    }
+    pub(in crate::native_service) fn open_corpus_tuple_limited(
+        &self,
+        owner: &Owner,
+        permit: Permit,
+        funding: Work,
+        limits: Option<(Budget, Instant)>,
+    ) -> Result<NativeTupleRead> {
         anyhow::ensure!(
             funding.remaining()?.memory_bytes >= READER_MEMORY,
             "complete tuple reader metadata envelope is not prepaid"
@@ -483,12 +515,30 @@ impl NativeLibraryService {
                 && query.budget.max_memory_bytes.get() >= READER_MEMORY,
             "tuple Query selection/budget differs"
         );
-        let max_bytes = query.budget.max_bytes.get();
+        let request_deadline = inputs.permit.query_deadline().map_err(refused_error)?;
+        let (max_bytes, max_objects, deadline) = if let Some((budget, deadline)) = limits {
+            anyhow::ensure!(
+                budget.max_bytes <= query.budget.max_bytes.get()
+                    && budget.max_files <= query.budget.max_files.get()
+                    && budget.max_millis <= query.budget.max_millis.get()
+                    && deadline <= request_deadline
+                    && Instant::now() < deadline,
+                "tuple input exceeds original actual Query budget/deadline"
+            );
+            (budget.max_bytes, budget.max_files, deadline)
+        } else {
+            (
+                query.budget.max_bytes.get(),
+                query.budget.max_files.get(),
+                request_deadline,
+            )
+        };
         let input_reads = query::ReadAllowance::new(0);
+        // Two actual JSON metadata objects are required. Admit their complete known span
+        // BEFORE any input descriptor opens/reads; this is DATA, not resource funding.
+        input_reads.admit_object(max_objects)?;
+        input_reads.admit_object(max_objects)?;
         let admit = |n| input_reads.admit(n, max_bytes);
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(query.budget.max_millis.get()))
-            .context("tuple query deadline overflow")?;
         let lease = owner
             .pin_selection(&self.selection)
             .map_err(refused_error)?;
@@ -503,6 +553,8 @@ impl NativeLibraryService {
         let original_root = (root.dev(), root.ino());
         let parent = Account::current()?.generated_directory()?;
         let namespace_name = selection::namespace_name(self.library.as_str(), original_root);
+        #[cfg(test)]
+        TEST_INPUT_OPENS.set(TEST_INPUT_OPENS.get() + 1);
         let namespace = open(&parent, &namespace_name, true)?;
         let writer = open(&namespace, "WRITER", false)?;
         let check = || -> Result<()> {
@@ -525,6 +577,8 @@ impl NativeLibraryService {
         let pointer_version = stamp(&pointer_file)?;
         let bytes = read_small(&pointer_file, &check, &admit)?;
         let pointer: selection::Pointer = serde_json::from_slice(&bytes)?;
+        #[cfg(test)]
+        TEST_INPUT_OBJECTS.set(TEST_INPUT_OBJECTS.get() + 1);
         drop(bytes);
         anyhow::ensure!(
             pointer.format == 1
@@ -570,6 +624,8 @@ impl NativeLibraryService {
             "whole tuple header checksum differs"
         );
         let data: tuple::Header = serde_json::from_slice(&bytes)?;
+        #[cfg(test)]
+        TEST_INPUT_OBJECTS.set(TEST_INPUT_OBJECTS.get() + 1);
         drop(bytes);
         anyhow::ensure!(
             data.format == 1
@@ -599,6 +655,8 @@ impl NativeLibraryService {
             tuple::hash(&members, &check)? == data.members_sha256,
             "whole tuple member manifest checksum differs"
         );
+        #[cfg(test)]
+        TEST_INPUT_BYTES.set(TEST_INPUT_BYTES.get() + data.members_length);
         check()?;
         anyhow::ensure!(
             stamp(&pointer_file)? == pointer_version
@@ -623,6 +681,7 @@ impl NativeLibraryService {
             readers_version,
             input_reads,
             input_limit: max_bytes,
+            input_objects_limit: max_objects,
             _funding: inputs.funding.take().expect("actual paid reader lifetime"),
         });
         let reader = NativeTupleRead {

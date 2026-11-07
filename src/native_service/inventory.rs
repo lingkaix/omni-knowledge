@@ -9,11 +9,12 @@ use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
-    NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryLibrary,
-    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-    NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
+    NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
+    NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
+    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
+    NativeRefreshJob, NativeRefreshScopeError, NativeSemanticRun, NativeTupleQuery,
+    NativeTupleRead,
 };
 use knowledge_core::{
     admission::Holding,
@@ -56,6 +57,29 @@ impl Drop for InventoryCredit {
             let _ = holding.finish();
         }
     }
+}
+fn inventory_context_memory(
+    root: &Path,
+    library: &wire::Id,
+    text_root: &str,
+    actual: &LocalPolicy,
+) -> Option<u64> {
+    actual
+        .excluded_paths
+        .iter()
+        .try_fold(0u64, |n, p| {
+            n.checked_add(128)?
+                .checked_add((p.as_str().len() as u64).checked_mul(16)?)
+        })
+        .and_then(|n| {
+            n.checked_add(
+                (root.as_os_str().len() as u64
+                    + text_root.len() as u64
+                    + library.as_str().len() as u64)
+                    .checked_mul(16)?,
+            )
+        })
+        .and_then(|n| n.checked_add(1024 * 1024))
 }
 struct InventoryOwner {
     store: Store<InventoryPolicy>,
@@ -306,23 +330,7 @@ impl NativeLibraryService {
         let root_path = &host.kb.root;
         let (store_root, mount_root, policy) = permit
             .with_selected_context(&self.library, |root, actual, revision| {
-                let variable = actual
-                    .excluded_paths
-                    .iter()
-                    .try_fold(0u64, |n, p| {
-                        n.checked_add(128)?
-                            .checked_add((p.as_str().len() as u64).checked_mul(16)?)
-                    })
-                    .and_then(|n| {
-                        n.checked_add(
-                            (root_path.as_os_str().len() as u64
-                                + text_root.len() as u64
-                                + self.library.as_str().len() as u64)
-                                * 16,
-                        )
-                    });
-                let needed = variable
-                    .and_then(|n| n.checked_add(1024 * 1024))
+                let needed = inventory_context_memory(root_path, &self.library, text_root, actual)
                     .ok_or(wire::ErrorCode::BudgetExhausted)?;
                 if context_funding.remaining().map_err(refused)?.memory_bytes < needed
                     || (if writing {
@@ -528,6 +536,36 @@ impl NativeLibraryService {
                 },
                 _funding: context_funding,
             }),
+        })
+    }
+    /// Pure DATA quote from this actual Query's selected policy; no input FD/page opens and
+    /// no resource reservation or source grant. Call outside LibraryHost's mutex.
+    pub fn query_inventory_requirement(
+        &self,
+        permit: &Permit,
+        text_root: &str,
+    ) -> Result<Reservation> {
+        let wire::Command::Query { query } = permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("actual Query required")
+        };
+        anyhow::ensure!(
+            query.library_ids.contains(&self.library) && matches!(text_root, "wiki" | "pages"),
+            "actual Query inventory selection differs"
+        );
+        let host = self
+            .host
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native library unavailable"))?;
+        let memory_bytes = permit
+            .with_selected_context(&self.library, |_, actual, _| {
+                inventory_context_memory(&host.kb.root, &self.library, text_root, actual)
+                    .ok_or(wire::ErrorCode::BudgetExhausted)
+            })
+            .map_err(refused_error)?;
+        Ok(Reservation {
+            memory_bytes,
+            temporary_bytes: 0,
         })
     }
     /// Consume the actual Refresh intention through M1 before full-corpus processing.

@@ -5,6 +5,8 @@ mod corpus;
 mod credit;
 #[path = "inventory_job_tests.rs"]
 mod job;
+#[path = "inventory_corpus_input_tests.rs"]
+mod query_inputs;
 #[path = "inventory_readonly_tests.rs"]
 mod readonly;
 use super::*;

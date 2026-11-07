@@ -5,11 +5,11 @@ use super::*;
 use crate::native_service::source::{refused_error, selected_context};
 pub use corpus::{
     NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
-    NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryLibrary,
-    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
-    NativeTupleRead,
+    NativeCorpusProgress, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
+    NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
+    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
+    NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};

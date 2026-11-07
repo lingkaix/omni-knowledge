@@ -132,6 +132,15 @@ pub struct NativeAuthority {
 pub struct Owner {
     instance: Arc<()>,
 }
+impl Owner {
+    /// Borrow the SAME native authority instance for another owner-selected library/runtime.
+    /// This does not mint an owner/selection/transport grant or derive authority from data.
+    pub fn authority(&self) -> NativeAuthority {
+        NativeAuthority {
+            instance: self.instance.clone(),
+        }
+    }
+}
 /// Native agent session restricted to exactly the owner-selected handles and actual face.
 #[derive(Clone)]
 pub struct Session {
@@ -223,6 +232,7 @@ impl NativeAuthority {
         }
         let permit = Permit {
             command: Arc::new(command.clone()),
+            admitted_at: std::time::Instant::now(),
             session: session.clone(),
             revisions,
             write,
@@ -370,6 +380,7 @@ impl Owner {
 #[derive(Clone)]
 pub struct Permit {
     command: Arc<Command>,
+    admitted_at: std::time::Instant,
     session: Session,
     revisions: Vec<(Selection, u64)>,
     write: bool,
@@ -398,6 +409,53 @@ impl Permit {
     pub fn admitted_command(&self) -> Result<&Command, ErrorCode> {
         self.check()?;
         Ok(&self.command)
+    }
+    /// The SAME original Query deadline across input preparation, waiting and scope forks.
+    /// Timing DATA only: this cannot grant a source or prove resource/worker settlement.
+    pub fn query_deadline(&self) -> Result<std::time::Instant, ErrorCode> {
+        let Command::Query { query } = self.admitted_command()? else {
+            return Err(ErrorCode::InvalidRequest);
+        };
+        let deadline = self
+            .admitted_at
+            .checked_add(std::time::Duration::from_millis(
+                query.budget.max_millis.get(),
+            ))
+            .ok_or(ErrorCode::BudgetExhausted)?;
+        if std::time::Instant::now() >= deadline {
+            return Err(ErrorCode::BudgetExhausted);
+        }
+        Ok(deadline)
+    }
+    /// Actual shared frame identity for pre-input assembly, not equal request bytes or a grant.
+    pub fn same_input_scope(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.command, &other.command)
+            && match (&self.resources, &other.resources) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+    /// Actual retained SDK input memory; shared command/scope holding is counted ONCE.
+    /// DATA observation only: cannot reserve, multiply, release or authorize any work.
+    pub fn retained_input_memory(&self) -> Result<u64, ErrorCode> {
+        self.check()?;
+        let command = self
+            .command_funding
+            .as_ref()
+            .ok_or(ErrorCode::BudgetExhausted)?;
+        let scope = &self
+            .resources
+            .as_ref()
+            .ok_or(ErrorCode::BudgetExhausted)?
+            .budget;
+        let memory = command.retained_memory()?;
+        if Arc::ptr_eq(command, scope) {
+            Ok(memory)
+        } else {
+            memory
+                .checked_add(scope.retained_memory()?)
+                .ok_or(ErrorCode::BudgetExhausted)
+        }
     }
     /// Reserve retained aggregate/output bytes BEFORE cloning/growing buffers. The real holding
     /// follows every cloned permit and Delivery through the final transport write settlement.
@@ -481,6 +539,7 @@ impl Permit {
         let resources = Arc::new(crate::runtime::FrameResources::prepaid(holding, need)?);
         let fork = Self {
             command: self.command.clone(),
+            admitted_at: self.admitted_at,
             session: self.session.clone(),
             revisions: self.revisions.clone(),
             write: self.write,

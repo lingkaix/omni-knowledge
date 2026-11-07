@@ -1,5 +1,8 @@
 //! ONE actual Query invocation over selected complete tuples; no child source jobs/new scheduler.
 use super::*;
+#[path = "inventory_corpus_query_input.rs"]
+mod input;
+pub use input::{NativeQueryInputs, NativeQueryLibraryInput};
 #[path = "inventory_corpus_query_budget.rs"]
 mod budget;
 pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
@@ -85,6 +88,7 @@ struct QueryCause {
     processor: knowledge_core::data::ContentDigest,
     libraries: Vec<NativeQueryLibrary>,
     request_budget: Budget,
+    input_memory: u64,
     deadline: Instant,
     reads: ReadAllowance,
     // DATA baseline of separately funded pre-submission inputs, never a permission/epoch cache.
@@ -253,6 +257,15 @@ impl NativeTupleQuery {
             funding: Work,
         }
         let inputs = Inputs { libraries, funding };
+        let input_memory = inputs.libraries.iter().try_fold(
+            inputs.funding.remaining()?.memory_bytes,
+            |n, lib| {
+                let inventory = lib.inventory.owner._funding.remaining()?.memory_bytes;
+                n.checked_add(lib.reader.physical.metadata_memory()?)
+                    .and_then(|n| n.checked_add(inventory))
+                    .ok_or_else(|| anyhow::anyhow!("actual Query input memory overflow"))
+            },
+        )?;
         anyhow::ensure!(
             !inputs.libraries.is_empty(),
             "actual Query libraries required"
@@ -271,14 +284,7 @@ impl NativeTupleQuery {
             scope.reader.check()?;
             let physical = &scope.reader.physical;
             anyhow::ensure!(
-                std::ptr::eq(
-                    command,
-                    scope
-                        .reader
-                        .permit
-                        .admitted_command()
-                        .map_err(refused_error)?
-                ),
+                base.same_input_scope(&scope.reader.permit),
                 "Query tuple owners came from different actual SDK requests"
             );
             anyhow::ensure!(
@@ -344,6 +350,7 @@ impl NativeTupleQuery {
         })?;
         let objects = inputs.libraries.iter().try_fold(0u64, |n, scope| {
             n.checked_add(scope.inventory.owner.input_objects)
+                .and_then(|n| n.checked_add(scope.reader.physical.input_reads.amount().objects))
                 .ok_or(QueryBudgetExhausted)
         })?;
         anyhow::ensure!(
@@ -357,6 +364,7 @@ impl NativeTupleQuery {
                 version,
                 recipe,
                 processor,
+                input_memory,
                 request_budget: Budget {
                     max_files: query.budget.max_files.get(),
                     max_bytes: query.budget.max_bytes.get(),
@@ -399,11 +407,31 @@ impl NativeTupleQuery {
             bail!("actual Query required")
         };
         let b = &query.budget;
+        let input_memory = self
+            .cause
+            .input_memory
+            .checked_add(
+                self.cause.libraries[0]
+                    .reader
+                    .permit
+                    .retained_input_memory()
+                    .map_err(refused_error)?,
+            )
+            .context("actual SDK/input memory overflow")?;
         anyhow::ensure!(
             plan.budget.max_files <= b.max_files.get()
                 && plan.budget.max_bytes <= b.max_bytes.get()
                 && plan.budget.max_millis <= b.max_millis.get()
-                && plan.budget.max_memory_bytes <= b.max_memory_bytes.get(),
+                && plan
+                    .budget
+                    .max_memory_bytes
+                    .checked_add(input_memory)
+                    .is_some_and(|n| n <= b.max_memory_bytes.get())
+                && plan
+                    .reservation
+                    .memory_bytes
+                    .checked_add(input_memory)
+                    .is_some_and(|n| n <= b.max_memory_bytes.get()),
             "Query job exceeds actual admitted request budget"
         );
         self.cause

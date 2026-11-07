@@ -1179,6 +1179,9 @@ mod admitted {
         hash.update(include_bytes!("native_service/inventory_corpus_reader.rs"));
         hash.update(include_bytes!("native_service/inventory_corpus_query.rs"));
         hash.update(include_bytes!(
+            "native_service/inventory_corpus_query_input.rs"
+        ));
+        hash.update(include_bytes!(
             "native_service/inventory_corpus_partition.rs"
         ));
         hash.update(include_bytes!(
@@ -2800,11 +2803,11 @@ pub mod native_service {
     pub use inventory::{
         NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
         NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeObservedSource,
-        NativePartitionResult, NativeQueryEmbedding, NativeQueryLibrary, NativeQueryLoans,
-        NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-        NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-        NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
+        NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
+        NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
+        NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+        NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
+        NativeRefreshScopeError, NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;
@@ -2879,6 +2882,17 @@ pub mod native_service {
             kb: KnowledgeBase,
             policy: LocalPolicy,
         ) -> Result<(Self, Owner, Selection)> {
+            let (_, owner) = NativeAuthority::new();
+            let (service, selection) = Self::ordinary_local_owned(kb, policy, &owner)?;
+            Ok((service, owner, selection))
+        }
+        /// Bind another actual library under the SAME separately retained native Owner. This
+        /// permits one real SDK invocation over multiple selections, not equal-label realms.
+        pub fn ordinary_local_owned(
+            kb: KnowledgeBase,
+            policy: LocalPolicy,
+            owner: &Owner,
+        ) -> Result<(Self, Selection)> {
             admitted::start()?;
             let marker_memory = match Work::reserve(
                 Reservation {
@@ -2900,7 +2914,7 @@ pub mod native_service {
                     hex::encode(Sha256::digest(kb.root.as_os_str().as_encoded_bytes()))
                 )
             }))?;
-            let (authority, owner) = NativeAuthority::new();
+            let authority = owner.authority();
             let selected_root = File::open(&kb.root)?;
             let selected_path = kb.root.clone();
             let marker = current_marker(&selected_root)
@@ -2949,7 +2963,7 @@ pub mod native_service {
                     memory,
                 }),
             };
-            Ok((service, owner, selection))
+            Ok((service, selection))
         }
         /// Label of the actual native selection; it is not a permission or a root path.
         pub fn library_id(&self) -> &wire::Id {

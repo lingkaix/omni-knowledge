@@ -44,7 +44,7 @@ impl ReadAllowance {
     pub(in crate::native_service) fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
-    pub(super) fn amount(&self) -> DataAmount {
+    pub(in crate::native_service) fn amount(&self) -> DataAmount {
         DataAmount {
             bytes: self.used(),
             objects: self.objects.load(Ordering::Relaxed),
@@ -77,7 +77,7 @@ impl ReadAllowance {
             .map_err(|_| anyhow::anyhow!("actual Query read allowance poisoned"))?;
         self.add(&self.used, bytes, limit)
     }
-    pub(super) fn admit_object(&self, limit: u64) -> Result<()> {
+    pub(in crate::native_service) fn admit_object(&self, limit: u64) -> Result<()> {
         let _io = self
             .io
             .lock()

@@ -438,6 +438,19 @@ impl Drop for FrameResources {
             .clear();
     }
 }
+impl FrameBudget {
+    pub(crate) fn retained_memory(&self) -> Result<u64, ErrorCode> {
+        self.state
+            .lock()
+            .map_err(|_| ErrorCode::BudgetExhausted)?
+            .holding
+            .as_ref()
+            .ok_or(ErrorCode::BudgetExhausted)?
+            .remaining()
+            .map(|n| n.memory_bytes)
+            .map_err(|_| ErrorCode::BudgetExhausted)
+    }
+}
 impl Drop for FrameBudget {
     /// The last actual command/scope owner ends its ONE real holding after its paid bytes die.
     fn drop(&mut self) {
