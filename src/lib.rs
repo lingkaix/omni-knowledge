@@ -2802,13 +2802,13 @@ pub mod native_service {
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
         NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
-        NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeObservedSource,
-        NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
-        NativeQueryAnnotations, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
-        NativeQueryPageRefusal, NativeQueryPartition,
-        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
-        NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
-        NativeRefreshScopeError, NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
+        NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeMetadataRun,
+        NativeObservedSource, NativePartitionResult, NativeQueryAnnotations, NativeQueryEmbedding,
+        NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans,
+        NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
+        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
+        NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
+        NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

@@ -872,6 +872,16 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         Ok(_) => panic!("missing actual original cannot authorize cached payload"),
     };
     fs::rename(&hidden_path, &original_path).unwrap();
+    if mode == "normal" {
+        query_job::run_canonical_metadata_controls(
+            &service,
+            &owner,
+            &session,
+            &source_root,
+            &query_inventory,
+            &stat_inventory,
+        );
+    }
     assert!(
         refused
             .chain()

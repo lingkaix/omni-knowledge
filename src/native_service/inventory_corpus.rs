@@ -19,12 +19,11 @@ use std::sync::{Arc, Mutex};
 #[path = "inventory_corpus_query.rs"]
 mod query;
 pub use query::{
-    NativeBm25Run, NativePartitionResult, NativeQueryEmbedding, NativeQueryInputs,
-    NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
-    NativeQueryAnnotations, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource,
-    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
-    NativeSemanticRun, NativeTupleQuery,
+    NativeBm25Run, NativeMetadataRun, NativePartitionResult, NativeQueryAnnotations,
+    NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
+    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
+    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
+    NativeQueryStageResources, NativeQueryStep, NativeSemanticRun, NativeTupleQuery,
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;
@@ -1044,10 +1043,7 @@ impl NativeCorpusDraft {
                     metadata.insert("frontmatter_title".into(), title.clone());
                 }
                 if !fm_descriptions.is_empty() {
-                    metadata.insert(
-                        "frontmatter_description".into(),
-                        fm_descriptions.join("\n"),
-                    );
+                    metadata.insert("frontmatter_description".into(), fm_descriptions.join("\n"));
                 }
                 if !fm_tags.is_empty() {
                     metadata.insert("frontmatter_tags".into(), serde_json::to_string(&fm_tags)?);

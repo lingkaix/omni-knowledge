@@ -936,3 +936,690 @@ pub(super) fn run_whole_bm25(
     drop(query);
     scratch.finish().unwrap();
 }
+
+struct MetadataFixtureCleanup<'a>(&'a std::path::Path);
+impl Drop for MetadataFixtureCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.0.join("sources"));
+        let _ = fs::remove_dir_all(self.0.join(".omni/metadata"));
+    }
+}
+struct LiveQuery {
+    query: NativeTupleQuery,
+    claim: Arc<knowledge_core::jobs::Claim>,
+    scratch: Holding,
+    job: u64,
+}
+impl LiveQuery {
+    fn finish(self) {
+        let LiveQuery {
+            query,
+            claim,
+            mut scratch,
+            job,
+        } = self;
+        let claim =
+            Arc::try_unwrap(claim).unwrap_or_else(|_| panic!("metadata query claim retained"));
+        let account = Account::current().unwrap();
+        account
+            .queue()
+            .settle(
+                &claim,
+                query.key(),
+                knowledge_core::jobs::Outcome::Cancelled,
+            )
+            .unwrap();
+        account
+            .queue()
+            .retire(job, query.key())
+            .unwrap_or_else(|error| panic!("canonical query job was not terminal: {error:?}"));
+        drop(query);
+        scratch.finish().unwrap();
+    }
+}
+fn metadata_command(
+    service: &NativeLibraryService,
+    keywords: &[&str],
+    methods: &[&str],
+    required_tags: &[&str],
+    case_sensitive: bool,
+    limit: u64,
+) -> wire::Command {
+    wire::decode_request(
+        &serde_json::to_vec(&serde_json::json!({
+            "wire_version": 1,
+            "request_id": "canonical-metadata-controls",
+            "command": {
+                "op": "query",
+                "query": {
+                    "library_ids": [service.library_id().as_str()],
+                    "keywords": keywords,
+                    "methods": methods,
+                    "required_tags": required_tags,
+                    "case_sensitive": case_sensitive,
+                    "limit": limit,
+                    "budget": {
+                        "max_files": 1000,
+                        "max_bytes": "67108864",
+                        "max_millis": 120000,
+                        "max_memory_bytes": "1073741824"
+                    },
+                    "image_query": null
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+    .command
+}
+struct LiveQueryOptions<'a> {
+    keywords: &'a [&'a str],
+    methods: &'a [&'a str],
+    required_tags: &'a [&'a str],
+    case_sensitive: bool,
+    limit: u64,
+    max_files: u64,
+    max_bytes: u64,
+    max_millis: u64,
+    bm25: bool,
+    job: &'a str,
+}
+fn open_live(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    request: LiveQueryOptions<'_>,
+) -> LiveQuery {
+    let command = metadata_command(
+        service,
+        request.keywords,
+        request.methods,
+        request.required_tags,
+        request.case_sensitive,
+        request.limit,
+    );
+    let permit = service.native_scope(session, &command, None).unwrap();
+    let scratch = holding(4 * 1024 * 1024, 0);
+    let inventory = service
+        .inventory_for_query(
+            owner,
+            &permit,
+            "wiki",
+            scan,
+            holding(2 * 1024 * 1024, 0),
+            &Preflight {
+                holding: &scratch,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 4 * 1024 * 1024,
+                },
+            },
+        )
+        .unwrap();
+    let reader = service
+        .open_corpus_tuple(owner, permit, ready(NativeTupleRead::requirement()))
+        .unwrap();
+    let query = NativeTupleQuery::prepare(
+        vec![NativeQueryLibrary::new(reader, inventory, None)],
+        ready(NativeTupleQuery::metadata_requirement()),
+    )
+    .unwrap();
+    let reservation = if request.bm25 {
+        query.bm25_requirement(0).unwrap()
+    } else {
+        Reservation {
+            memory_bytes: (8 * 1024 * 1024u64)
+                .saturating_add(request.limit.saturating_mul(2 * 1024 * 1024))
+                .saturating_add(16 * 1024 * 1024),
+            temporary_bytes: 0,
+        }
+    };
+    let submitted = query
+        .submit(NativeJobPlan {
+            operation_id: request.job,
+            job_id: request.job,
+            budget: Budget {
+                max_files: request.max_files,
+                max_bytes: request.max_bytes,
+                max_millis: request.max_millis,
+                max_memory_bytes: reservation.memory_bytes,
+            },
+            reservation,
+            priority: knowledge_core::jobs::Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    assert!(
+        submitted.created,
+        "canonical query {} must admit a new job",
+        request.job
+    );
+    let claim = Arc::new(
+        Account::current()
+            .unwrap()
+            .queue()
+            .claim(Instant::now())
+            .unwrap()
+            .unwrap_or_else(|| panic!("canonical metadata query was not claimable")),
+    );
+    LiveQuery {
+        query,
+        claim,
+        scratch,
+        job: submitted.job,
+    }
+}
+fn drive_metadata(
+    service: &NativeLibraryService,
+    live: &LiveQuery,
+) -> (Vec<NativeQueryAnnotations>, u64) {
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            panic!("canonical metadata failed: {:#}", run.failure().unwrap());
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+    let hits = run.hits().unwrap().cloned().collect::<Vec<_>>();
+    let unavailable = run.unavailable_sources();
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("metadata finish retained a scope or page"));
+    drop((query, claim));
+    (hits, unavailable)
+}
+fn drive_bm25(
+    service: &NativeLibraryService,
+    live: &LiveQuery,
+    source_id: Option<&str>,
+) -> (Vec<String>, u64, Option<NativeQueryAnnotations>) {
+    let mut run = live.query.start_bm25(live.claim.clone(), 0, 0).unwrap();
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            panic!("canonical bm25 failed: {:#}", run.failure().unwrap());
+        }
+        if step.is_complete() {
+            break;
+        }
+    }
+    let ids = run
+        .hits()
+        .unwrap()
+        .map(|hit| hit.key.id.clone())
+        .collect::<Vec<_>>();
+    let unavailable = run.unavailable_parts();
+    let annotations = source_id.map(|id| {
+        run.source_annotations(id)
+            .unwrap()
+            .cloned()
+            .unwrap_or_else(|| panic!("missing annotations for {id}"))
+    });
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("bm25 finish retained a scope or page"));
+    drop((query, claim));
+    (ids, unavailable, annotations)
+}
+fn observation_id(inventory: &NativeInventory, wanted: &str) -> String {
+    let mut offset = 0u64;
+    loop {
+        let page = inventory
+            .page(
+                offset,
+                Budget {
+                    max_files: 1000,
+                    max_bytes: 8 * 1024 * 1024,
+                    max_millis: 60000,
+                    max_memory_bytes: 1024 * 1024,
+                },
+                holding(2 * 1024 * 1024, 0),
+            )
+            .unwrap();
+        let next = page.next_offset();
+        let complete = page.complete();
+        let found = page.observations().find_map(|row| {
+            (row.observation().stat.path.as_str() == wanted).then(|| row.source_id().to_owned())
+        });
+        if let Some(id) = found {
+            return id;
+        }
+        assert!(!complete, "actual observation {wanted} absent");
+        assert!(next > offset, "inventory replay made no progress");
+        offset = next;
+    }
+}
+pub(super) fn run_canonical_metadata_controls(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    source_root: &std::path::Path,
+    query_inventory: &NativeInventory,
+    stat_inventory: &NativeInventory,
+) {
+    let _cleanup = MetadataFixtureCleanup(source_root);
+    let scan = query_inventory.scan();
+    let llm_wiki_id = observed(query_inventory, "wiki/sources/llm-wiki.md")
+        .source_id()
+        .to_owned();
+    let page_001_id = observed(query_inventory, "raw/page-001.md")
+        .source_id()
+        .to_owned();
+    let sources = source_root.join("sources");
+    fs::create_dir_all(&sources).unwrap();
+    fs::write(
+        sources.join(format!("{llm_wiki_id}.md")),
+        "---\ntitle: Pointer LLM Wiki\ndescription: Pointer workflow note\ntags: [PointerTag, MixedCase]\n---\nAuthored pointer summary.\n",
+    )
+    .unwrap();
+    let sidecar_name = format!(
+        "{}.json",
+        hex::encode(Sha256::digest("wiki/sources/llm-wiki.md".as_bytes()))
+    );
+    let sidecar_dir = source_root.join(".omni/metadata");
+    fs::create_dir_all(&sidecar_dir).unwrap();
+    fs::write(
+        sidecar_dir.join(sidecar_name),
+        r#"{"version":1,"path":"wiki/sources/llm-wiki.md","tags":["hidden-sidecar-tag"],"description":"hidden sidecar"}"#,
+    )
+    .unwrap();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["PointerTag"],
+            methods: &["files", "tags"],
+            required_tags: &["reference", "pointertag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-pointer-union",
+        },
+    );
+    let (hits, _) = drive_metadata(service, &live);
+    live.finish();
+    let hit = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "wiki/sources/llm-wiki.md")
+        .unwrap_or_else(|| panic!("pointer wiki missing from metadata hits"));
+    assert_eq!(hit.title, "Pointer LLM Wiki");
+    assert_eq!(
+        hit.tags,
+        vec![
+            "reference".to_owned(),
+            "knowledge".to_owned(),
+            "agent".to_owned(),
+            "PointerTag".to_owned(),
+            "MixedCase".to_owned(),
+        ]
+    );
+    assert!(
+        hit.description
+            .contains("A workflow for accumulating an agent-maintained personal wiki.")
+    );
+    assert!(hit.description.contains("Pointer workflow note"));
+    assert!(hit.description.contains("Authored pointer summary."));
+    let annotation = format!("sources/{llm_wiki_id}.md");
+    assert_eq!(
+        hit.annotation_path.as_ref().map(|path| path.as_str()),
+        Some(annotation.as_str())
+    );
+    assert_eq!(hit.digest_state, wire::DigestState::Verified);
+    assert_eq!(hit.availability, wire::Availability::Available);
+    assert!(!hit.tags.iter().any(|tag| tag == "hidden-sidecar-tag"));
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["PointerTag"],
+            methods: &["files", "tags"],
+            required_tags: &["pointertag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-pointer-case-miss",
+        },
+    );
+    let (hits, _) = drive_metadata(service, &live);
+    live.finish();
+    assert!(
+        hits.is_empty(),
+        "case-sensitive required tag must keep exact spelling"
+    );
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["PointerTag"],
+            methods: &["files", "tags"],
+            required_tags: &["PointerTag"],
+            case_sensitive: true,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-pointer-case-hit",
+        },
+    );
+    let (hits, _) = drive_metadata(service, &live);
+    live.finish();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.path.as_str() == "wiki/sources/llm-wiki.md")
+    );
+    fs::write(
+        sources.join(format!("{page_001_id}.md")),
+        "---\ntags: [LiveEditTag]\ndescription: Initial live description\n---\n",
+    )
+    .unwrap();
+    let before_hash = NativeSource::test_hash_read_calls();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["bm25"],
+            required_tags: &["LiveEditTag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-live-edit-initial",
+        },
+    );
+    let (ids, unavailable, annotations) = drive_bm25(service, &live, Some(&page_001_id));
+    live.finish();
+    assert_eq!(ids, vec![page_001_id.clone()]);
+    assert_eq!(
+        unavailable, 1,
+        "the parent same-inode edit is the only withheld part; tag filtering adds none"
+    );
+    let annotations = annotations.unwrap();
+    assert_eq!(annotations.tags, vec!["LiveEditTag".to_owned()]);
+    assert_eq!(annotations.description, "Initial live description");
+    fs::write(
+        sources.join(format!("{page_001_id}.md")),
+        "---\ntags: [UpdatedLiveTag]\ndescription: Updated live description\n---\n",
+    )
+    .unwrap();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["bm25"],
+            required_tags: &["LiveEditTag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-live-edit-stale",
+        },
+    );
+    let (ids, _, _) = drive_bm25(service, &live, None);
+    live.finish();
+    assert!(
+        ids.is_empty(),
+        "stale required tag must not survive a pointer edit"
+    );
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["bm25"],
+            required_tags: &["UpdatedLiveTag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-live-edit-current",
+        },
+    );
+    let (ids, _, annotations) = drive_bm25(service, &live, Some(&page_001_id));
+    live.finish();
+    assert_eq!(ids, vec![page_001_id.clone()]);
+    let annotations = annotations.unwrap();
+    assert_eq!(annotations.tags, vec!["UpdatedLiveTag".to_owned()]);
+    assert_eq!(annotations.description, "Updated live description");
+    assert_eq!(NativeSource::test_hash_read_calls(), before_hash);
+    let (excluded, _selection) = NativeLibraryService::ordinary_local_owned(
+        KnowledgeBase::open(source_root).unwrap(),
+        LocalPolicy {
+            mode: wire::ExposureMode::ReadWrite,
+            sensitive: false,
+            excluded_paths: vec![wire::RelativePath::new("raw/page-001.md").unwrap()],
+            transports: vec![wire::Transport::OwnerStdio],
+            http_hosts: vec![],
+            http_origins: vec![],
+        },
+        owner,
+    )
+    .unwrap();
+    let excluded_session = excluded.connect(TransportFacts::OwnerStdio).unwrap();
+    let live = open_live(
+        &excluded,
+        owner,
+        &excluded_session,
+        scan,
+        LiveQueryOptions {
+            keywords: &["alpha"],
+            methods: &["bm25"],
+            required_tags: &["UpdatedLiveTag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: true,
+            job: "canonical-excluded-bm25",
+        },
+    );
+    let (ids, unavailable, _) = drive_bm25(&excluded, &live, None);
+    live.finish();
+    assert!(ids.is_empty(), "excluded source must not reach BM25 hits");
+    assert_eq!(
+        unavailable, 1,
+        "excluding page-001 must not add an unavailable part beyond the parent edit"
+    );
+    let live = open_live(
+        &excluded,
+        owner,
+        &excluded_session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &["UpdatedLiveTag"],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-excluded-metadata",
+        },
+    );
+    let (hits, _) = drive_metadata(&excluded, &live);
+    live.finish();
+    assert!(
+        hits.is_empty(),
+        "excluded source must not reach metadata hits"
+    );
+    drop(excluded_session);
+    drop(excluded);
+    let denied_id = observation_id(stat_inventory, "raw/actually-denied.md");
+    fs::write(
+        sources.join(format!("{denied_id}.md")),
+        "---\ntags: [DeniedAssetTag]\ndescription: Denied asset pointer\n---\n",
+    )
+    .unwrap();
+    let two = source_root.join("raw/two.html");
+    let hidden_two = source_root.join("raw/fixture-missing-two");
+    fs::rename(&two, &hidden_two).unwrap();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        stat_inventory.scan(),
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 100,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-stat-discovery",
+        },
+    );
+    let (hits, unavailable) = drive_metadata(service, &live);
+    live.finish();
+    fs::rename(&hidden_two, &two).unwrap();
+    let one = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "raw/one.md")
+        .unwrap_or_else(|| panic!("stat-first raw/one.md missing from metadata hits"));
+    assert_eq!(one.digest_state, wire::DigestState::Unverified);
+    assert!(one.digest.is_none());
+    assert_eq!(one.availability, wire::Availability::Available);
+    let denied = hits
+        .iter()
+        .find(|hit| hit.path.as_str() == "raw/actually-denied.md")
+        .unwrap_or_else(|| panic!("denied original missing from metadata hits"));
+    assert_eq!(denied.digest_state, wire::DigestState::Unverified);
+    assert!(denied.digest.is_none());
+    assert_eq!(denied.availability, wire::Availability::Denied);
+    assert_eq!(denied.tags, vec!["DeniedAssetTag".to_owned()]);
+    assert!(!hits.iter().any(|hit| hit.path.as_str() == "raw/two.html"));
+    assert!(unavailable >= 2, "unavailable sources={unavailable}");
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 1,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-one-byte",
+        },
+    );
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    assert!(run.step(service).is_failed());
+    assert!(
+        run.budget_exhausted(),
+        "one-byte metadata: {:?}",
+        run.failure()
+    );
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("one-byte metadata finish retained a scope"));
+    drop((query, claim));
+    live.finish();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 120000,
+            bm25: false,
+            job: "canonical-one-object",
+        },
+    );
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    loop {
+        let step = run.step(service);
+        if step.is_failed() {
+            break;
+        }
+        assert!(
+            !step.is_complete(),
+            "one-object metadata completed without refusing another pointer object"
+        );
+    }
+    assert!(
+        run.budget_exhausted(),
+        "one-object metadata: {:?}",
+        run.failure()
+    );
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("one-object metadata finish retained a scope"));
+    drop((query, claim));
+    live.finish();
+    let live = open_live(
+        service,
+        owner,
+        session,
+        scan,
+        LiveQueryOptions {
+            keywords: &[],
+            methods: &["files", "tags"],
+            required_tags: &[],
+            case_sensitive: false,
+            limit: 10,
+            max_files: 1000,
+            max_bytes: 64 * 1024 * 1024,
+            max_millis: 1,
+            bm25: false,
+            job: "canonical-deadline",
+        },
+    );
+    let mut run = live.query.start_metadata(live.claim.clone(), 0).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(run.step(service).is_failed());
+    let (query, claim) = run
+        .finish()
+        .unwrap_or_else(|_| panic!("deadline metadata finish retained a scope"));
+    drop((query, claim));
+    live.finish();
+}

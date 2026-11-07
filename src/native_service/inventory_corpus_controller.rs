@@ -5,6 +5,7 @@ use super::*;
 use knowledge_retrieval::Hit;
 use knowledge_search::FileRankWindow;
 use std::num::NonZeroUsize;
+use std::os::unix::fs::FileExt;
 
 /// A synchronous step never relinquishes this actual foreground owner on failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,7 +576,9 @@ impl NativeBm25Run {
                 let mut offset = 0u64;
                 loop {
                     let page = self.read_inventory_page(offset)?;
-                    let found = page.sources().find(|s| same_observed(s, source_id, &locator));
+                    let found = page
+                        .sources()
+                        .find(|s| same_observed(s, source_id, &locator));
                     let complete = page.complete();
                     let next_offset = page.next_offset();
                     self.data.as_mut().expect("actual owner").page = Some((offset, page));
@@ -988,4 +991,991 @@ impl std::io::Write for Count {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+type PointerOpen = (File, std::fs::Metadata, wire::RelativePath);
+struct PageFrontmatter {
+    title: Option<String>,
+    descriptions: Vec<String>,
+    tags: Vec<String>,
+    present: bool,
+}
+struct PointerMarkdown {
+    title: Option<String>,
+    descriptions: Vec<String>,
+    tags: Vec<String>,
+    path: wire::RelativePath,
+}
+struct MetadataCandidate {
+    annotations: NativeQueryAnnotations,
+    scope: Permit,
+    charged: u64,
+}
+struct MetadataData {
+    rows: BTreeMap<(String, String), MetadataCandidate>,
+    scopes: Vec<Permit>,
+    page: Option<NativeInventoryPage>,
+    pinned_pages: Vec<NativeInventoryPage>,
+    extra: Vec<Work>,
+    credits: Vec<Holding>,
+    offset: u64,
+    unavailable_sources: u64,
+    metadata_capacity: u64,
+    metadata_used: u64,
+    done: bool,
+    closing: bool,
+    failure: Option<anyhow::Error>,
+}
+enum RowBuild {
+    Skip {
+        unavailable: bool,
+    },
+    Keep {
+        annotations: NativeQueryAnnotations,
+        unavailable: bool,
+    },
+}
+struct AnnotationDraft {
+    source_id: String,
+    path: wire::RelativePath,
+    page_title: Option<String>,
+    page_descriptions: Vec<String>,
+    page_tags: Vec<String>,
+    has_frontmatter: bool,
+    pointer_title: Option<String>,
+    pointer_descriptions: Vec<String>,
+    pointer_tags: Vec<String>,
+    pointer_path: Option<wire::RelativePath>,
+    digest: Option<wire::Digest>,
+    digest_state: wire::DigestState,
+    availability: wire::Availability,
+}
+/// Actual M1 metadata discovery owner. Annotations and scopes die before page and Claim credit.
+pub struct NativeMetadataRun {
+    query: NativeTupleQuery,
+    claim: Arc<Claim>,
+    library: usize,
+    method: Option<(wire::SearchMethod, usize)>,
+    data: Option<Box<MetadataData>>,
+    // Rust drops fields in declaration order: paid result bytes die before this administrative loan.
+    base: Option<Work>,
+}
+impl NativeTupleQuery {
+    /// Start metadata discovery for every admitted file/tag keyword in one actual library.
+    pub fn start_metadata(&self, claim: Arc<Claim>, library: usize) -> Result<NativeMetadataRun> {
+        self.start_metadata_for(claim, library, None)
+    }
+    /// Start metadata discovery for one file/tag keyword, or for the whole admitted keyword set.
+    pub fn start_metadata_for(
+        &self,
+        claim: Arc<Claim>,
+        library: usize,
+        method: Option<(wire::SearchMethod, usize)>,
+    ) -> Result<NativeMetadataRun> {
+        self.cause.check_claim(&claim)?;
+        anyhow::ensure!(library < self.cause.libraries.len(), "actual Query library");
+        let wire::Command::Query { query } = self.cause.libraries[library]
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required");
+        };
+        if let Some((selected, keyword)) = method {
+            anyhow::ensure!(
+                matches!(
+                    selected,
+                    wire::SearchMethod::Files | wire::SearchMethod::Tags
+                ) && query.methods.contains(&selected)
+                    && keyword < query.keywords.len(),
+                "requested metadata method required"
+            );
+        }
+        let bytes = query
+            .limit
+            .get()
+            .checked_add(64)
+            .and_then(|n| n.checked_mul(2048))
+            .and_then(|n| n.checked_add(64 * 1024))
+            .context("metadata administration overflow")?;
+        let base = Work::split_claim(
+            &claim,
+            self.key(),
+            Reservation {
+                memory_bytes: bytes,
+                temporary_bytes: 0,
+            },
+        )?;
+        Ok(NativeMetadataRun {
+            query: NativeTupleQuery {
+                cause: self.cause.clone(),
+            },
+            claim,
+            library,
+            method,
+            data: Some(Box::new(MetadataData {
+                rows: BTreeMap::new(),
+                scopes: Vec::new(),
+                page: None,
+                pinned_pages: Vec::new(),
+                extra: Vec::new(),
+                credits: Vec::new(),
+                offset: 0,
+                unavailable_sources: 0,
+                metadata_capacity: 0,
+                metadata_used: 0,
+                done: false,
+                closing: false,
+                failure: None,
+            })),
+            base: Some(base),
+        })
+    }
+}
+impl NativeMetadataRun {
+    /// Fixed typed global data-budget refusal, never an unavailable source row.
+    pub fn budget_exhausted(&self) -> bool {
+        self.failure()
+            .is_some_and(|error| error.is::<QueryBudgetExhausted>())
+    }
+    /// Borrow the retained actual failure without detaching any owning refusal.
+    pub fn failure(&self) -> Option<&anyhow::Error> {
+        self.data.as_ref()?.failure.as_ref()
+    }
+    /// Conservative admitted data bytes, including prior input metadata, NOT completed-IO/RSS.
+    pub fn bytes_admitted(&self) -> u64 {
+        self.query.cause.reads.used()
+    }
+    /// Conservative source/metadata examinations, including unavailable entries.
+    pub fn objects_admitted(&self) -> u64 {
+        self.query.cause.reads.amount().objects
+    }
+    /// Actual missing or unreadable originals withheld or labeled unavailable. Exclusions are not counted.
+    pub fn unavailable_sources(&self) -> u64 {
+        self.data
+            .as_ref()
+            .map_or(0, |data| data.unavailable_sources)
+    }
+    fn check(&self) -> Result<()> {
+        self.query.cause.check_claim(&self.claim)?;
+        let data = self.data.as_ref().context("native result consumed")?;
+        for row in data.rows.values() {
+            row.scope.check().map_err(refused_error)?;
+        }
+        Ok(())
+    }
+    /// Borrow current matching annotations after every retained permit is rechecked.
+    pub fn hits(&self) -> Result<impl Iterator<Item = &NativeQueryAnnotations>> {
+        self.check()?;
+        let data = self.data.as_ref().context("native result consumed")?;
+        anyhow::ensure!(
+            data.done && data.failure.is_none() && !data.closing,
+            "native metadata query not complete"
+        );
+        Ok(data.rows.values().map(|row| &row.annotations))
+    }
+    /// A failed step is terminal. The actual owner keeps its page, scope, and Claim until finish.
+    pub fn step(&mut self, service: &NativeLibraryService) -> NativeQueryStep {
+        let Some(data) = self.data.as_ref() else {
+            return NativeQueryStep::Failed;
+        };
+        if data.failure.is_some() || data.closing {
+            return NativeQueryStep::Failed;
+        }
+        if data.done {
+            return NativeQueryStep::Complete;
+        }
+        match self.advance(service) {
+            Ok(true) => NativeQueryStep::Complete,
+            Ok(false) => NativeQueryStep::Progress,
+            Err(error) => {
+                let error = if self.query.cause.reads.check().is_err() {
+                    error.context(QueryBudgetExhausted)
+                } else {
+                    error
+                };
+                self.data.as_mut().expect("actual owner").failure = Some(error);
+                NativeQueryStep::Failed
+            }
+        }
+    }
+    /// Destroy annotations, then rejoin scopes, pages, and Work. A live scope returns this owner.
+    pub fn finish(mut self) -> std::result::Result<(NativeTupleQuery, Arc<Claim>), Self> {
+        if let Some(data) = self.data.as_mut() {
+            data.closing = true;
+            let rows = std::mem::take(&mut data.rows);
+            for (_, row) in rows {
+                let MetadataCandidate {
+                    annotations, scope, ..
+                } = row;
+                drop(annotations);
+                data.scopes.push(scope);
+            }
+            if let Some(error) = data.failure.take() {
+                match error.downcast::<NativeQueryPageRefusal>() {
+                    Ok(owned) => {
+                        let (cause, loan) = owned.into_parts();
+                        data.failure = Some(cause);
+                        match loan {
+                            NativeQueryPageLoan::Funding(holding) => data.credits.push(holding),
+                            NativeQueryPageLoan::Page(page) => data.pinned_pages.push(page),
+                        }
+                    }
+                    Err(error) => {
+                        match error.downcast::<crate::native_service::NativeRefreshScopeError>() {
+                            Ok(owned) => match owned.scope {
+                                wire::authority::ScopeRejoinError::Retained { scope, .. } => {
+                                    data.scopes.push(*scope)
+                                }
+                                wire::authority::ScopeRejoinError::Released(_) => {}
+                            },
+                            Err(error) => data.failure = Some(error),
+                        }
+                    }
+                }
+            }
+        }
+        if self.data.is_some() {
+            let scopes = std::mem::take(&mut self.data.as_mut().expect("actual owner").scopes);
+            for scope in scopes {
+                match scope.rejoin_processing_scope(&self.claim, self.query.key()) {
+                    Ok(()) => {}
+                    Err(wire::authority::ScopeRejoinError::Retained { scope, .. }) => self
+                        .data
+                        .as_mut()
+                        .expect("actual owner")
+                        .scopes
+                        .push(*scope),
+                    Err(wire::authority::ScopeRejoinError::Released(_)) => {}
+                }
+            }
+            if !self.data.as_ref().expect("actual owner").scopes.is_empty() {
+                return Err(self);
+            }
+            if self.release_page().is_err() || self.collect_pages().is_err() {
+                return Err(self);
+            }
+            if !self
+                .data
+                .as_ref()
+                .expect("actual owner")
+                .pinned_pages
+                .is_empty()
+            {
+                return Err(self);
+            }
+            let mut data = self.data.take().expect("actual owner");
+            drop(std::mem::take(&mut data.rows));
+            drop(data.failure.take());
+            let mut extra = std::mem::take(&mut data.extra).into_iter();
+            while let Some(mut work) = extra.next() {
+                if work.rejoin(&self.claim, self.query.key()).is_err() {
+                    data.extra.push(work);
+                    data.extra.extend(extra);
+                    self.data = Some(data);
+                    return Err(self);
+                }
+            }
+            let mut credits = std::mem::take(&mut data.credits).into_iter();
+            while let Some(mut credit) = credits.next() {
+                if Account::current()
+                    .and_then(|account| {
+                        account.rejoin_claim(&mut credit, &self.claim, self.query.key())
+                    })
+                    .is_err()
+                {
+                    data.credits.push(credit);
+                    data.credits.extend(credits);
+                    self.data = Some(data);
+                    return Err(self);
+                }
+            }
+            drop(data);
+        }
+        let mut base = self.base.take().expect("actual administrative loan");
+        if base.rejoin(&self.claim, self.query.key()).is_err() {
+            self.base = Some(base);
+            return Err(self);
+        }
+        Ok((self.query, self.claim))
+    }
+    fn read_inventory_page(&mut self, offset: u64) -> Result<NativeInventoryPage> {
+        let budget = self.claim.budget();
+        let funding = Account::current()?.split_claim(
+            &self.claim,
+            self.query.key(),
+            Reservation {
+                memory_bytes: PAGE_MEMORY + 128 * 1024,
+                temporary_bytes: 0,
+            },
+        )?;
+        self.query.page(
+            &self.claim,
+            self.library,
+            offset,
+            Budget {
+                max_files: 64.min(budget.max_files),
+                max_bytes: budget.max_bytes,
+                max_millis: budget.max_millis,
+                max_memory_bytes: PAGE_MEMORY,
+            },
+            funding,
+        )
+    }
+    fn release_page(&mut self) -> Result<()> {
+        let data = self.data.as_mut().expect("actual owner");
+        if let Some(page) = data.page.take() {
+            match page.into_funding() {
+                Ok(mut credit) => {
+                    if let Err(error) = Account::current().and_then(|account| {
+                        account.rejoin_claim(&mut credit, &self.claim, self.query.key())
+                    }) {
+                        data.credits.push(credit);
+                        return Err(error.into());
+                    }
+                }
+                Err(page) => data.pinned_pages.push(page),
+            }
+        }
+        Ok(())
+    }
+    fn collect_pages(&mut self) -> Result<()> {
+        let pages = std::mem::take(&mut self.data.as_mut().expect("actual owner").pinned_pages);
+        let mut pages = pages.into_iter();
+        while let Some(page) = pages.next() {
+            match page.into_funding() {
+                Err(page) => self
+                    .data
+                    .as_mut()
+                    .expect("actual owner")
+                    .pinned_pages
+                    .push(page),
+                Ok(mut credit) => {
+                    if let Err(error) = Account::current().and_then(|account| {
+                        account.rejoin_claim(&mut credit, &self.claim, self.query.key())
+                    }) {
+                        let data = self.data.as_mut().expect("actual owner");
+                        data.credits.push(credit);
+                        data.pinned_pages.extend(pages);
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn rejoin_scope(&mut self, scope: Permit) -> Result<()> {
+        match scope.rejoin_processing_scope(&self.claim, self.query.key()) {
+            Ok(()) => Ok(()),
+            Err(wire::authority::ScopeRejoinError::Retained { scope, code }) => {
+                self.data
+                    .as_mut()
+                    .expect("actual owner")
+                    .scopes
+                    .push(*scope);
+                Err(refused_error(code))
+            }
+            Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
+        }
+    }
+    fn abandon_scope(&mut self, scope: Permit, cause: anyhow::Error) -> anyhow::Error {
+        match scope.rejoin_processing_scope(&self.claim, self.query.key()) {
+            Ok(()) => cause,
+            Err(wire::authority::ScopeRejoinError::Retained { scope, .. }) => {
+                self.data
+                    .as_mut()
+                    .expect("actual owner")
+                    .scopes
+                    .push(*scope);
+                cause
+            }
+            Err(wire::authority::ScopeRejoinError::Released(_)) => cause,
+        }
+    }
+    fn query_limit(&self) -> Result<usize> {
+        let wire::Command::Query { query } = self.query.cause.libraries[self.library]
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required");
+        };
+        Ok(query.limit.get() as usize)
+    }
+    fn advance(&mut self, service: &NativeLibraryService) -> Result<bool> {
+        self.query.cause.check_claim(&self.claim)?;
+        anyhow::ensure!(
+            service.library
+                == self.query.cause.libraries[self.library]
+                    .reader
+                    .physical
+                    .library,
+            "actual service/library owner differs"
+        );
+        if self.data.as_ref().expect("actual owner").done {
+            return Ok(true);
+        }
+        let offset = self.data.as_ref().expect("actual owner").offset;
+        self.release_page()?;
+        let page = self.read_inventory_page(offset)?;
+        let observations: Vec<_> = page.observations().collect();
+        let complete = page.complete();
+        let next_offset = page.next_offset();
+        self.data.as_mut().expect("actual owner").page = Some(page);
+        for observed in observations {
+            self.consider(service, observed)?;
+        }
+        if complete {
+            self.release_page()?;
+            self.data.as_mut().expect("actual owner").done = true;
+            return Ok(true);
+        }
+        anyhow::ensure!(next_offset > offset, "inventory replay made no progress");
+        self.data.as_mut().expect("actual owner").offset = next_offset;
+        Ok(false)
+    }
+    fn consider(
+        &mut self,
+        service: &NativeLibraryService,
+        observed: NativeObservedSource,
+    ) -> Result<()> {
+        self.query.cause.check_claim(&self.claim)?;
+        let path = wire::RelativePath::new(observed.observation().stat.path.as_str())?;
+        let permit = &self.query.cause.libraries[self.library].reader.permit;
+        match permit.check_path(&service.library, &path) {
+            Err(wire::ErrorCode::NotExposed) => return Ok(()),
+            Err(code) => return Err(refused_error(code)),
+            Ok(()) => {}
+        }
+        let pointer_rel = wire::RelativePath::new(format!("sources/{}.md", observed.source_id()))?;
+        let pointer = open_pointer(permit, &service.library, pointer_rel)?;
+        let pointer_extra = pointer_scope_extra(pointer.as_ref())?;
+        let memory_bytes = (1024 * 1024u64)
+            .checked_add(
+                (path.as_str().len() as u64)
+                    .checked_mul(32)
+                    .context("metadata scope quote overflow")?,
+            )
+            .and_then(|bytes| bytes.checked_add(pointer_extra))
+            .context("metadata scope quote overflow")?;
+        let scope = permit
+            .fork_processing_scope(
+                &self.claim,
+                self.query.key(),
+                Reservation {
+                    memory_bytes,
+                    temporary_bytes: 0,
+                },
+            )
+            .map_err(refused_error)?;
+        match self.classify(service, &scope, observed, path, pointer) {
+            Ok(RowBuild::Skip { unavailable }) => {
+                if unavailable {
+                    self.data
+                        .as_mut()
+                        .expect("actual owner")
+                        .unavailable_sources += 1;
+                }
+                self.rejoin_scope(scope)
+            }
+            Ok(RowBuild::Keep {
+                annotations,
+                unavailable,
+            }) => {
+                if unavailable {
+                    self.data
+                        .as_mut()
+                        .expect("actual owner")
+                        .unavailable_sources += 1;
+                }
+                self.retain(annotations, scope)
+            }
+            Err(cause) => Err(self.abandon_scope(scope, cause)),
+        }
+    }
+    fn classify(
+        &self,
+        service: &NativeLibraryService,
+        scope: &Permit,
+        observed: NativeObservedSource,
+        path: wire::RelativePath,
+        pointer: Option<PointerOpen>,
+    ) -> Result<RowBuild> {
+        let checked = self.query.cause.clone();
+        let live = self.claim.clone();
+        let path_permit = self.query.cause.libraries[self.library]
+            .reader
+            .permit
+            .clone();
+        let library_id = service.library.clone();
+        let watched = path.clone();
+        scope
+            .retain_check(Arc::new(move || {
+                checked.check_scope_claim(&live).is_ok()
+                    && path_permit.check_path(&library_id, &watched).is_ok()
+            }))
+            .map_err(refused_error)?;
+        let source_id = observed.source_id().to_owned();
+        let obs = observed.observation().clone();
+        let mut observed = Some(observed);
+        let available = obs.availability == knowledge_core::backend::Availability::Available
+            && !matches!(obs.verification, knowledge_storage::Verification::Failed(_));
+        let mut page_title = None;
+        let mut page_descriptions = Vec::new();
+        let mut page_tags = Vec::new();
+        let mut has_frontmatter = false;
+        let digest;
+        let digest_state;
+        let availability;
+        let unavailable;
+        if available {
+            let opened = scope
+                .with_root(&service.library, |root| {
+                    Ok(LibraryHost::open_root(root, path.as_str()))
+                })
+                .map_err(refused_error)?;
+            match opened {
+                Err(wire::ErrorCode::NotFound) => {
+                    return Ok(RowBuild::Skip { unavailable: true });
+                }
+                Err(wire::ErrorCode::Denied) => {
+                    digest = None;
+                    digest_state = wire::DigestState::Unverified;
+                    availability = wire::Availability::Denied;
+                    unavailable = true;
+                }
+                Err(code) => return Err(refused_error(code)),
+                Ok(orig_file) => {
+                    let orig_meta = orig_file.metadata()?;
+                    if !orig_meta.is_file()
+                        || observed
+                            .as_ref()
+                            .expect("actual observation")
+                            .check_file(&orig_file)
+                            .is_err()
+                    {
+                        return Ok(RowBuild::Skip { unavailable: true });
+                    }
+                    LibraryHost::track_version(
+                        &service.library,
+                        path.as_str(),
+                        &orig_file,
+                        &orig_meta,
+                        scope,
+                    )
+                    .map_err(refused_error)?;
+                    let pinned = orig_file.try_clone()?;
+                    let watched_source = observed.take().expect("actual observation");
+                    scope
+                        .retain_check(Arc::new(move || watched_source.check_file(&pinned).is_ok()))
+                        .map_err(refused_error)?;
+                    if path.as_str().ends_with(".md") && orig_meta.len() > 0 {
+                        let parsed = self.read_page_frontmatter(&orig_file, orig_meta.len())?;
+                        page_title = parsed.title;
+                        page_descriptions = parsed.descriptions;
+                        page_tags = parsed.tags;
+                        has_frontmatter = parsed.present;
+                    }
+                    let verified = verified_digest(&obs)?;
+                    digest = verified.0;
+                    digest_state = verified.1;
+                    availability = wire::Availability::Available;
+                    unavailable = false;
+                }
+            }
+        } else {
+            digest = None;
+            digest_state = wire::DigestState::Unverified;
+            availability = map_unavailable(&obs);
+            unavailable = true;
+        }
+        let (pointer_title, pointer_descriptions, pointer_tags, pointer_path) =
+            if let Some(pointer) = pointer {
+                let parsed = self.read_pointer(service, scope, pointer)?;
+                (
+                    parsed.title,
+                    parsed.descriptions,
+                    parsed.tags,
+                    Some(parsed.path),
+                )
+            } else {
+                (None, Vec::new(), Vec::new(), None)
+            };
+        let annotations = union_annotations(AnnotationDraft {
+            source_id,
+            path,
+            page_title,
+            page_descriptions,
+            page_tags,
+            has_frontmatter,
+            pointer_title,
+            pointer_descriptions,
+            pointer_tags,
+            pointer_path,
+            digest,
+            digest_state,
+            availability,
+        })?;
+        if self.metadata_matches(&annotations)? {
+            Ok(RowBuild::Keep {
+                annotations,
+                unavailable,
+            })
+        } else {
+            Ok(RowBuild::Skip { unavailable })
+        }
+    }
+    fn read_page_frontmatter(&self, file: &File, len: u64) -> Result<PageFrontmatter> {
+        let head_len = len.min(6);
+        self.query.cause.admit_io(&self.claim, head_len)?;
+        let mut head_bytes = vec![0u8; head_len as usize];
+        file.read_exact_at(&mut head_bytes, 0)?;
+        if !(head_bytes.starts_with(b"---") || head_bytes.starts_with("\u{feff}---".as_bytes())) {
+            return Ok(PageFrontmatter {
+                title: None,
+                descriptions: Vec::new(),
+                tags: Vec::new(),
+                present: false,
+            });
+        }
+        let fm_len = len.min(64 * 1024);
+        let extra = fm_len - head_len;
+        if extra > 0 {
+            self.query.cause.admit_io(&self.claim, extra)?;
+        }
+        let mut fm_bytes = vec![0u8; fm_len as usize];
+        file.read_exact_at(&mut fm_bytes, 0)?;
+        let (title, descriptions, tags, present) =
+            parse_frontmatter_fields(&String::from_utf8_lossy(&fm_bytes));
+        Ok(PageFrontmatter {
+            title,
+            descriptions,
+            tags,
+            present,
+        })
+    }
+    fn read_pointer(
+        &self,
+        service: &NativeLibraryService,
+        scope: &Permit,
+        pointer: PointerOpen,
+    ) -> Result<PointerMarkdown> {
+        let (pointer_file, pointer_meta, pointer_rel) = pointer;
+        self.query.cause.admit_object(&self.claim)?;
+        self.query.cause.admit_io(&self.claim, pointer_meta.len())?;
+        anyhow::ensure!(
+            stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
+            "pointer changed before read"
+        );
+        let mut pointer_bytes = vec![0u8; pointer_meta.len() as usize];
+        pointer_file.read_exact_at(&mut pointer_bytes, 0)?;
+        anyhow::ensure!(
+            stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
+            "pointer changed after read"
+        );
+        LibraryHost::track_version(
+            &service.library,
+            pointer_rel.as_str(),
+            &pointer_file,
+            &pointer_meta,
+            scope,
+        )
+        .map_err(refused_error)?;
+        let (title, descriptions, tags) =
+            parse_pointer_markdown(&String::from_utf8(pointer_bytes)?);
+        Ok(PointerMarkdown {
+            title,
+            descriptions,
+            tags,
+            path: pointer_rel,
+        })
+    }
+    fn metadata_matches(&self, annotations: &NativeQueryAnnotations) -> Result<bool> {
+        let wire::Command::Query { query } = self.query.cause.libraries[self.library]
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required");
+        };
+        if !annotations.matches_required_tags(&query.required_tags, query.case_sensitive) {
+            return Ok(false);
+        }
+        let matched =
+            if let Some((method, keyword)) = self.method {
+                match method {
+                    wire::SearchMethod::Files => annotations
+                        .matches_file_keyword(&query.keywords[keyword], query.case_sensitive),
+                    wire::SearchMethod::Tags => annotations
+                        .matches_tag_keyword(&query.keywords[keyword], query.case_sensitive),
+                    _ => false,
+                }
+            } else if query.keywords.is_empty() {
+                true
+            } else {
+                (query.methods.contains(&wire::SearchMethod::Files)
+                    && query.keywords.iter().any(|keyword| {
+                        annotations.matches_file_keyword(keyword, query.case_sensitive)
+                    }))
+                    || (query.methods.contains(&wire::SearchMethod::Tags)
+                        && query.keywords.iter().any(|keyword| {
+                            annotations.matches_tag_keyword(keyword, query.case_sensitive)
+                        }))
+                    || (!query.methods.contains(&wire::SearchMethod::Files)
+                        && !query.methods.contains(&wire::SearchMethod::Tags))
+            };
+        Ok(matched)
+    }
+    fn retain(&mut self, annotations: NativeQueryAnnotations, scope: Permit) -> Result<()> {
+        let key = (
+            annotations.path.as_str().to_owned(),
+            annotations.source_id.as_str().to_owned(),
+        );
+        let limit = self.query_limit()?;
+        let exists = self
+            .data
+            .as_ref()
+            .expect("actual owner")
+            .rows
+            .contains_key(&key);
+        let len = self.data.as_ref().expect("actual owner").rows.len();
+        if len == limit && !exists {
+            let last = self
+                .data
+                .as_ref()
+                .expect("actual owner")
+                .rows
+                .last_key_value()
+                .expect("bounded metadata rows")
+                .0
+                .clone();
+            if key >= last {
+                return self.rejoin_scope(scope);
+            }
+        }
+        let charge = annotation_charge(&annotations)?;
+        if let Err(error) = self.ensure_metadata_capacity(charge) {
+            return Err(self.abandon_scope(scope, error));
+        }
+        let evict = if exists {
+            Some(key.clone())
+        } else if self.data.as_ref().expect("actual owner").rows.len() == limit {
+            self.data
+                .as_ref()
+                .expect("actual owner")
+                .rows
+                .last_key_value()
+                .map(|(last, _)| last.clone())
+        } else {
+            None
+        };
+        if let Some(evict) = evict
+            && let Some(old) = self
+                .data
+                .as_mut()
+                .expect("actual owner")
+                .rows
+                .remove(&evict)
+        {
+            let released = old.charged;
+            drop(old.annotations);
+            if let Err(error) = self.rejoin_scope(old.scope) {
+                return Err(self.abandon_scope(scope, error));
+            }
+            let data = self.data.as_mut().expect("actual owner");
+            data.metadata_used = data.metadata_used.saturating_sub(released);
+        }
+        let used = match self
+            .data
+            .as_ref()
+            .expect("actual owner")
+            .metadata_used
+            .checked_add(charge)
+        {
+            Some(used) => used,
+            None => {
+                return Err(self.abandon_scope(scope, anyhow::anyhow!("metadata result overflow")));
+            }
+        };
+        let data = self.data.as_mut().expect("actual owner");
+        data.metadata_used = used;
+        data.rows.insert(
+            key,
+            MetadataCandidate {
+                annotations,
+                scope,
+                charged: charge,
+            },
+        );
+        Ok(())
+    }
+    fn ensure_metadata_capacity(&mut self, charge: u64) -> Result<()> {
+        let data = self.data.as_mut().expect("actual owner");
+        let peak = data
+            .metadata_used
+            .checked_add(charge)
+            .context("metadata result overflow")?;
+        if peak <= data.metadata_capacity {
+            return Ok(());
+        }
+        let capacity = peak
+            .max(
+                data.metadata_capacity
+                    .checked_add(data.metadata_capacity / 2)
+                    .context("metadata growth overflow")?,
+            )
+            .max(64 * 1024);
+        let work = Work::split_claim(
+            &self.claim,
+            self.query.key(),
+            Reservation {
+                memory_bytes: capacity - data.metadata_capacity,
+                temporary_bytes: 0,
+            },
+        )?;
+        data.extra.push(work);
+        data.metadata_capacity = capacity;
+        Ok(())
+    }
+}
+fn annotation_charge(annotations: &NativeQueryAnnotations) -> Result<u64> {
+    let mut bytes = annotations.path.as_str().len()
+        + annotations.source_id.as_str().len()
+        + annotations.title.len()
+        + annotations.description.len()
+        + annotations
+            .annotation_path
+            .as_ref()
+            .map_or(0, |path| path.as_str().len());
+    for tag in &annotations.tags {
+        bytes += tag.len();
+    }
+    (bytes as u64)
+        .checked_mul(16)
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<NativeQueryAnnotations>() as u64 + 1024)
+        })
+        .context("metadata result quote overflow")
+}
+fn pointer_scope_extra(pointer: Option<&PointerOpen>) -> Result<u64> {
+    let Some((_, meta, _)) = pointer else {
+        return Ok(0);
+    };
+    if meta.len() > 16 * 1024 {
+        meta.len()
+            .checked_mul(16)
+            .context("pointer scope quote overflow")
+    } else {
+        Ok(0)
+    }
+}
+fn open_pointer(
+    permit: &Permit,
+    library: &wire::Id,
+    pointer_rel: wire::RelativePath,
+) -> Result<Option<PointerOpen>> {
+    match permit.check_path(library, &pointer_rel) {
+        Err(wire::ErrorCode::NotExposed) => Ok(None),
+        Err(code) => Err(refused_error(code)),
+        Ok(()) => match permit
+            .with_root(library, |root| {
+                Ok(LibraryHost::open_root(root, pointer_rel.as_str()))
+            })
+            .map_err(refused_error)?
+        {
+            Ok(file) => {
+                let meta = file.metadata()?;
+                anyhow::ensure!(
+                    meta.is_file() && meta.len() <= wire::MAX_CONTROL_FRAME_BYTES as u64,
+                    "actual pointer metadata refused"
+                );
+                Ok(Some((file, meta, pointer_rel)))
+            }
+            Err(wire::ErrorCode::NotFound) => Ok(None),
+            Err(code) => Err(refused_error(code)),
+        },
+    }
+}
+fn verified_digest(
+    obs: &knowledge_storage::Observation,
+) -> Result<(Option<wire::Digest>, wire::DigestState)> {
+    if obs.verification == knowledge_storage::Verification::Verified
+        && let Some(version) = &obs.version
+    {
+        Ok((
+            Some(wire::Digest::new(version.digest.as_str())?),
+            wire::DigestState::Verified,
+        ))
+    } else {
+        Ok((None, wire::DigestState::Unverified))
+    }
+}
+fn map_unavailable(obs: &knowledge_storage::Observation) -> wire::Availability {
+    use knowledge_core::backend::{Availability, BackendError, Unavailable};
+    let kind = match obs.availability {
+        Availability::Unavailable(kind) => Some(kind),
+        Availability::Available => match obs.verification {
+            knowledge_storage::Verification::Failed(BackendError::Unavailable(kind)) => Some(kind),
+            _ => None,
+        },
+    };
+    match kind {
+        Some(Unavailable::Denied) => wire::Availability::Denied,
+        Some(Unavailable::Offline) => wire::Availability::Offline,
+        Some(Unavailable::Placeholder) => wire::Availability::Placeholder,
+        Some(Unavailable::Unsupported) => wire::Availability::Unsupported,
+        Some(Unavailable::Changed) => wire::Availability::Changed,
+        Some(Unavailable::Deleted) => wire::Availability::Deleted,
+        Some(Unavailable::Unknown) | None => wire::Availability::Unknown,
+    }
+}
+fn union_annotations(draft: AnnotationDraft) -> Result<NativeQueryAnnotations> {
+    let mut descriptions = draft.page_descriptions;
+    for part in draft.pointer_descriptions {
+        if !descriptions.iter().any(|item| item == &part) {
+            descriptions.push(part);
+        }
+    }
+    let mut tags = draft.page_tags;
+    for tag in draft.pointer_tags {
+        if !tags.iter().any(|item| item == &tag) {
+            tags.push(tag);
+        }
+    }
+    let fallback = draft
+        .path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or(draft.path.as_str())
+        .to_owned();
+    let title = draft
+        .pointer_title
+        .filter(|title| !title.is_empty())
+        .or(draft.page_title.filter(|title| !title.is_empty()))
+        .unwrap_or(fallback);
+    let annotation_path = if let Some(pointer) = draft.pointer_path {
+        Some(pointer)
+    } else if draft.path.as_str().starts_with("wiki/")
+        || draft.path.as_str().starts_with("pages/")
+        || draft.has_frontmatter
+    {
+        Some(draft.path.clone())
+    } else {
+        None
+    };
+    Ok(NativeQueryAnnotations {
+        source_id: wire::Id::new(draft.source_id)?,
+        path: draft.path,
+        title,
+        description: descriptions.join("\n"),
+        tags,
+        annotation_path,
+        digest: draft.digest,
+        digest_state: draft.digest_state,
+        availability: draft.availability,
+    })
 }

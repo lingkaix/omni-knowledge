@@ -158,6 +158,12 @@ impl StageOwner {
             source.source.check().map_err(|_| {
                 VectorError::Identity("actual native vector source unavailable".into())
             })?;
+            if !source
+                .matches_required_tags()
+                .map_err(|_| VectorError::Identity("actual native vector tag dependency".into()))?
+            {
+                continue;
+            }
             return Ok(true);
         }
         Ok(false)

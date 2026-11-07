@@ -8,7 +8,7 @@ mod budget;
 pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
 #[path = "inventory_corpus_controller.rs"]
 mod controller;
-pub use controller::{NativeBm25Run, NativeQueryStep};
+pub use controller::{NativeBm25Run, NativeMetadataRun, NativeQueryStep};
 #[path = "inventory_corpus_query_embedding.rs"]
 mod keyword_embedding;
 pub use keyword_embedding::NativeQueryEmbedding;
@@ -221,16 +221,22 @@ pub struct NativeQueryAnnotations {
 }
 impl NativeQueryAnnotations {
     pub fn matches_required_tags(&self, required_tags: &[String], case_sensitive: bool) -> bool {
-        required_tags
-            .iter()
-            .all(|required| self.tags.iter().any(|tag| eq_text(tag, required, case_sensitive)))
+        required_tags.iter().all(|required| {
+            self.tags
+                .iter()
+                .any(|tag| eq_text(tag, required, case_sensitive))
+        })
     }
     pub fn matches_tag_keyword(&self, keyword: &str, case_sensitive: bool) -> bool {
         keyword
             .split([',', '，'])
             .map(str::trim)
             .filter(|part| !part.is_empty())
-            .any(|part| self.tags.iter().any(|tag| eq_text(tag, part, case_sensitive)))
+            .any(|part| {
+                self.tags
+                    .iter()
+                    .any(|tag| eq_text(tag, part, case_sensitive))
+            })
     }
     pub fn matches_file_keyword(&self, keyword: &str, case_sensitive: bool) -> bool {
         if keyword.trim().is_empty() {
@@ -792,7 +798,11 @@ impl NativeTupleQuery {
                         "pointer changed before read"
                     );
                     let mut pointer_bytes = vec![0u8; pointer_meta.len() as usize];
-                    std::os::unix::fs::FileExt::read_exact_at(&pointer_file, &mut pointer_bytes, 0)?;
+                    std::os::unix::fs::FileExt::read_exact_at(
+                        &pointer_file,
+                        &mut pointer_bytes,
+                        0,
+                    )?;
                     anyhow::ensure!(
                         stamp(&pointer_file)? == stamp_from_meta(&pointer_meta),
                         "pointer changed after read"
