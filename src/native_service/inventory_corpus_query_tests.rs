@@ -1546,6 +1546,7 @@ pub(super) fn run_canonical_metadata_controls(
     assert!(NativeMetadataRun::test_pointer_entries() >= 1);
     let frontmatter_entries = NativeMetadataRun::test_frontmatter_entries();
     let frontmatter_read = NativeMetadataRun::test_frontmatter_max_read();
+    let frontmatter_io = NativeMetadataRun::test_frontmatter_io_bytes();
     let live = open_live(
         service,
         owner,
@@ -1582,10 +1583,14 @@ pub(super) fn run_canonical_metadata_controls(
     );
     assert!(NativeMetadataRun::test_frontmatter_entries() > frontmatter_entries);
     assert_eq!(
+        NativeMetadataRun::test_frontmatter_io_bytes(),
+        frontmatter_io,
+        "refused frontmatter attempt performed IO"
+    );
+    assert_eq!(
         NativeMetadataRun::test_frontmatter_last_read(),
         0,
-        "refused frontmatter admission performed IO; cumulative={}",
-        NativeMetadataRun::test_frontmatter_io_bytes()
+        "refused frontmatter admission performed IO"
     );
     assert!(
         NativeMetadataRun::test_frontmatter_max_read().saturating_sub(frontmatter_read) < 65536,

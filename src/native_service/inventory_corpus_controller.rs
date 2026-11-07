@@ -1079,6 +1079,12 @@ fn observe_frontmatter_buffer(bytes: u64) {
         }
     });
 }
+fn read_frontmatter_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    file.read_exact_at(buf, offset)?;
+    #[cfg(test)]
+    observe_frontmatter_buffer(buf.len() as u64);
+    Ok(())
+}
 /// Actual M1 metadata discovery owner. Annotations and scopes die before page and Claim credit.
 pub struct NativeMetadataRun {
     query: NativeTupleQuery,
@@ -1744,9 +1750,7 @@ impl NativeMetadataRun {
                 .saturating_sub(admitted_before_head),
         );
         let mut head_bytes = vec![0u8; head_len as usize];
-        file.read_exact_at(&mut head_bytes, 0)?;
-        #[cfg(test)]
-        observe_frontmatter_buffer(head_bytes.len() as u64);
+        read_frontmatter_at(file, &mut head_bytes, 0)?;
         let matched =
             head_bytes.starts_with(b"---") || head_bytes.starts_with("\u{feff}---".as_bytes());
         if matched {
@@ -1764,9 +1768,7 @@ impl NativeMetadataRun {
                         .saturating_sub(admitted_before_rest),
                 );
                 let mut rest = vec![0u8; extra as usize];
-                file.read_exact_at(&mut rest, head_len)?;
-                #[cfg(test)]
-                observe_frontmatter_buffer(rest.len() as u64);
+                read_frontmatter_at(file, &mut rest, head_len)?;
                 head_bytes.extend_from_slice(&rest);
             }
         }
