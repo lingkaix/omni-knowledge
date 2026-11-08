@@ -366,6 +366,7 @@ struct WholeData {
     metadata_capacity: u64,
     metadata_used: u64,
     unavailable_parts: u64,
+    coverage: QueryCoverage,
     empty: bool,
     closing: bool,
     failure: Option<anyhow::Error>,
@@ -387,6 +388,7 @@ impl WholeData {
             metadata_capacity: 0,
             metadata_used: 0,
             unavailable_parts: 0,
+            coverage: QueryCoverage::default(),
             empty: false,
             closing: false,
             failure: None,
@@ -524,15 +526,17 @@ impl WholeVectorComponents {
 fn same_observed(source: &NativeObservedSource, id: &str, locator: &str) -> bool {
     source.source_id() == id && source.observation().stat.path.as_str() == locator
 }
-fn row_matches(part: &SourcePart, row: VectorCandidate<'_>) -> std::result::Result<(), VectorError> {
+fn row_matches(
+    part: &SourcePart,
+    row: VectorCandidate<'_>,
+) -> std::result::Result<(), VectorError> {
     if row.source_id != part.document.key.id || row.source_digest != part.document.digest {
         return Err(VectorError::Identity(
             "actual native vector row source differs".into(),
         ));
     }
-    let expected = representation(part).map_err(|_| {
-        VectorError::Identity("actual native representation dependency".into())
-    })?;
+    let expected = representation(part)
+        .map_err(|_| VectorError::Identity("actual native representation dependency".into()))?;
     if row.representation != &expected {
         return Err(VectorError::Identity(
             "actual native vector representation differs".into(),
@@ -563,12 +567,11 @@ fn row_matches(part: &SourcePart, row: VectorCandidate<'_>) -> std::result::Resu
 }
 struct Stream<'a> {
     run: &'a mut NativeWholeSemanticRun,
-    service: &'a NativeLibraryService,
+    library_id: &'a wire::Id,
     cursor: u64,
     sources_len: u64,
     current: Option<CurrentPart>,
     active: Option<(String, NativeQuerySource)>,
-    part_offsets: std::collections::BTreeMap<String, (u64, u64)>,
     callback_error: Option<anyhow::Error>,
 }
 impl Drop for Stream<'_> {
@@ -589,10 +592,7 @@ impl Stream<'_> {
             self.cursor < self.sources_len,
             "actual source cursor is exhausted"
         );
-        self.run
-            .query
-            .cause
-            .admit_object(&self.run.claim)?;
+        self.run.query.cause.admit_object(&self.run.claim)?;
         let part_offset = self.cursor;
         let (tuple, after) = self.run.query.cause.libraries[self.run.library]
             .reader
@@ -603,7 +603,7 @@ impl Stream<'_> {
         self.cursor = after;
         Ok((part_offset, tuple, after))
     }
-    fn consider(&mut self, part_offset: u64, tuple: TuplePart, after: u64) -> Result<bool> {
+    fn consider(&mut self, _part_offset: u64, tuple: TuplePart, after: u64) -> Result<bool> {
         let id = tuple.data.document.key.id.clone();
         if self
             .active
@@ -626,10 +626,11 @@ impl Stream<'_> {
             if library.inventory.owner.path_excluded(&locator) {
                 true
             } else {
-                match library.reader.permit.check_path(
-                    &self.service.library,
-                    &wire::RelativePath::new(&locator)?,
-                ) {
+                match library
+                    .reader
+                    .permit
+                    .check_path(self.library_id, &wire::RelativePath::new(&locator)?)
+                {
                     Err(wire::ErrorCode::NotExposed) => true,
                     Err(code) => return Err(refused_error(code)),
                     Ok(()) => false,
@@ -639,10 +640,25 @@ impl Stream<'_> {
         if excluded {
             return Ok(false);
         }
+        let first_source = self
+            .run
+            .data
+            .as_mut()
+            .expect("actual owner")
+            .coverage
+            .begin(&id, &tuple.data.status);
         let page_offset = tuple.data.page_offset;
         let embedding_rows = tuple.data.embedding_rows;
         let observed = self.run.observed_for(page_offset, &id, &locator)?;
         let Some(observed) = observed else {
+            if first_source {
+                self.run
+                    .data
+                    .as_mut()
+                    .expect("actual owner")
+                    .coverage
+                    .unavailable += 1;
+            }
             self.run
                 .data
                 .as_mut()
@@ -651,34 +667,41 @@ impl Stream<'_> {
             return Ok(false);
         };
         match self.run.query.source_part(
-            self.service,
+            self.library_id,
             &self.run.claim,
             self.run.library,
             observed,
             tuple,
             after,
         ) {
-            Ok(source) => match source.matches_required_tags() {
-                Ok(true) if embedding_rows == 0 => {
-                    self.run.close_source(source)?;
-                    Ok(false)
+            Ok(source) => {
+                if first_source {
+                    self.run
+                        .data
+                        .as_mut()
+                        .expect("actual owner")
+                        .coverage
+                        .verified += 1;
                 }
-                Ok(true) => {
-                    self.part_offsets
-                        .entry(id.clone())
-                        .or_insert((part_offset, page_offset));
-                    self.active = Some((id, source));
-                    Ok(true)
+                match source.matches_required_tags() {
+                    Ok(true) if embedding_rows == 0 => {
+                        self.run.close_source(source)?;
+                        Ok(false)
+                    }
+                    Ok(true) => {
+                        self.active = Some((id, source));
+                        Ok(true)
+                    }
+                    Ok(false) => {
+                        self.run.close_source(source)?;
+                        Ok(false)
+                    }
+                    Err(error) => {
+                        self.run.close_source(source)?;
+                        Err(error)
+                    }
                 }
-                Ok(false) => {
-                    self.run.close_source(source)?;
-                    Ok(false)
-                }
-                Err(error) => {
-                    self.run.close_source(source)?;
-                    Err(error)
-                }
-            },
+            }
             Err(error) => {
                 let unavailable = error
                     .downcast_ref::<crate::native_service::NativeRefreshScopeError>()
@@ -687,6 +710,14 @@ impl Stream<'_> {
                         cause.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
                     });
                 if unavailable {
+                    if first_source {
+                        self.run
+                            .data
+                            .as_mut()
+                            .expect("actual owner")
+                            .coverage
+                            .unavailable += 1;
+                    }
                     self.run
                         .data
                         .as_mut()
@@ -700,11 +731,7 @@ impl Stream<'_> {
         }
     }
     fn prepare_part(&mut self) -> Result<()> {
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|part| part.remaining > 0)
-        {
+        if self.current.as_ref().is_some_and(|part| part.remaining > 0) {
             return Ok(());
         }
         loop {
@@ -755,9 +782,10 @@ impl Stream<'_> {
                 "actual native vector source is not open".into(),
             ));
         };
-        source.source().check().map_err(|_| {
-            VectorError::Identity("actual native vector source unavailable".into())
-        })?;
+        source
+            .source()
+            .check()
+            .map_err(|_| VectorError::Identity("actual native vector source unavailable".into()))?;
         Ok(true)
     }
     fn drain_tail(&mut self) -> Result<()> {
@@ -792,39 +820,38 @@ impl Stream<'_> {
                 self.run.close_source(source)?;
             }
         }
-        let winners: Vec<String> = result.iter().map(|(id, _)| id.clone()).collect();
-        for id in winners {
-            if self
-                .run
-                .data
-                .as_ref()
-                .expect("actual owner")
-                .sources
-                .contains_key(&id)
-            {
-                continue;
+        let mut winners: std::collections::BTreeSet<String> = result
+            .iter()
+            .filter(|(id, _)| {
+                !self
+                    .run
+                    .data
+                    .as_ref()
+                    .expect("actual owner")
+                    .sources
+                    .contains_key(id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        // Only the bounded winners stay resident. Rewalk source metadata once, never the
+        // vector index once per winner, instead of retaining an unpaid offset map for all sources.
+        self.cursor = 0;
+        while !winners.is_empty() && self.cursor < self.sources_len {
+            let (_, tuple, after) = self.read_part()?;
+            let id = tuple.data.document.key.id.clone();
+            if winners.remove(&id) {
+                self.reopen(&id, tuple, after)?;
             }
-            let (part_offset, page_offset) = self
-                .part_offsets
-                .get(&id)
-                .copied()
-                .context("actual winning semantic source part is absent")?;
-            self.reopen(&id, part_offset, page_offset)?;
         }
+        anyhow::ensure!(
+            winners.is_empty(),
+            "actual winning semantic source part is absent"
+        );
         self.run.release_page()?;
         Ok(())
     }
-    fn reopen(&mut self, id: &str, part_offset: u64, page_offset: u64) -> Result<()> {
-        self.run
-            .query
-            .cause
-            .admit_object(&self.run.claim)?;
-        let (tuple, after) = self.run.query.cause.libraries[self.run.library]
-            .reader
-            .part_admitted(part_offset, &|n| {
-                self.run.query.cause.admit_io(&self.run.claim, n)
-            })?
-            .context("actual winning source part absent")?;
+    fn reopen(&mut self, id: &str, tuple: TuplePart, after: u64) -> Result<()> {
+        let page_offset = tuple.data.page_offset;
         anyhow::ensure!(
             tuple.data.document.key.id == id,
             "winning source part differs"
@@ -840,7 +867,7 @@ impl Stream<'_> {
             .observed_for(page_offset, id, &locator)?
             .context("actual winning M1 source absent")?;
         let source = self.run.query.source_part(
-            self.service,
+            self.library_id,
             &self.run.claim,
             self.run.library,
             observed,
@@ -951,6 +978,16 @@ impl NativeTupleQuery {
         library: usize,
         keyword: usize,
     ) -> NativeWholeSemanticRun {
+        self.start_semantic_for(&service.library, claim, library, keyword)
+    }
+    /// Use the already-held selected library for controller routing without a host mutex.
+    pub(in crate::native_service) fn start_semantic_for(
+        &self,
+        library_id: &wire::Id,
+        claim: Arc<Claim>,
+        library: usize,
+        keyword: usize,
+    ) -> NativeWholeSemanticRun {
         let mut run = NativeWholeSemanticRun {
             query: NativeTupleQuery {
                 cause: self.cause.clone(),
@@ -961,13 +998,59 @@ impl NativeTupleQuery {
             embedding: None,
             base: None,
         };
-        if let Err(error) = run.execute(service, keyword) {
+        if let Err(error) = run.execute(library_id, keyword) {
             run.note_failure(error);
         }
         run
     }
 }
 impl NativeWholeSemanticRun {
+    /// Return the selected complete tuple's checked model-space label as response data.
+    pub(in crate::native_service) fn model_space(&self) -> Result<&str> {
+        self.check()?;
+        Ok(&self.query.cause.libraries[self.library]
+            .reader
+            .physical
+            .data
+            .model
+            .as_ref()
+            .context("actual tuple model identity")?
+            .embedding_space)
+    }
+    /// Coverage from this one source stream, before tag filtering or distance work.
+    pub(in crate::native_service) fn coverage(&self) -> Result<wire::Coverage> {
+        self.check()?;
+        Ok(self
+            .data
+            .as_ref()
+            .context("actual semantic owner")?
+            .coverage
+            .wire())
+    }
+    /// Resolve one winning representation span through its actual held tuple/source/Claim.
+    pub(in crate::native_service) fn evidence_locator(
+        &self,
+        id: &str,
+        digest: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<wire::Locator> {
+        let source = self
+            .data
+            .as_ref()
+            .context("actual semantic owner")?
+            .sources
+            .get(id)
+            .context("actual semantic winner")?;
+        super::super::controller::representation_locator(
+            &self.query,
+            &self.claim,
+            source,
+            digest,
+            start,
+            end,
+        )
+    }
     fn note_failure(&mut self, error: anyhow::Error) {
         let error = if self.query.cause.reads.check().is_err() {
             error.context(QueryBudgetExhausted)
@@ -1000,7 +1083,7 @@ impl NativeWholeSemanticRun {
             }
         }
     }
-    fn execute(&mut self, service: &NativeLibraryService, keyword: usize) -> Result<()> {
+    fn execute(&mut self, library_id: &wire::Id, keyword: usize) -> Result<()> {
         self.query.cause.check_claim(&self.claim)?;
         anyhow::ensure!(
             self.library < self.query.cause.libraries.len(),
@@ -1015,8 +1098,12 @@ impl NativeWholeSemanticRun {
             bail!("actual Query required");
         };
         anyhow::ensure!(
-            service.library == self.query.cause.libraries[self.library].reader.physical.library,
-            "actual service/library owner differs"
+            *library_id
+                == self.query.cause.libraries[self.library]
+                    .reader
+                    .physical
+                    .library,
+            "actual library_id/library owner differs"
         );
         anyhow::ensure!(
             query.methods.contains(&wire::SearchMethod::Semantic),
@@ -1051,7 +1138,7 @@ impl NativeWholeSemanticRun {
             self.embedding = Some(Box::new(embedding));
             return Err(error);
         }
-        let searched = self.search(service, &embedding);
+        let searched = self.search(library_id, &embedding);
         match embedding.finish() {
             Ok(_) => searched,
             Err(embedding) => {
@@ -1074,11 +1161,7 @@ impl NativeWholeSemanticRun {
         )?;
         Ok(file.metadata()?.len())
     }
-    fn search(
-        &mut self,
-        service: &NativeLibraryService,
-        embedding: &NativeQueryEmbedding,
-    ) -> Result<()> {
+    fn search(&mut self, library_id: &wire::Id, embedding: &NativeQueryEmbedding) -> Result<()> {
         let vector_rows = self.query.cause.libraries[self.library]
             .reader
             .physical
@@ -1086,7 +1169,7 @@ impl NativeWholeSemanticRun {
             .vector_rows;
         let sources_len = self.sources_len()?;
         if vector_rows == 0 {
-            self.walk_sources(service, sources_len)?;
+            self.walk_sources(library_id, sources_len)?;
             self.data.as_mut().expect("actual owner").empty = true;
             return Ok(());
         }
@@ -1162,12 +1245,11 @@ impl NativeWholeSemanticRun {
         let result = {
             let mut stream = Stream {
                 run: self,
-                service,
+                library_id,
                 cursor: 0,
                 sources_len,
                 current: None,
                 active: None,
-                part_offsets: std::collections::BTreeMap::new(),
                 callback_error: None,
             };
             #[cfg(test)]
@@ -1184,15 +1266,14 @@ impl NativeWholeSemanticRun {
         self.collect_evidence()?;
         Ok(())
     }
-    fn walk_sources(&mut self, service: &NativeLibraryService, sources_len: u64) -> Result<()> {
+    fn walk_sources(&mut self, library_id: &wire::Id, sources_len: u64) -> Result<()> {
         let mut stream = Stream {
             run: self,
-            service,
+            library_id,
             cursor: 0,
             sources_len,
             current: None,
             active: None,
-            part_offsets: std::collections::BTreeMap::new(),
             callback_error: None,
         };
         stream.drain_tail()?;
@@ -1442,11 +1523,7 @@ impl NativeWholeSemanticRun {
     }
     fn rejoin_work(&mut self, mut work: Work) -> bool {
         if work.rejoin(&self.claim, self.query.key()).is_err() {
-            self.data
-                .as_mut()
-                .expect("actual owner")
-                .extra
-                .push(work);
+            self.data.as_mut().expect("actual owner").extra.push(work);
             false
         } else {
             true
@@ -1461,7 +1538,10 @@ impl NativeWholeSemanticRun {
             .is_some_and(|error| error.is::<QueryBudgetExhausted>())
     }
     pub fn check(&self) -> Result<()> {
-        let data = self.data.as_ref().context("native semantic result consumed")?;
+        let data = self
+            .data
+            .as_ref()
+            .context("native semantic result consumed")?;
         anyhow::ensure!(
             !data.closing && data.failure.is_none(),
             "native semantic result is not deliverable"
@@ -1595,7 +1675,8 @@ impl NativeWholeSemanticRun {
             }
         }
         if self.data.is_some() {
-            let mut pending = std::mem::take(&mut self.data.as_mut().expect("actual owner").pending);
+            let mut pending =
+                std::mem::take(&mut self.data.as_mut().expect("actual owner").pending);
             pending.extend(self.take_sources().into_values());
             for source in pending {
                 if let Err(error) = self.close_source(source) {
@@ -1653,7 +1734,8 @@ impl NativeWholeSemanticRun {
                         }
                         Ok(None) => {}
                         Err(owner) => {
-                            self.data.as_mut().expect("actual owner").vectors = Some(Arc::from(owner));
+                            self.data.as_mut().expect("actual owner").vectors =
+                                Some(Arc::from(owner));
                             return Err(Box::new(self));
                         }
                     },

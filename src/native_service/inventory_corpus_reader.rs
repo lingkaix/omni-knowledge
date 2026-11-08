@@ -259,7 +259,7 @@ impl TuplePart {
     }
     pub(super) fn source(
         self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         permit: &Permit,
         observed: NativeObservedSource,
     ) -> Result<NativeSource> {
@@ -268,8 +268,8 @@ impl TuplePart {
             .check_permit(permit)
             .map_err(refused_error)?;
         anyhow::ensure!(
-            service.library == self.physical.library
-                && self.data.document.key.namespace == service.library.as_str()
+            *library_id == self.physical.library
+                && self.data.document.key.namespace == library_id.as_str()
                 && self.data.document.key.id == observed.source_id()
                 && self.data.document.locator.as_deref()
                     == Some(observed.observation().stat.path.as_str()),
@@ -278,7 +278,7 @@ impl TuplePart {
         let digest = knowledge_core::data::ContentDigest::new(self.data.document.digest.clone())?;
         let version = self.data.original_version;
         NativeSource::open_cached_query(
-            &service.library,
+            library_id,
             permit,
             observed,
             version,
@@ -311,7 +311,10 @@ impl NativeTupleRead {
         offset: u64,
     ) -> Result<Option<(NativeSource, u64)>> {
         match self.part(offset)? {
-            Some((part, next)) => Ok(Some((part.source(service, permit, observed)?, next))),
+            Some((part, next)) => Ok(Some((
+                part.source(&service.library, permit, observed)?,
+                next,
+            ))),
             None => Ok(None),
         }
     }

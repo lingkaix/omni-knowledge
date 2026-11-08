@@ -4,14 +4,13 @@ mod corpus;
 use super::*;
 use crate::native_service::source::{refused_error, selected_context};
 pub use corpus::{
-    NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
+    EncodedResponse, NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativeMetadataRun, NativePartitionResult, NativeQueryAnnotations,
-    NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
-    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeScanOccurrence, NativeScanRun,
-    NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
-    NativeQueryController,
+    NativeQueryController, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
+    NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
+    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeScanOccurrence,
+    NativeScanRun, NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
 };
 use knowledge_core::admission::Account;
 use knowledge_core::jobs::{Claim, Key, Submission, Submitted};

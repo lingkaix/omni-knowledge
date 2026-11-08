@@ -1038,6 +1038,18 @@ fn open_live_quoted(
     request: LiveQueryOptions<'_>,
     quote_all: bool,
 ) -> LiveQuery {
+    open_live_model(service, owner, session, scan, request, quote_all, None)
+}
+/// Open the same actual Query with an optional selected provider, without a second account.
+fn open_live_model(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    request: LiveQueryOptions<'_>,
+    quote_all: bool,
+    model: Option<NativeEmbeddingSelection>,
+) -> LiveQuery {
     let command = metadata_command(service, &request);
     let permit = service.native_scope(session, &command, None).unwrap();
     let scratch = holding(4 * 1024 * 1024, 0);
@@ -1063,7 +1075,7 @@ fn open_live_quoted(
         .open_corpus_tuple(owner, permit, ready(NativeTupleRead::requirement()))
         .unwrap();
     let query = NativeTupleQuery::prepare(
-        vec![NativeQueryLibrary::new(reader, inventory, None)],
+        vec![NativeQueryLibrary::new(reader, inventory, model)],
         ready(NativeTupleQuery::metadata_requirement()),
     )
     .unwrap();
@@ -2196,7 +2208,10 @@ fn pump_scan(service: &NativeLibraryService, run: &mut NativeScanRun) {
         }
     }
 }
-fn pump_bm25(service: &NativeLibraryService, run: &mut NativeBm25Run) -> Vec<(String, String, Option<f32>)> {
+fn pump_bm25(
+    service: &NativeLibraryService,
+    run: &mut NativeBm25Run,
+) -> Vec<(String, String, Option<f32>)> {
     loop {
         let step = run.step(service);
         if step.is_failed() {
@@ -2225,6 +2240,41 @@ fn finish_run<T>(
     what: &str,
 ) {
     run.unwrap_or_else(|_| panic!("{what} finish retained a scope"));
+}
+/// Find actual remaining Claim credit by reversible splits, then retain all but one byte.
+fn consume_claim_except_one(
+    query: &NativeTupleQuery,
+    claim: &Arc<knowledge_core::jobs::Claim>,
+) -> knowledge_retrieval::Work {
+    let mut low = 0u64;
+    let mut high = claim.budget().max_memory_bytes + 1;
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        match knowledge_retrieval::Work::split_claim(
+            claim,
+            query.key(),
+            Reservation {
+                memory_bytes: mid,
+                temporary_bytes: 0,
+            },
+        ) {
+            Ok(mut work) => {
+                work.rejoin(claim, query.key()).unwrap();
+                low = mid;
+            }
+            Err(_) => high = mid,
+        }
+    }
+    assert!(low > 1);
+    knowledge_retrieval::Work::split_claim(
+        claim,
+        query.key(),
+        Reservation {
+            memory_bytes: low - 1,
+            temporary_bytes: 0,
+        },
+    )
+    .unwrap()
 }
 pub(super) fn run_delivery_controls(
     service: &NativeLibraryService,
@@ -2349,10 +2399,7 @@ pub(super) fn run_delivery_controls(
             job: "delivery-single-bm25",
         },
     );
-    let mut controller = single
-        .query
-        .start_controller(service, single.claim.clone())
-        .unwrap();
+    let mut controller = single.query.start_controller(single.claim.clone()).unwrap();
     assert!(
         controller.failure().is_none(),
         "single-list controller: {:#}",
@@ -2362,7 +2409,10 @@ pub(super) fn run_delivery_controls(
     assert_eq!(result.groups.len(), 1);
     assert_eq!(&result.groups[0].library_id, service.library_id());
     assert_eq!(
-        result.groups[0].generation_id.as_ref().map(|id| id.as_str()),
+        result.groups[0]
+            .generation_id
+            .as_ref()
+            .map(|id| id.as_str()),
         Some(scan)
     );
     assert!(result.groups[0].partitioning_id.is_some());
@@ -2383,12 +2433,47 @@ pub(super) fn run_delivery_controls(
             other => panic!("single list changed the native score: {other:?}"),
         }
     }
+    let mut pressure = consume_claim_except_one(&single.query, &single.claim);
+    assert!(
+        controller
+            .encode_response(wire::Id::new("delivery-unpaid").unwrap())
+            .is_err(),
+        "one remaining Claim byte cannot fund the serialized response"
+    );
+    assert!(
+        controller.search_result().is_ok(),
+        "serialization refusal destroyed the retained result"
+    );
+    pressure.rejoin(&single.claim, single.query.key()).unwrap();
     let encoded = controller
         .encode_response(wire::Id::new("delivery-single").unwrap())
         .unwrap();
     assert!(encoded.starts_with(b"{"));
+    let encoded_len = encoded.len() as u64;
+    let encoded = Arc::new(encoded);
+    let queued = encoded.clone();
+    drop(encoded);
     finish_run(controller.finish(), "single controller");
     single.finish();
+    let before_drop = Account::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .memory_available;
+    assert!(
+        queued.starts_with(b"{"),
+        "queued bytes died with the controller"
+    );
+    drop(queued);
+    let after_drop = Account::current()
+        .unwrap()
+        .status()
+        .unwrap()
+        .memory_available;
+    assert!(
+        after_drop >= before_drop + encoded_len,
+        "encoded response credit ended before the last consumer"
+    );
     let mut lists = Vec::new();
     let mut paths = std::collections::BTreeMap::new();
     for (index, (method, keyword)) in [
@@ -2398,6 +2483,10 @@ pub(super) fn run_delivery_controls(
         (wire::SearchMethod::Literal, 1),
         (wire::SearchMethod::Files, 0),
         (wire::SearchMethod::Files, 1),
+        (wire::SearchMethod::Regex, 0),
+        (wire::SearchMethod::Regex, 1),
+        (wire::SearchMethod::Tags, 0),
+        (wire::SearchMethod::Tags, 1),
     ]
     .into_iter()
     .enumerate()
@@ -2415,7 +2504,7 @@ pub(super) fn run_delivery_controls(
         scan,
         LiveQueryOptions {
             keywords: &["alpha", "page-00"],
-            methods: &["bm25", "literal", "files"],
+            methods: &["bm25", "literal", "files", "regex", "tags"],
             required_tags: &[],
             case_sensitive: false,
             limit: 10,
@@ -2427,10 +2516,7 @@ pub(super) fn run_delivery_controls(
         },
         true,
     );
-    let controller = fused
-        .query
-        .start_controller(service, fused.claim.clone())
-        .unwrap();
+    let mut controller = fused.query.start_controller(fused.claim.clone()).unwrap();
     assert!(
         controller.failure().is_none(),
         "fused controller: {:#}",
@@ -2471,6 +2557,20 @@ pub(super) fn run_delivery_controls(
     let cloned = controller
         .test_scope_clone()
         .unwrap_or_else(|| panic!("winning delivery scope missing"));
+    Account::current()
+        .unwrap()
+        .queue()
+        .cancel(fused.job, fused.query.key())
+        .unwrap();
+    assert!(
+        controller.search_result().is_err(),
+        "cancelled controller exposed fused files"
+    );
+    assert!(
+        controller
+            .encode_response(wire::Id::new("cancelled-delivery").unwrap())
+            .is_err()
+    );
     let controller = match controller.finish() {
         Err(controller) => *controller,
         Ok(_) => panic!("scope clone must block finish"),
@@ -2677,6 +2777,8 @@ fn method_rows(
         wire::SearchMethod::Bm25 => "bm25",
         wire::SearchMethod::Literal => "literal",
         wire::SearchMethod::Files => "files",
+        wire::SearchMethod::Regex => "regex",
+        wire::SearchMethod::Tags => "tags",
         other => panic!("unexpected list method {other:?}"),
     };
     let live = open_live(
@@ -2693,25 +2795,35 @@ fn method_rows(
             max_files: 1000,
             max_bytes: 64 * 1024 * 1024,
             max_millis: 120000,
-            bm25: method != wire::SearchMethod::Files,
+            bm25: matches!(
+                method,
+                wire::SearchMethod::Bm25 | wire::SearchMethod::Literal | wire::SearchMethod::Regex
+            ),
             job: match index {
                 0 => "delivery-list-0",
                 1 => "delivery-list-1",
                 2 => "delivery-list-2",
                 3 => "delivery-list-3",
                 4 => "delivery-list-4",
-                _ => "delivery-list-5",
+                5 => "delivery-list-5",
+                6 => "delivery-list-6",
+                7 => "delivery-list-7",
+                8 => "delivery-list-8",
+                _ => "delivery-list-9",
             },
         },
     );
     let rows = match method {
         wire::SearchMethod::Bm25 => {
-            let mut run = live.query.start_bm25(live.claim.clone(), 0, keyword).unwrap();
+            let mut run = live
+                .query
+                .start_bm25(live.claim.clone(), 0, keyword)
+                .unwrap();
             let rows = pump_bm25(service, &mut run);
             finish_run(run.finish(), "list bm25");
             rows.into_iter().map(|(id, path, _)| (id, path)).collect()
         }
-        wire::SearchMethod::Literal => {
+        wire::SearchMethod::Literal | wire::SearchMethod::Regex => {
             let mut run = live
                 .query
                 .start_scan(live.claim.clone(), 0, method, keyword)
@@ -2735,7 +2847,7 @@ fn method_rows(
             finish_run(run.finish(), "list literal");
             rows
         }
-        wire::SearchMethod::Files => {
+        wire::SearchMethod::Files | wire::SearchMethod::Tags => {
             let mut run = live
                 .query
                 .start_metadata_for(live.claim.clone(), 0, Some((method, keyword)))
@@ -2752,7 +2864,12 @@ fn method_rows(
             let rows = run
                 .hits()
                 .unwrap()
-                .map(|hit| (hit.source_id.as_str().to_owned(), hit.path.as_str().to_owned()))
+                .map(|hit| {
+                    (
+                        hit.source_id.as_str().to_owned(),
+                        hit.path.as_str().to_owned(),
+                    )
+                })
                 .collect();
             finish_run(run.finish(), "list files");
             rows
@@ -2785,13 +2902,20 @@ pub(super) fn run_whole_semantic_controls(
     scan: &str,
     model: &NativeEmbeddingSelection,
 ) {
+    run_model_fusion(service, owner, session, scan, model);
     let one_path = source_root.join("raw/one.md");
     let original = fs::read(&one_path).unwrap();
-    let (before_ids, before_unavailable, one_id) =
-        semantic_pass(service, owner, session, scan, model, "whole-semantic-before");
+    let (before_ids, before_unavailable, one_id, _) = semantic_pass(
+        service,
+        owner,
+        session,
+        scan,
+        model,
+        "whole-semantic-before",
+    );
     let _ = before_ids;
     fs::write(&one_path, "mutated semantic original without alpha\n").unwrap();
-    let (after_ids, after_unavailable, _) =
+    let (after_ids, after_unavailable, _, _) =
         semantic_pass(service, owner, session, scan, model, "whole-semantic-after");
     fs::write(&one_path, original).unwrap();
     assert!(
@@ -2802,6 +2926,23 @@ pub(super) fn run_whole_semantic_controls(
         after_unavailable > before_unavailable,
         "mutated original was not counted unavailable before={before_unavailable} after={after_unavailable}"
     );
+    let binary_path = source_root.join("raw/unavailable.unknown");
+    let original_binary = fs::read(&binary_path).unwrap();
+    let (ids, before, _, binary_id) =
+        semantic_pass(service, owner, session, scan, model, "zero-row-before");
+    assert!(
+        !ids.contains(&binary_id),
+        "the mutated original must be an actual noncandidate"
+    );
+    fs::write(&binary_path, [0xfe, 1, 0xff, 2, 3]).unwrap();
+    let (ids, after, _, _) = semantic_pass(service, owner, session, scan, model, "zero-row-after");
+    fs::write(&binary_path, original_binary).unwrap();
+    assert!(!ids.contains(&binary_id));
+    assert_eq!(
+        after,
+        before + 1,
+        "noncandidate original mutation was not observed"
+    );
 }
 fn semantic_pass(
     service: &NativeLibraryService,
@@ -2810,7 +2951,7 @@ fn semantic_pass(
     scan: &str,
     model: &NativeEmbeddingSelection,
     job: &str,
-) -> (Vec<String>, u64, String) {
+) -> (Vec<String>, u64, String, String) {
     let command = wire::decode_request(
         &serde_json::to_vec(&serde_json::json!({
             "wire_version": 1,
@@ -2859,6 +3000,9 @@ fn semantic_pass(
         )
         .unwrap();
     let one_id = observed(&inventory, "raw/one.md").source_id().to_owned();
+    let binary_id = observed(&inventory, "raw/unavailable.unknown")
+        .source_id()
+        .to_owned();
     let reader = service
         .open_corpus_tuple(owner, permit, ready(NativeTupleRead::requirement()))
         .unwrap();
@@ -2941,5 +3085,218 @@ fn semantic_pass(
         .unwrap_or_else(|error| panic!("{job} was not terminal: {error:?}"));
     drop(query);
     scratch.finish().unwrap();
-    (ids, unavailable, one_id)
+    (ids, unavailable, one_id, binary_id)
+}
+
+/// Compare all method/keyword lists with one actual model-bound controller, then tag-before-limit.
+fn run_model_fusion(
+    service: &NativeLibraryService,
+    owner: &Owner,
+    session: &Session,
+    scan: &str,
+    model: &NativeEmbeddingSelection,
+) {
+    for (case, required_tags) in [
+        ("all-methods", &[][..]),
+        ("all-methods-tag-miss", &["absent-model-tag"][..]),
+    ] {
+        let mut lists = Vec::new();
+        let mut paths = std::collections::BTreeMap::new();
+        for keyword in 0..if required_tags.is_empty() { 2 } else { 0 } {
+            for method in [
+                wire::SearchMethod::Bm25,
+                wire::SearchMethod::Literal,
+                wire::SearchMethod::Regex,
+                wire::SearchMethod::Files,
+                wire::SearchMethod::Tags,
+                wire::SearchMethod::Semantic,
+            ] {
+                let method_name = match method {
+                    wire::SearchMethod::Bm25 => "bm25",
+                    wire::SearchMethod::Literal => "literal",
+                    wire::SearchMethod::Regex => "regex",
+                    wire::SearchMethod::Files => "files",
+                    wire::SearchMethod::Tags => "tags",
+                    wire::SearchMethod::Semantic => "semantic",
+                };
+                let job = format!("model-list-{keyword}-{method_name}");
+                let live = open_live_model(
+                    service,
+                    owner,
+                    session,
+                    scan,
+                    LiveQueryOptions {
+                        keywords: &["alpha", "page-00"],
+                        methods: &[method_name],
+                        required_tags,
+                        case_sensitive: false,
+                        limit: 5,
+                        max_files: 20000,
+                        max_bytes: 512 * 1024 * 1024,
+                        max_millis: 120000,
+                        bm25: false,
+                        job: &job,
+                    },
+                    true,
+                    (method == wire::SearchMethod::Semantic).then(|| model.clone()),
+                );
+                let rows: Vec<(String, String)> = match method {
+                    wire::SearchMethod::Bm25 => {
+                        let mut run = live
+                            .query
+                            .start_bm25(live.claim.clone(), 0, keyword)
+                            .unwrap();
+                        let rows = pump_bm25(service, &mut run)
+                            .into_iter()
+                            .map(|(id, path, _)| (id, path))
+                            .collect();
+                        finish_run(run.finish(), "model fusion bm25");
+                        rows
+                    }
+                    wire::SearchMethod::Literal | wire::SearchMethod::Regex => {
+                        let mut run = live
+                            .query
+                            .start_scan(live.claim.clone(), 0, method, keyword)
+                            .unwrap();
+                        pump_scan(service, &mut run);
+                        let rows = run
+                            .ranked()
+                            .unwrap()
+                            .iter()
+                            .map(|id| {
+                                (
+                                    id.clone(),
+                                    run.source_annotations(id)
+                                        .unwrap()
+                                        .unwrap()
+                                        .path
+                                        .as_str()
+                                        .to_owned(),
+                                )
+                            })
+                            .collect();
+                        finish_run(run.finish(), "model fusion scan");
+                        rows
+                    }
+                    wire::SearchMethod::Files | wire::SearchMethod::Tags => {
+                        let mut run = live
+                            .query
+                            .start_metadata_for(live.claim.clone(), 0, Some((method, keyword)))
+                            .unwrap();
+                        loop {
+                            let step = run.step(service);
+                            assert!(!step.is_failed(), "model metadata: {:?}", run.failure());
+                            if step.is_complete() {
+                                break;
+                            }
+                        }
+                        let rows = run
+                            .hits()
+                            .unwrap()
+                            .map(|hit| {
+                                (
+                                    hit.source_id.as_str().to_owned(),
+                                    hit.path.as_str().to_owned(),
+                                )
+                            })
+                            .collect();
+                        finish_run(run.finish(), "model fusion metadata");
+                        rows
+                    }
+                    wire::SearchMethod::Semantic => {
+                        let run =
+                            live.query
+                                .start_semantic(service, live.claim.clone(), 0, keyword);
+                        assert!(
+                            run.failure().is_none(),
+                            "model semantic: {:?}",
+                            run.failure()
+                        );
+                        let rows = run
+                            .hits()
+                            .unwrap()
+                            .iter()
+                            .map(|(id, _)| {
+                                (
+                                    id.clone(),
+                                    run.source_annotations(id)
+                                        .unwrap()
+                                        .unwrap()
+                                        .path
+                                        .as_str()
+                                        .to_owned(),
+                                )
+                            })
+                            .collect();
+                        finish_run(run.finish(), "model fusion semantic");
+                        rows
+                    }
+                };
+                lists.push(rows.iter().map(|(id, _)| id.clone()).collect());
+                paths.extend(rows);
+                live.finish();
+            }
+        }
+        let expected = fused_order(&paths, &lists, 5);
+        let live = open_live_model(
+            service,
+            owner,
+            session,
+            scan,
+            LiveQueryOptions {
+                keywords: &["alpha", "page-00"],
+                methods: &["semantic", "tags", "files", "regex", "literal", "bm25"],
+                required_tags,
+                case_sensitive: false,
+                limit: 5,
+                max_files: 20000,
+                max_bytes: 512 * 1024 * 1024,
+                max_millis: 120000,
+                bm25: false,
+                job: case,
+            },
+            true,
+            Some(model.clone()),
+        );
+        let mut controller = live.query.start_controller(live.claim.clone()).unwrap();
+        assert!(
+            controller.failure().is_none(),
+            "model controller: {:?}",
+            controller.failure()
+        );
+        let result = controller.search_result().unwrap();
+        let got: Vec<_> = result.groups[0]
+            .files
+            .iter()
+            .map(|hit| hit.source.source_id.as_str().to_owned())
+            .collect();
+        assert_eq!(got, expected, "all-method RRF order");
+        assert!(
+            result.groups[0].coverage.unsupported.get() >= 1,
+            "metadata-first method order discarded the actual unsupported binary observation"
+        );
+        if required_tags.is_empty() {
+            assert!(!got.is_empty());
+            assert!(
+                result.groups[0]
+                    .files
+                    .iter()
+                    .flat_map(|file| &file.evidence)
+                    .any(|evidence| evidence.method == wire::SearchMethod::Semantic
+                        && evidence.model_space.as_deref() == Some("contract-only-not-WeMM"))
+            );
+        } else {
+            assert!(
+                got.is_empty(),
+                "required tag miss must filter every method before limiting"
+            );
+        }
+        let bytes = controller
+            .encode_response(wire::Id::new(case).unwrap())
+            .unwrap();
+        assert!(bytes.starts_with(b"{"));
+        drop(bytes);
+        finish_run(controller.finish(), "model fusion controller");
+        live.finish();
+    }
 }

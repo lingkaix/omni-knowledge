@@ -8,13 +8,13 @@ use super::source::refused_error;
 use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
-    NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
+    EncodedResponse, NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
     NativeCorpusProgress, NativeMetadataRun, NativePartitionResult, NativeQueryAnnotations,
-    NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
-    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-    NativeQueryController, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
+    NativeQueryController, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
+    NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
+    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
+    NativeRefreshScopeError, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
     NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
 };
 use knowledge_core::{

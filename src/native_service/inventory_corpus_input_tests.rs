@@ -228,6 +228,73 @@ fn actual_two_library_inputs_share_prepaid_span_and_original_deadline() {
     });
     assert!(bad.is_err());
     assert_eq!(account.status().unwrap().queue.unsettled, 0);
+    // Quote one sequential peak plus every retained list inside the unchanged wire cap.
+    let need = query.requirement_all().unwrap();
+    let submitted = query
+        .submit(NativeJobPlan {
+            operation_id: "two-library-delivery",
+            job_id: "two-library-delivery",
+            budget: Budget {
+                max_files: 1000,
+                max_bytes: 64 * 1024 * 1024,
+                max_millis: 60000,
+                max_memory_bytes: need.memory_bytes,
+            },
+            reservation: need,
+            priority: knowledge_core::jobs::Priority::Normal,
+            max_attempts: 1,
+        })
+        .unwrap();
+    let claim = Arc::new(account.queue().claim(Instant::now()).unwrap().unwrap());
+    let mut controller = query.start_controller(claim.clone()).unwrap();
+    assert!(
+        controller.failure().is_none(),
+        "actual two-library delivery: {:?}",
+        controller.failure()
+    );
+    let result = controller.search_result().unwrap();
+    assert_eq!(result.groups.len(), 2);
+    for (group, service) in result.groups.iter().zip(&services) {
+        assert_eq!(&group.library_id, service.library_id());
+        assert!(
+            !group.files.is_empty(),
+            "library lost its own matching files"
+        );
+        assert!(
+            group
+                .files
+                .iter()
+                .all(|file| &file.source.library_id == service.library_id())
+        );
+    }
+    let first_path = homes[0].path().join("raw/native.md");
+    let original = fs::read(&first_path).unwrap();
+    fs::write(&first_path, "changed after both groups completed").unwrap();
+    assert!(
+        controller.search_result().is_err(),
+        "earlier-library winner lost its final dependency check"
+    );
+    assert!(
+        controller
+            .encode_response(wire::Id::new("two-library-stale").unwrap())
+            .is_err()
+    );
+    let (returned_query, returned_claim) = controller
+        .finish()
+        .unwrap_or_else(|_| panic!("two-library delivery retained scopes"));
+    drop((returned_query, returned_claim));
+    fs::write(&first_path, original).unwrap();
+    let claim =
+        Arc::try_unwrap(claim).unwrap_or_else(|_| panic!("two-library delivery retained Claim"));
+    account
+        .queue()
+        .settle(
+            &claim,
+            query.key(),
+            knowledge_core::jobs::Outcome::Completed,
+        )
+        .unwrap();
+    account.queue().retire(submitted.job, query.key()).unwrap();
     drop(query);
     // Independent native FD observation: only ONE tuple may open when the second has one
     // remaining object. Passing the original full limit to each child actually opens TWO.

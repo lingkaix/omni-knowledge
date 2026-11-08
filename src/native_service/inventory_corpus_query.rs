@@ -9,8 +9,8 @@ pub(super) use budget::{DataAmount, QueryBudgetExhausted, ReadAllowance};
 #[path = "inventory_corpus_controller.rs"]
 mod controller;
 pub use controller::{
-    NativeBm25Run, NativeMetadataRun, NativeQueryController, NativeQueryStep, NativeScanOccurrence,
-    NativeScanRun,
+    EncodedResponse, NativeBm25Run, NativeMetadataRun, NativeQueryController, NativeQueryStep,
+    NativeScanOccurrence, NativeScanRun,
 };
 #[path = "inventory_corpus_query_embedding.rs"]
 mod keyword_embedding;
@@ -79,6 +79,52 @@ impl NativeQueryPageRefusal {
     /// Return the actual owner; destroy page data before exact same-Claim rejoin.
     pub fn into_parts(self) -> (anyhow::Error, NativeQueryPageLoan) {
         (self.cause, self.loan)
+    }
+}
+/// Counters over the producer's contiguous source groups; no corpus-sized identity set.
+#[derive(Default)]
+struct QueryCoverage {
+    last: Option<String>,
+    discovered: u64,
+    verified: u64,
+    unavailable: u64,
+    unsupported: u64,
+    failed: u64,
+    pending_extraction: u64,
+}
+impl QueryCoverage {
+    /// Begin a source once across its consecutive representation windows.
+    fn begin(&mut self, id: &str, status: &str) -> bool {
+        if self.last.as_deref() == Some(id) {
+            return false;
+        }
+        self.last = Some(id.to_owned());
+        self.discovered += 1;
+        match status {
+            "metadata-only" => self.unsupported += 1,
+            "failed" => self.failed += 1,
+            "partial" => self.pending_extraction += 1,
+            _ => {}
+        }
+        true
+    }
+    /// Project observed indexed coverage without multiplying method or keyword visits.
+    fn wire(&self) -> wire::Coverage {
+        wire::Coverage {
+            discovered: wire::U64::new(self.discovered),
+            verified: wire::U64::new(self.verified),
+            unavailable: wire::U64::new(self.unavailable),
+            pending_hash: wire::U64::new(0),
+            pending_extraction: wire::U64::new(self.pending_extraction),
+            pending_embedding: wire::U64::new(0),
+            stale: wire::U64::new(0),
+            unsupported: wire::U64::new(self.unsupported),
+            failed: wire::U64::new(self.failed),
+            excluded: wire::U64::new(0),
+            enumeration: wire::Enumeration::Complete,
+            result_extent: wire::ResultExtent::TopK,
+            stopped_reason: None,
+        }
     }
 }
 pub struct NativeTupleQuery {
@@ -730,13 +776,13 @@ impl NativeTupleQuery {
         else {
             return Ok(None);
         };
-        self.source_part(service, claim, library, observed, part, next)
+        self.source_part(&service.library, claim, library, observed, part, next)
             .map(Some)
     }
     // Reuse the SAME actual decoded FD/receipt, never cached permission or a path/hash reopen.
     fn source_part(
         &self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         claim: &Arc<Claim>,
         library: usize,
         observed: NativeObservedSource,
@@ -754,19 +800,19 @@ impl NativeTupleQuery {
             "foreign Query inventory owner"
         );
         part.check_reader(&selected.reader)?;
+        anyhow::ensure!(
+            *library_id == selected.reader.physical.library,
+            "source binding differs from actual selected tuple library"
+        );
         let pointer_path = format!("sources/{}.md", observed.source_id());
         let pointer_rel = wire::RelativePath::new(&pointer_path)?;
-        let pointer = match selected
-            .reader
-            .permit
-            .check_path(&service.library, &pointer_rel)
-        {
+        let pointer = match selected.reader.permit.check_path(library_id, &pointer_rel) {
             Err(wire::ErrorCode::NotExposed) => None,
             Err(code) => return Err(refused_error(code)),
             Ok(()) => match selected
                 .reader
                 .permit
-                .with_root(&service.library, |root| {
+                .with_root(library_id, |root| {
                     Ok(LibraryHost::open_root(root, pointer_rel.as_str()))
                 })
                 .map_err(refused_error)?
@@ -823,7 +869,7 @@ impl NativeTupleQuery {
                 .retain_check(Arc::new(move || checked.check_scope_claim(&live).is_ok()))
                 .map_err(refused_error)?;
             let data = part.data.clone();
-            let source = part.source(service, &scope, observed)?;
+            let source = part.source(library_id, &scope, observed)?;
             let (pointer_title, pointer_descriptions, pointer_tags, pointer_path) =
                 if let Some((pointer_file, pointer_meta, pointer_rel)) = pointer {
                     self.cause.admit_object(claim)?;
@@ -843,7 +889,7 @@ impl NativeTupleQuery {
                         "pointer changed after read"
                     );
                     LibraryHost::track_version(
-                        &service.library,
+                        library_id,
                         pointer_rel.as_str(),
                         &pointer_file,
                         &pointer_meta,

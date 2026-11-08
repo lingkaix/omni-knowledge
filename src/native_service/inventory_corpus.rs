@@ -19,12 +19,13 @@ use std::sync::{Arc, Mutex};
 #[path = "inventory_corpus_query.rs"]
 mod query;
 pub use query::{
-    NativeBm25Run, NativeMetadataRun, NativePartitionResult, NativeQueryAnnotations,
-    NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
-    NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-    NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-    NativeQueryStageResources, NativeQueryStep, NativeScanOccurrence, NativeScanRun,
-    NativeSemanticRun, NativeTupleQuery, NativeWholeSemanticRun, NativeQueryController,
+    EncodedResponse, NativeBm25Run, NativeMetadataRun, NativePartitionResult,
+    NativeQueryAnnotations, NativeQueryController, NativeQueryEmbedding, NativeQueryInputs,
+    NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
+    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
+    NativeScanOccurrence, NativeScanRun, NativeSemanticRun, NativeTupleQuery,
+    NativeWholeSemanticRun,
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;

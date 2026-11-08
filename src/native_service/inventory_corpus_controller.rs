@@ -49,6 +49,7 @@ struct Data {
     source: u64,
     partitions: u64,
     unavailable_parts: u64,
+    coverage: QueryCoverage,
     done: bool,
     failure: Option<anyhow::Error>,
     // Ablation ONLY: actual mature partition lists over this 75-source fixture. Base admin
@@ -244,6 +245,7 @@ impl NativeTupleQuery {
                 source: 0,
                 partitions: 0,
                 unavailable_parts: 0,
+                coverage: QueryCoverage::default(),
                 done: false,
                 failure: None,
                 #[cfg(test)]
@@ -415,6 +417,10 @@ impl NativeBm25Run {
     }
     /// A failed step is terminal, not an invitation to retry effects or release actual owners.
     pub fn step(&mut self, service: &NativeLibraryService) -> NativeQueryStep {
+        self.step_library(&service.library)
+    }
+    /// Route through this run's actual selected reader; the ID alone grants no access.
+    fn step_library(&mut self, library_id: &wire::Id) -> NativeQueryStep {
         let Some(data) = self.data.as_ref() else {
             return NativeQueryStep::Failed;
         };
@@ -424,7 +430,7 @@ impl NativeBm25Run {
         if data.done {
             return NativeQueryStep::Complete;
         }
-        match self.advance(service) {
+        match self.advance(library_id) {
             Ok(true) => NativeQueryStep::Complete,
             Ok(false) => NativeQueryStep::Progress,
             Err(error) => {
@@ -493,12 +499,12 @@ impl NativeBm25Run {
             Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
         }
     }
-    fn advance(&mut self, service: &NativeLibraryService) -> Result<bool> {
+    fn advance(&mut self, library_id: &wire::Id) -> Result<bool> {
         self.check()?;
         let library = &self.query.cause.libraries[self.library];
         anyhow::ensure!(
-            service.library == library.reader.physical.library,
-            "actual service/library owner differs"
+            *library_id == library.reader.physical.library,
+            "actual library_id/library owner differs"
         );
         let at = self.data.as_ref().expect("actual owner").catalog;
         let catalog = library.reader.physical.open_verified_admitted(
@@ -580,6 +586,12 @@ impl NativeBm25Run {
                 continue;
             }
             let source_id = expected.document.key.id.as_str();
+            let first_source = self
+                .data
+                .as_mut()
+                .expect("actual owner")
+                .coverage
+                .begin(source_id, &expected.status);
             let mut observed = self
                 .data
                 .as_ref()
@@ -615,33 +627,50 @@ impl NativeBm25Run {
             }
             let Some(observed) = observed else {
                 if scan_drift {
+                    if first_source {
+                        self.data
+                            .as_mut()
+                            .expect("actual owner")
+                            .coverage
+                            .unavailable += 1;
+                    }
                     self.data.as_mut().expect("actual owner").unavailable_parts += 1;
                     self.data.as_mut().expect("actual owner").source = after;
                     continue;
                 }
                 bail!("actual M1 page source absent");
             };
-            let result =
-                self.query
-                    .source_part(service, &self.claim, self.library, observed, part, after);
+            let result = self.query.source_part(
+                library_id,
+                &self.claim,
+                self.library,
+                observed,
+                part,
+                after,
+            );
             match result {
-                Ok(source) => match source.matches_required_tags() {
-                    Ok(true) => self
-                        .data
-                        .as_mut()
-                        .expect("actual owner")
-                        .pending
-                        .push(source),
-                    Ok(false) => {
-                        self.close_source(source)?;
-                        self.data.as_mut().expect("actual owner").source = after;
-                        continue;
+                Ok(source) => {
+                    if first_source {
+                        self.data.as_mut().expect("actual owner").coverage.verified += 1;
                     }
-                    Err(error) => {
-                        self.close_source(source)?;
-                        return Err(error);
+                    match source.matches_required_tags() {
+                        Ok(true) => self
+                            .data
+                            .as_mut()
+                            .expect("actual owner")
+                            .pending
+                            .push(source),
+                        Ok(false) => {
+                            self.close_source(source)?;
+                            self.data.as_mut().expect("actual owner").source = after;
+                            continue;
+                        }
+                        Err(error) => {
+                            self.close_source(source)?;
+                            return Err(error);
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     // An actual owning scope refusal is NEVER downgraded to an omitted DTO row.
                     if error
@@ -651,6 +680,13 @@ impl NativeBm25Run {
                             e.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
                         })
                     {
+                        if first_source {
+                            self.data
+                                .as_mut()
+                                .expect("actual owner")
+                                .coverage
+                                .unavailable += 1;
+                        }
                         self.data.as_mut().expect("actual owner").unavailable_parts += 1;
                     } else {
                         return Err(error);
@@ -1039,6 +1075,9 @@ struct MetadataData {
     credits: Vec<Holding>,
     offset: u64,
     unavailable_sources: u64,
+    discovered: u64,
+    verified: u64,
+    pending_hash: u64,
     metadata_capacity: u64,
     metadata_used: u64,
     done: bool,
@@ -1048,6 +1087,8 @@ struct MetadataData {
 enum RowBuild {
     Skip {
         unavailable: bool,
+        verified: bool,
+        pending_hash: bool,
     },
     Keep {
         annotations: NativeQueryAnnotations,
@@ -1177,6 +1218,9 @@ impl NativeTupleQuery {
                 credits: Vec::new(),
                 offset: 0,
                 unavailable_sources: 0,
+                discovered: 0,
+                verified: 0,
+                pending_hash: 0,
                 metadata_capacity: 0,
                 metadata_used: 0,
                 done: false,
@@ -1281,7 +1325,9 @@ impl NativeMetadataRun {
         }
         Ok(())
     }
-    pub(in crate::native_service) fn take_scopes(&mut self) -> Vec<(NativeQueryAnnotations, Permit)> {
+    pub(in crate::native_service) fn take_scopes(
+        &mut self,
+    ) -> Vec<(NativeQueryAnnotations, Permit)> {
         self.data
             .as_mut()
             .map(|data| {
@@ -1315,6 +1361,10 @@ impl NativeMetadataRun {
     }
     /// A failed step is terminal. The actual owner keeps its page, scope, and Claim until finish.
     pub fn step(&mut self, service: &NativeLibraryService) -> NativeQueryStep {
+        self.step_library(&service.library)
+    }
+    /// Route through this run's actual selected reader; the ID alone grants no access.
+    fn step_library(&mut self, library_id: &wire::Id) -> NativeQueryStep {
         let Some(data) = self.data.as_ref() else {
             return NativeQueryStep::Failed;
         };
@@ -1324,7 +1374,7 @@ impl NativeMetadataRun {
         if data.done {
             return NativeQueryStep::Complete;
         }
-        match self.advance(service) {
+        match self.advance(library_id) {
             Ok(true) => NativeQueryStep::Complete,
             Ok(false) => NativeQueryStep::Progress,
             Err(error) => {
@@ -1542,15 +1592,15 @@ impl NativeMetadataRun {
         };
         Ok(query.limit.get() as usize)
     }
-    fn advance(&mut self, service: &NativeLibraryService) -> Result<bool> {
+    fn advance(&mut self, library_id: &wire::Id) -> Result<bool> {
         self.query.cause.check_claim(&self.claim)?;
         anyhow::ensure!(
-            service.library
+            *library_id
                 == self.query.cause.libraries[self.library]
                     .reader
                     .physical
                     .library,
-            "actual service/library owner differs"
+            "actual library_id/library owner differs"
         );
         if self.data.as_ref().expect("actual owner").done {
             return Ok(true);
@@ -1564,7 +1614,7 @@ impl NativeMetadataRun {
         let next_offset = page.next_offset();
         self.data.as_mut().expect("actual owner").page = Some(page);
         for observed in observations {
-            self.consider(service, observed)?;
+            self.consider(library_id, observed)?;
         }
         if complete {
             self.release_page()?;
@@ -1576,21 +1626,18 @@ impl NativeMetadataRun {
         self.data.as_mut().expect("actual owner").offset = next_offset;
         Ok(false)
     }
-    fn consider(
-        &mut self,
-        service: &NativeLibraryService,
-        observed: NativeObservedSource,
-    ) -> Result<()> {
+    fn consider(&mut self, library_id: &wire::Id, observed: NativeObservedSource) -> Result<()> {
         self.query.cause.check_claim(&self.claim)?;
         let path = wire::RelativePath::new(observed.observation().stat.path.as_str())?;
         let permit = &self.query.cause.libraries[self.library].reader.permit;
-        match permit.check_path(&service.library, &path) {
+        match permit.check_path(library_id, &path) {
             Err(wire::ErrorCode::NotExposed) => return Ok(()),
             Err(code) => return Err(refused_error(code)),
             Ok(()) => {}
         }
+        self.data.as_mut().expect("actual owner").discovered += 1;
         let pointer_rel = wire::RelativePath::new(format!("sources/{}.md", observed.source_id()))?;
-        let pointer = open_pointer(permit, &service.library, pointer_rel)?;
+        let pointer = open_pointer(permit, library_id, pointer_rel)?;
         let pointer_extra = pointer_scope_extra(pointer.as_ref())?;
         let memory_bytes = (1024 * 1024u64)
             .checked_add(
@@ -1610,8 +1657,15 @@ impl NativeMetadataRun {
                 },
             )
             .map_err(refused_error)?;
-        match self.classify(service, &scope, observed, path, pointer) {
-            Ok(RowBuild::Skip { unavailable }) => {
+        match self.classify(library_id, &scope, observed, path, pointer) {
+            Ok(RowBuild::Skip {
+                unavailable,
+                verified,
+                pending_hash,
+            }) => {
+                let data = self.data.as_mut().expect("actual owner");
+                data.verified += u64::from(verified);
+                data.pending_hash += u64::from(pending_hash);
                 if unavailable {
                     self.data
                         .as_mut()
@@ -1624,11 +1678,14 @@ impl NativeMetadataRun {
                 annotations,
                 unavailable,
             }) => {
+                let data = self.data.as_mut().expect("actual owner");
+                data.verified += u64::from(annotations.digest_state == wire::DigestState::Verified);
+                data.pending_hash += u64::from(
+                    annotations.availability == wire::Availability::Available
+                        && annotations.digest_state == wire::DigestState::Unverified,
+                );
                 if unavailable {
-                    self.data
-                        .as_mut()
-                        .expect("actual owner")
-                        .unavailable_sources += 1;
+                    data.unavailable_sources += 1;
                 }
                 self.retain(annotations, scope)
             }
@@ -1637,7 +1694,7 @@ impl NativeMetadataRun {
     }
     fn classify(
         &self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         scope: &Permit,
         observed: NativeObservedSource,
         path: wire::RelativePath,
@@ -1649,12 +1706,12 @@ impl NativeMetadataRun {
             .reader
             .permit
             .clone();
-        let library_id = service.library.clone();
+        let watched_library = library_id.clone();
         let watched = path.clone();
         scope
             .retain_check(Arc::new(move || {
                 checked.check_scope_claim(&live).is_ok()
-                    && path_permit.check_path(&library_id, &watched).is_ok()
+                    && path_permit.check_path(&watched_library, &watched).is_ok()
             }))
             .map_err(refused_error)?;
         let source_id = observed.source_id().to_owned();
@@ -1672,13 +1729,17 @@ impl NativeMetadataRun {
         let unavailable;
         if available {
             let opened = scope
-                .with_root(&service.library, |root| {
+                .with_root(library_id, |root| {
                     Ok(LibraryHost::open_root(root, path.as_str()))
                 })
                 .map_err(refused_error)?;
             match opened {
                 Err(wire::ErrorCode::NotFound) => {
-                    return Ok(RowBuild::Skip { unavailable: true });
+                    return Ok(RowBuild::Skip {
+                        unavailable: true,
+                        verified: false,
+                        pending_hash: false,
+                    });
                 }
                 Err(wire::ErrorCode::Denied) => {
                     digest = None;
@@ -1696,10 +1757,14 @@ impl NativeMetadataRun {
                             .check_file(&orig_file)
                             .is_err()
                     {
-                        return Ok(RowBuild::Skip { unavailable: true });
+                        return Ok(RowBuild::Skip {
+                            unavailable: true,
+                            verified: false,
+                            pending_hash: false,
+                        });
                     }
                     LibraryHost::track_version(
-                        &service.library,
+                        library_id,
                         path.as_str(),
                         &orig_file,
                         &orig_meta,
@@ -1733,7 +1798,7 @@ impl NativeMetadataRun {
         }
         let (pointer_title, pointer_descriptions, pointer_tags, pointer_path) =
             if let Some(pointer) = pointer {
-                let parsed = self.read_pointer(service, scope, pointer)?;
+                let parsed = self.read_pointer(library_id, scope, pointer)?;
                 (
                     parsed.title,
                     parsed.descriptions,
@@ -1764,7 +1829,12 @@ impl NativeMetadataRun {
                 unavailable,
             })
         } else {
-            Ok(RowBuild::Skip { unavailable })
+            Ok(RowBuild::Skip {
+                unavailable,
+                verified: annotations.digest_state == wire::DigestState::Verified,
+                pending_hash: annotations.availability == wire::Availability::Available
+                    && annotations.digest_state == wire::DigestState::Unverified,
+            })
         }
     }
     fn read_page_frontmatter(&self, file: &File, len: u64) -> Result<PageFrontmatter> {
@@ -1827,7 +1897,7 @@ impl NativeMetadataRun {
     }
     fn read_pointer(
         &self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         scope: &Permit,
         pointer: PointerOpen,
     ) -> Result<PointerMarkdown> {
@@ -1856,7 +1926,7 @@ impl NativeMetadataRun {
             "pointer changed after read"
         );
         LibraryHost::track_version(
-            &service.library,
+            library_id,
             pointer_rel.as_str(),
             &pointer_file,
             &pointer_meta,
@@ -2147,6 +2217,7 @@ struct AdmittedScan {
     id: String,
     path: String,
     origin: u64,
+    representation_digest: String,
     annotations: NativeQueryAnnotations,
 }
 struct ScanData {
@@ -2163,6 +2234,7 @@ struct ScanData {
     catalog: u64,
     source: u64,
     unavailable_parts: u64,
+    coverage: QueryCoverage,
     done: bool,
     closing: bool,
     failure: Option<anyhow::Error>,
@@ -2244,6 +2316,7 @@ impl NativeTupleQuery {
                 catalog: 0,
                 source: 0,
                 unavailable_parts: 0,
+                coverage: QueryCoverage::default(),
                 done: false,
                 closing: false,
                 failure: None,
@@ -2340,6 +2413,10 @@ impl NativeScanRun {
         pages
     }
     pub fn step(&mut self, service: &NativeLibraryService) -> NativeQueryStep {
+        self.step_library(&service.library)
+    }
+    /// Route through this run's actual selected reader; the ID alone grants no access.
+    fn step_library(&mut self, library_id: &wire::Id) -> NativeQueryStep {
         let Some(data) = self.data.as_ref() else {
             return NativeQueryStep::Failed;
         };
@@ -2349,7 +2426,7 @@ impl NativeScanRun {
         if data.done {
             return NativeQueryStep::Complete;
         }
-        match self.advance(service) {
+        match self.advance(library_id) {
             Ok(true) => NativeQueryStep::Complete,
             Ok(false) => NativeQueryStep::Progress,
             Err(error) => {
@@ -2391,9 +2468,9 @@ impl NativeScanRun {
         if let Some((_, page)) = data.page.take() {
             match page.into_funding() {
                 Ok(mut credit) => {
-                    if let Err(error) = Account::current()
-                        .and_then(|account| account.rejoin_claim(&mut credit, &self.claim, self.query.key()))
-                    {
+                    if let Err(error) = Account::current().and_then(|account| {
+                        account.rejoin_claim(&mut credit, &self.claim, self.query.key())
+                    }) {
                         data.credits.push(credit);
                         return Err(error.into());
                     }
@@ -2442,12 +2519,12 @@ impl NativeScanRun {
             Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
         }
     }
-    fn advance(&mut self, service: &NativeLibraryService) -> Result<bool> {
+    fn advance(&mut self, library_id: &wire::Id) -> Result<bool> {
         self.check()?;
         let library = &self.query.cause.libraries[self.library];
         anyhow::ensure!(
-            service.library == library.reader.physical.library,
-            "actual service/library owner differs"
+            *library_id == library.reader.physical.library,
+            "actual library_id/library owner differs"
         );
         let at = self.data.as_ref().expect("actual owner").catalog;
         let catalog = library.reader.physical.open_verified_admitted(
@@ -2520,6 +2597,12 @@ impl NativeScanRun {
                 continue;
             }
             let source_id = expected.document.key.id.as_str();
+            let first_source = self
+                .data
+                .as_mut()
+                .expect("actual owner")
+                .coverage
+                .begin(source_id, &expected.status);
             let mut observed = self
                 .data
                 .as_ref()
@@ -2555,41 +2638,63 @@ impl NativeScanRun {
             }
             let Some(observed) = observed else {
                 if scan_drift {
+                    if first_source {
+                        self.data
+                            .as_mut()
+                            .expect("actual owner")
+                            .coverage
+                            .unavailable += 1;
+                    }
                     self.data.as_mut().expect("actual owner").unavailable_parts += 1;
                     self.data.as_mut().expect("actual owner").source = after;
                     continue;
                 }
                 bail!("actual M1 page source absent");
             };
-            let result =
-                self.query
-                    .source_part(service, &self.claim, self.library, observed, part, after);
+            let result = self.query.source_part(
+                library_id,
+                &self.claim,
+                self.library,
+                observed,
+                part,
+                after,
+            );
             match result {
-                Ok(source) => match source.matches_required_tags() {
-                    Ok(true) => self
-                        .data
-                        .as_mut()
-                        .expect("actual owner")
-                        .pending
-                        .push(source),
-                    Ok(false) => {
-                        self.close_source(source)?;
-                        self.data.as_mut().expect("actual owner").source = after;
-                        continue;
+                Ok(source) => {
+                    if first_source {
+                        self.data.as_mut().expect("actual owner").coverage.verified += 1;
                     }
-                    Err(error) => {
-                        self.close_source(source)?;
-                        return Err(error);
+                    match source.matches_required_tags() {
+                        Ok(true) => self
+                            .data
+                            .as_mut()
+                            .expect("actual owner")
+                            .pending
+                            .push(source),
+                        Ok(false) => {
+                            self.close_source(source)?;
+                            self.data.as_mut().expect("actual owner").source = after;
+                            continue;
+                        }
+                        Err(error) => {
+                            self.close_source(source)?;
+                            return Err(error);
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     if error
                         .downcast_ref::<crate::native_service::NativeRefreshScopeError>()
-                        .is_none()
-                        && error.chain().any(|cause| {
-                            cause.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
-                        })
-                    {
+                        .is_none() && error.chain().any(|cause| {
+                        cause.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
+                    }) {
+                        if first_source {
+                            self.data
+                                .as_mut()
+                                .expect("actual owner")
+                                .coverage
+                                .unavailable += 1;
+                        }
                         self.data.as_mut().expect("actual owner").unavailable_parts += 1;
                     } else {
                         return Err(error);
@@ -2607,13 +2712,9 @@ impl NativeScanRun {
             .iter()
             .map(|source| AdmittedScan {
                 id: source.part.document.key.id.clone(),
-                path: source
-                    .part
-                    .document
-                    .locator
-                    .clone()
-                    .unwrap_or_default(),
+                path: source.part.document.locator.clone().unwrap_or_default(),
                 origin: source.part.representation_start,
+                representation_digest: source.part.representation_digest.clone(),
                 annotations: source.annotations().clone(),
             })
             .collect();
@@ -2663,7 +2764,7 @@ impl NativeScanRun {
                         end,
                         snippet: hit.snippet.chars().take(500).collect(),
                         metadata: false,
-                        representation_digest: hit.representation_digest,
+                        representation_digest: source.representation_digest.clone(),
                         processor: hit.processor,
                         source_digest: hit.digest,
                     });
@@ -2688,21 +2789,28 @@ impl NativeScanRun {
         };
         for item in &admitted {
             let empty = found.get(&item.id).is_none_or(|items| items.is_empty());
-            if empty && item.annotations.matches_file_keyword(&keyword, case_sensitive) {
-                found.entry(item.id.clone()).or_default().push(ScanOccurrence {
-                    start: None,
-                    end: None,
-                    snippet: item.annotations.title.chars().take(500).collect(),
-                    metadata: true,
-                    representation_digest: String::new(),
-                    processor: None,
-                    source_digest: item
-                        .annotations
-                        .digest
-                        .as_ref()
-                        .map(|digest| digest.as_str().to_owned())
-                        .unwrap_or_default(),
-                });
+            if empty
+                && item
+                    .annotations
+                    .matches_file_keyword(&keyword, case_sensitive)
+            {
+                found
+                    .entry(item.id.clone())
+                    .or_default()
+                    .push(ScanOccurrence {
+                        start: None,
+                        end: None,
+                        snippet: item.annotations.title.chars().take(500).collect(),
+                        metadata: true,
+                        representation_digest: String::new(),
+                        processor: None,
+                        source_digest: item
+                            .annotations
+                            .digest
+                            .as_ref()
+                            .map(|digest| digest.as_str().to_owned())
+                            .unwrap_or_default(),
+                    });
             }
         }
         let mut ranked: Vec<&AdmittedScan> = admitted
@@ -2727,9 +2835,12 @@ impl NativeScanRun {
             }
             let incoming = found.remove(&item.id).unwrap_or_default();
             let data = self.data.as_mut().expect("actual owner");
-            let file = data.files.entry(item.id.clone()).or_insert_with(|| ScanFile {
-                occurrences: Vec::new(),
-            });
+            let file = data
+                .files
+                .entry(item.id.clone())
+                .or_insert_with(|| ScanFile {
+                    occurrences: Vec::new(),
+                });
             for occurrence in incoming {
                 if file.occurrences.len() >= limit {
                     break;
@@ -2877,7 +2988,9 @@ impl NativeScanRun {
             let mut credits = std::mem::take(&mut data.credits).into_iter();
             while let Some(mut credit) = credits.next() {
                 if Account::current()
-                    .and_then(|account| account.rejoin_claim(&mut credit, &self.claim, self.query.key()))
+                    .and_then(|account| {
+                        account.rejoin_claim(&mut credit, &self.claim, self.query.key())
+                    })
                     .is_err()
                 {
                     data.credits.push(credit);
@@ -2900,9 +3013,10 @@ fn shifted_span(locator: &knowledge_retrieval::Locator, origin: u64) -> (Option<
     match locator {
         knowledge_retrieval::Locator::Text { start, end, .. }
         | knowledge_retrieval::Locator::Title { start, end, .. }
-        | knowledge_retrieval::Locator::Metadata { start, end, .. } => {
-            (Some(start.saturating_add(origin)), Some(end.saturating_add(origin)))
-        }
+        | knowledge_retrieval::Locator::Metadata { start, end, .. } => (
+            Some(start.saturating_add(origin)),
+            Some(end.saturating_add(origin)),
+        ),
     }
 }
 use std::collections::BTreeSet;
@@ -2918,13 +3032,28 @@ struct DeliveryList {
 }
 struct ControllerData {
     sources: Vec<NativeQuerySource>,
-    permits: Vec<(String, Permit)>,
+    permits: Vec<(usize, String, Permit)>,
     pages: Vec<NativeInventoryPage>,
     credits: Vec<Holding>,
     extra: Vec<Work>,
     failure: Option<anyhow::Error>,
     closing: bool,
     unavailable: u64,
+    coverage: Option<wire::Coverage>,
+}
+/// Encoded response bytes and their existing prepaid Work loan.
+/// A transport can move this value into a queue or Arc; bytes die before credit on last drop.
+/// It contains no authority and must be produced only after controller delivery rechecks.
+pub struct EncodedResponse {
+    bytes: Vec<u8>,
+    _work: Work,
+}
+impl std::ops::Deref for EncodedResponse {
+    type Target = [u8];
+    /// Borrow the bytes while their actual serialization loan remains owned.
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 /// All-method fusion and final delivery for one admitted tuple query.
 /// Winning source and metadata scopes stay live until `finish`.
@@ -2932,7 +3061,6 @@ pub struct NativeQueryController {
     query: NativeTupleQuery,
     claim: Arc<Claim>,
     result: Option<wire::SearchResult>,
-    encoded: Option<Vec<u8>>,
     data: Option<Box<ControllerData>>,
     base: Option<Work>,
 }
@@ -2941,6 +3069,7 @@ impl NativeTupleQuery {
     pub fn requirement_all(&self) -> Result<Reservation> {
         self.cause.check()?;
         let mut memory = Self::metadata_requirement().memory_bytes;
+        let mut execution_peak = 0u64;
         for (index, lib) in self.cause.libraries.iter().enumerate() {
             let wire::Command::Query { query } = lib
                 .reader
@@ -2950,15 +3079,18 @@ impl NativeTupleQuery {
             else {
                 bail!("actual Query required");
             };
-            memory = memory
-                .checked_add(self.bm25_requirement(index)?.memory_bytes)
-                .context("controller requirement overflow")?;
+            execution_peak = execution_peak.max(self.bm25_requirement(index)?.memory_bytes);
             if query.methods.contains(&wire::SearchMethod::Semantic) {
-                memory = memory
-                    .checked_add(self.vector_requirement(index)?.memory_bytes)
-                    .context("controller requirement overflow")?;
+                execution_peak = execution_peak.max(
+                    self.vector_requirement(index)?
+                        .memory_bytes
+                        .checked_add(64 * 1024 * 1024)
+                        .context("semantic peak overflow")?,
+                );
             }
-            let methods = (query.methods.len().max(1) as u64).checked_mul(query.limit.get());
+            let methods = (query.methods.len().max(1) as u64)
+                .checked_mul(query.keywords.len().max(1) as u64)
+                .and_then(|n| n.checked_mul(query.limit.get()));
             let extra = methods
                 .and_then(|n| n.checked_mul(2 * 1024 * 1024))
                 .context("retained source quote overflow")?;
@@ -2967,18 +3099,19 @@ impl NativeTupleQuery {
                 .context("controller requirement overflow")?;
         }
         Ok(Reservation {
-            memory_bytes: memory,
+            memory_bytes: memory
+                .checked_add(execution_peak)
+                .context("controller peak overflow")?,
             temporary_bytes: 0,
         })
     }
     /// Run every requested method and fuse one labelled group per library.
-    pub fn start_controller(
-        &self,
-        service: &NativeLibraryService,
-        claim: Arc<Claim>,
-    ) -> Result<NativeQueryController> {
+    pub fn start_controller(&self, claim: Arc<Claim>) -> Result<NativeQueryController> {
         self.cause.check_claim(&claim)?;
-        anyhow::ensure!(!self.cause.libraries.is_empty(), "actual Query libraries required");
+        anyhow::ensure!(
+            !self.cause.libraries.is_empty(),
+            "actual Query libraries required"
+        );
         let base = Work::split_claim(
             &claim,
             self.key(),
@@ -2993,7 +3126,6 @@ impl NativeTupleQuery {
             },
             claim,
             result: None,
-            encoded: None,
             data: Some(Box::new(ControllerData {
                 sources: Vec::new(),
                 permits: Vec::new(),
@@ -3003,10 +3135,11 @@ impl NativeTupleQuery {
                 failure: None,
                 closing: false,
                 unavailable: 0,
+                coverage: None,
             })),
             base: Some(base),
         };
-        if let Err(error) = controller.execute(service) {
+        if let Err(error) = controller.execute() {
             controller.data.as_mut().expect("actual owner").failure = Some(error);
         }
         Ok(controller)
@@ -3021,37 +3154,57 @@ impl NativeQueryController {
         self.recheck()?;
         self.result.as_ref().context("actual search result absent")
     }
-    /// Recheck winners and prepay the encoded buffer before serialization.
-    pub fn encode_response(&mut self, request_id: wire::Id) -> Result<Vec<u8>> {
+    /// Recheck winners and prepay both DTO copies and serialization before allocation.
+    /// The returned carrier retains the existing loan through the transport's last consumer.
+    pub fn encode_response(&mut self, request_id: wire::Id) -> Result<EncodedResponse> {
         self.recheck()?;
         let search = self
             .result
-            .clone()
+            .as_ref()
             .context("actual search result absent")?;
+        let mut counted = Count(0);
+        serde_json::to_writer(&mut counted, search)?;
+        let memory = counted
+            .0
+            .checked_mul(16)
+            .and_then(|n| n.checked_add((request_id.as_str().len() as u64).checked_mul(8)?))
+            .and_then(|n| n.checked_add(4096))
+            .context("response serialization peak overflow")?;
+        let mut work = Work::split_claim(
+            &self.claim,
+            self.query.key(),
+            Reservation {
+                memory_bytes: memory,
+                temporary_bytes: 0,
+            },
+        )?;
         let response = wire::Response {
             wire_version: 1,
             request_id,
             result: wire::Result::Search {
-                search: Box::new(search),
+                search: Box::new(search.clone()),
             },
         };
-        let mut counted = Count(0);
-        serde_json::to_writer(&mut counted, &response)?;
-        let mut loan = Work::split_claim(
-            &self.claim,
-            self.query.key(),
-            Reservation {
-                memory_bytes: counted.0.saturating_mul(2).max(4096),
-                temporary_bytes: 0,
-            },
-        )?;
-        let bytes = wire::encode_response(&response)
-            .map_err(|error| anyhow::anyhow!("actual search response refused: {error}"))?;
-        if loan.rejoin(&self.claim, self.query.key()).is_err() {
-            self.data.as_mut().expect("actual owner").extra.push(loan);
+        let encoded = wire::encode_response(&response)
+            .map_err(|error| anyhow::anyhow!("actual search response refused: {error}"));
+        drop(response);
+        let bytes = match encoded {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if work.rejoin(&self.claim, self.query.key()).is_err() {
+                    self.data.as_mut().expect("actual owner").extra.push(work);
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.recheck() {
+            drop(bytes);
+            if work.rejoin(&self.claim, self.query.key()).is_err() {
+                self.data.as_mut().expect("actual owner").extra.push(work);
+            }
+            return Err(error);
         }
-        self.encoded = Some(bytes.clone());
-        Ok(bytes)
+        Ok(EncodedResponse { bytes, _work: work })
     }
     #[cfg(test)]
     pub fn test_scope_clone(&self) -> Option<Permit> {
@@ -3059,11 +3212,10 @@ impl NativeQueryController {
         data.sources
             .first()
             .map(|source| source.source().test_query_scope_clone())
-            .or_else(|| data.permits.first().map(|(_, permit)| permit.clone()))
+            .or_else(|| data.permits.first().map(|(_, _, permit)| permit.clone()))
     }
     pub fn finish(mut self) -> std::result::Result<(NativeTupleQuery, Arc<Claim>), Box<Self>> {
         drop(self.result.take());
-        drop(self.encoded.take());
         if self.data.is_some() {
             self.data.as_mut().expect("actual owner").closing = true;
             let sources = std::mem::take(&mut self.data.as_mut().expect("actual owner").sources);
@@ -3071,20 +3223,14 @@ impl NativeQueryController {
                 let _ = self.close_source(source);
             }
             let permits = std::mem::take(&mut self.data.as_mut().expect("actual owner").permits);
-            for (_, permit) in permits {
+            for (_, _, permit) in permits {
                 let _ = self.rejoin_permit(permit);
             }
-            if !self
-                .data
-                .as_ref()
-                .expect("actual owner")
-                .permits
-                .is_empty()
-            {
+            if !self.data.as_ref().expect("actual owner").permits.is_empty() {
                 return Err(Box::new(self));
             }
-            let mut pages = std::mem::take(&mut self.data.as_mut().expect("actual owner").pages)
-                .into_iter();
+            let mut pages =
+                std::mem::take(&mut self.data.as_mut().expect("actual owner").pages).into_iter();
             while let Some(page) = pages.next() {
                 match page.into_funding() {
                     Ok(mut credit) => {
@@ -3108,13 +3254,7 @@ impl NativeQueryController {
                     }
                 }
             }
-            if !self
-                .data
-                .as_ref()
-                .expect("actual owner")
-                .credits
-                .is_empty()
-            {
+            if !self.data.as_ref().expect("actual owner").credits.is_empty() {
                 return Err(Box::new(self));
             }
             let mut extra = std::mem::take(&mut self.data.as_mut().expect("actual owner").extra);
@@ -3148,7 +3288,7 @@ impl NativeQueryController {
         for source in &data.sources {
             source.source().check()?;
         }
-        for (_, permit) in &data.permits {
+        for (_, _, permit) in &data.permits {
             permit.check().map_err(refused_error)?;
         }
         Ok(())
@@ -3157,11 +3297,11 @@ impl NativeQueryController {
         match self.query.finish_source(source, &self.claim) {
             Ok(()) => Ok(()),
             Err(wire::authority::ScopeRejoinError::Retained { scope, .. }) => {
-                self.data
-                    .as_mut()
-                    .expect("actual owner")
-                    .permits
-                    .push(("retained".into(), *scope));
+                self.data.as_mut().expect("actual owner").permits.push((
+                    usize::MAX,
+                    "retained".into(),
+                    *scope,
+                ));
                 bail!("winning scope remains live")
             }
             Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
@@ -3171,17 +3311,17 @@ impl NativeQueryController {
         match permit.rejoin_processing_scope(&self.claim, self.query.key()) {
             Ok(()) => Ok(()),
             Err(wire::authority::ScopeRejoinError::Retained { scope, .. }) => {
-                self.data
-                    .as_mut()
-                    .expect("actual owner")
-                    .permits
-                    .push(("retained".into(), *scope));
+                self.data.as_mut().expect("actual owner").permits.push((
+                    usize::MAX,
+                    "retained".into(),
+                    *scope,
+                ));
                 bail!("winning scope remains live")
             }
             Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
         }
     }
-    fn execute(&mut self, service: &NativeLibraryService) -> Result<()> {
+    fn execute(&mut self) -> Result<()> {
         let applied = {
             let wire::Command::Query { query } = self.query.cause.libraries[0]
                 .reader
@@ -3195,20 +3335,25 @@ impl NativeQueryController {
         };
         let mut groups = Vec::new();
         for library in 0..self.query.cause.libraries.len() {
-            groups.push(self.execute_library(service, library)?);
+            let library_id = self.query.cause.libraries[library]
+                .reader
+                .physical
+                .library
+                .clone();
+            groups.push(self.execute_library(&library_id, library)?);
         }
         self.result = Some(wire::SearchResult { applied, groups });
         Ok(())
     }
     fn execute_library(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
     ) -> Result<wire::SearchGroup> {
         let lib = &self.query.cause.libraries[library];
         anyhow::ensure!(
-            service.library == lib.reader.physical.library,
-            "actual service/library owner differs"
+            *library_id == lib.reader.physical.library,
+            "actual library_id/library owner differs"
         );
         let wire::Command::Query { query } = lib
             .reader
@@ -3219,16 +3364,15 @@ impl NativeQueryController {
             bail!("actual Query required");
         };
         let query = query.clone();
-        let unavailable_before = self.data.as_ref().expect("actual owner").unavailable;
         let library_id = lib.reader.physical.library.clone();
         let generation_id = wire::Id::new(lib.reader.physical.data.scan.clone()).ok();
         let partitioning_id = wire::Id::new(lib.reader.physical.data.descriptor.clone()).ok();
-        let discovered = lib.reader.physical.data.sources;
+        self.data.as_mut().expect("actual owner").coverage = None;
         let jobs = method_jobs(&query);
         let mut lists: Vec<Vec<String>> = Vec::new();
         let mut files: BTreeMap<String, DeliveryFile> = BTreeMap::new();
         for job in jobs {
-            let list = self.run_job(service, library, &query, job)?;
+            let list = self.run_job(&library_id, library, &query, job)?;
             lists.push(list.ids);
             for (id, file) in list.files {
                 if let Some(existing) = files.get_mut(&id) {
@@ -3250,7 +3394,7 @@ impl NativeQueryController {
         let winners: Vec<String> = order.into_iter().take(limit).collect();
         let winner_set: BTreeSet<String> = winners.iter().cloned().collect();
         let limit_reached = files.len() > limit;
-        self.retain_winners(&winner_set)?;
+        self.retain_winners(library, &winner_set)?;
         let mut group_files = Vec::new();
         for (index, id) in winners.iter().enumerate() {
             let Some(file) = files.get_mut(id) else {
@@ -3278,52 +3422,32 @@ impl NativeQueryController {
                 evidence: file.evidence.clone(),
             });
         }
-        let unavailable = self
+        let coverage = self
             .data
-            .as_ref()
+            .as_mut()
             .expect("actual owner")
-            .unavailable
-            .saturating_sub(unavailable_before);
+            .coverage
+            .take()
+            .context("actual method coverage absent")?;
         Ok(wire::SearchGroup {
             library_id,
             generation_id,
             partitioning_id,
             files: group_files,
-            coverage: wire::Coverage {
-                discovered: wire::U64::new(discovered),
-                verified: wire::U64::new(
-                    winners
-                        .iter()
-                        .filter(|id| {
-                            files.get(*id).is_some_and(|file| {
-                                file.annotations.digest_state == wire::DigestState::Verified
-                            })
-                        })
-                        .count() as u64,
-                ),
-                pending_hash: wire::U64::new(0),
-                pending_extraction: wire::U64::new(0),
-                pending_embedding: wire::U64::new(0),
-                stale: wire::U64::new(0),
-                unavailable: wire::U64::new(unavailable),
-                unsupported: wire::U64::new(0),
-                failed: wire::U64::new(0),
-                excluded: wire::U64::new(0),
-                enumeration: wire::Enumeration::Complete,
-                result_extent: wire::ResultExtent::TopK,
-                stopped_reason: None,
-            },
+            coverage,
             returned_files: wire::UnsignedInteger::new(winners.len() as u64)
                 .map_err(|_| anyhow::anyhow!("returned files"))?,
             limit_reached,
         })
     }
-    fn retain_winners(&mut self, winners: &BTreeSet<String>) -> Result<()> {
+    fn retain_winners(&mut self, library: usize, winners: &BTreeSet<String>) -> Result<()> {
         let sources = std::mem::take(&mut self.data.as_mut().expect("actual owner").sources);
         let mut kept = Vec::new();
         let mut sources = sources.into_iter();
         while let Some(source) = sources.next() {
-            if winners.contains(source.annotations().source_id.as_str()) {
+            if source.library != library
+                || winners.contains(source.annotations().source_id.as_str())
+            {
                 kept.push(source);
             } else if let Err(error) = self.close_source(source) {
                 self.data
@@ -3343,9 +3467,9 @@ impl NativeQueryController {
         let permits = std::mem::take(&mut self.data.as_mut().expect("actual owner").permits);
         let mut kept_permits = Vec::new();
         let mut permits = permits.into_iter();
-        while let Some((id, permit)) = permits.next() {
-            if winners.contains(&id) {
-                kept_permits.push((id, permit));
+        while let Some((slot, id, permit)) = permits.next() {
+            if slot != library || winners.contains(&id) {
+                kept_permits.push((slot, id, permit));
             } else if let Err(error) = self.rejoin_permit(permit) {
                 self.data
                     .as_mut()
@@ -3363,26 +3487,48 @@ impl NativeQueryController {
         self.data.as_mut().expect("actual owner").permits = kept_permits;
         Ok(())
     }
+    /// Preserve processing observations even when a metadata method ran first.
+    /// Independent method visits do not add duplicate file counts.
+    fn keep_indexed_coverage(&mut self, indexed: wire::Coverage) {
+        let slot = &mut self.data.as_mut().expect("actual owner").coverage;
+        if let Some(current) = slot {
+            current.unsupported =
+                wire::U64::new(current.unsupported.get().max(indexed.unsupported.get()));
+            current.failed = wire::U64::new(current.failed.get().max(indexed.failed.get()));
+            current.pending_extraction = wire::U64::new(
+                current
+                    .pending_extraction
+                    .get()
+                    .max(indexed.pending_extraction.get()),
+            );
+            current.unavailable =
+                wire::U64::new(current.unavailable.get().max(indexed.unavailable.get()));
+        } else {
+            *slot = Some(indexed);
+        }
+    }
     fn run_job(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
         query: &wire::SearchRequest,
         job: MethodJob,
     ) -> Result<DeliveryList> {
         match job {
-            MethodJob::Browse => self.run_metadata(service, library, None, query),
+            MethodJob::Browse => self.run_metadata(library_id, library, None, query),
             MethodJob::Meta(method, keyword) => {
-                self.run_metadata(service, library, Some((method, keyword)), query)
+                self.run_metadata(library_id, library, Some((method, keyword)), query)
             }
-            MethodJob::Bm25(keyword) => self.run_bm25(service, library, keyword, query),
-            MethodJob::Scan(method, keyword) => self.run_scan(service, library, method, keyword, query),
-            MethodJob::Semantic(keyword) => self.run_semantic(service, library, keyword, query),
+            MethodJob::Bm25(keyword) => self.run_bm25(library_id, library, keyword, query),
+            MethodJob::Scan(method, keyword) => {
+                self.run_scan(library_id, library, method, keyword, query)
+            }
+            MethodJob::Semantic(keyword) => self.run_semantic(library_id, library, keyword, query),
         }
     }
     fn run_bm25(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
         keyword: usize,
         query: &wire::SearchRequest,
@@ -3391,7 +3537,7 @@ impl NativeQueryController {
             .query
             .start_bm25(self.claim.clone(), library, keyword)?;
         loop {
-            let step = run.step(service);
+            let step = run.step_library(library_id);
             if step.is_failed() {
                 let message = format!("{:#}", run.failure().expect("bm25 failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
@@ -3403,6 +3549,7 @@ impl NativeQueryController {
             }
         }
         self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
+        self.keep_indexed_coverage(run.data.as_ref().expect("actual owner").coverage.wire());
         let list = capture_bm25(&run, &query.keywords[keyword])?;
         let sources = run.take_sources();
         let pages = run.take_retained_pages();
@@ -3415,7 +3562,7 @@ impl NativeQueryController {
     }
     fn run_scan(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
         method: wire::SearchMethod,
         keyword: usize,
@@ -3425,7 +3572,7 @@ impl NativeQueryController {
             .query
             .start_scan(self.claim.clone(), library, method, keyword)?;
         loop {
-            let step = run.step(service);
+            let step = run.step_library(library_id);
             if step.is_failed() {
                 let message = format!("{:#}", run.failure().expect("scan failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
@@ -3437,6 +3584,7 @@ impl NativeQueryController {
             }
         }
         self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
+        self.keep_indexed_coverage(run.data.as_ref().expect("actual owner").coverage.wire());
         let list = capture_scan(&run, method, &query.keywords[keyword])?;
         let sources = run.take_sources();
         let pages = run.take_retained_pages();
@@ -3449,7 +3597,7 @@ impl NativeQueryController {
     }
     fn run_metadata(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
         method: Option<(wire::SearchMethod, usize)>,
         query: &wire::SearchRequest,
@@ -3458,7 +3606,7 @@ impl NativeQueryController {
             .query
             .start_metadata_for(self.claim.clone(), library, method)?;
         loop {
-            let step = run.step(service);
+            let step = run.step_library(library_id);
             if step.is_failed() {
                 let message = format!("{:#}", run.failure().expect("metadata failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_sources();
@@ -3472,6 +3620,21 @@ impl NativeQueryController {
         self.data.as_mut().expect("actual owner").unavailable += run.unavailable_sources();
         let keyword = method.map(|(_, index)| query.keywords[index].as_str());
         let method = method.map(|(method, _)| method);
+        let counts = run.data.as_ref().expect("actual owner");
+        let mut coverage = QueryCoverage {
+            discovered: counts.discovered,
+            verified: counts.verified,
+            unavailable: counts.unavailable_sources,
+            ..QueryCoverage::default()
+        }
+        .wire();
+        coverage.pending_hash = wire::U64::new(counts.pending_hash);
+        if let Some(indexed) = &self.data.as_ref().expect("actual owner").coverage {
+            coverage.unsupported = indexed.unsupported;
+            coverage.failed = indexed.failed;
+            coverage.pending_extraction = indexed.pending_extraction;
+        }
+        self.data.as_mut().expect("actual owner").coverage = Some(coverage);
         let hits: Vec<NativeQueryAnnotations> = run.hits()?.cloned().collect();
         let scopes = run.take_scopes();
         let pages = run.take_retained_pages();
@@ -3502,20 +3665,20 @@ impl NativeQueryController {
             .expect("actual owner")
             .permits
             .extend(scopes.into_iter().map(|(annotations, permit)| {
-                (annotations.source_id.as_str().to_owned(), permit)
+                (library, annotations.source_id.as_str().to_owned(), permit)
             }));
         Ok(DeliveryList { ids, files })
     }
     fn run_semantic(
         &mut self,
-        service: &NativeLibraryService,
+        library_id: &wire::Id,
         library: usize,
         keyword: usize,
         query: &wire::SearchRequest,
     ) -> Result<DeliveryList> {
-        let mut run = self
-            .query
-            .start_semantic(service, self.claim.clone(), library, keyword);
+        let mut run =
+            self.query
+                .start_semantic_for(library_id, self.claim.clone(), library, keyword);
         if let Some(error) = run.failure() {
             let message = format!("{error:#}");
             self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
@@ -3523,6 +3686,7 @@ impl NativeQueryController {
             bail!(message);
         }
         self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
+        self.keep_indexed_coverage(run.coverage()?);
         let keyword = query.keywords[keyword].as_str();
         let mut ids = Vec::new();
         let mut files = BTreeMap::new();
@@ -3533,7 +3697,7 @@ impl NativeQueryController {
             let evidence = run
                 .evidence_for(id)?
                 .iter()
-                .map(|item| semantic_evidence(item, keyword, *score))
+                .map(|item| semantic_evidence(&run, id, item, keyword, *score))
                 .collect::<Result<Vec<_>>>()?;
             ids.push(id.clone());
             files.insert(
@@ -3594,8 +3758,14 @@ fn fuse_delivery(
     let mut fused = knowledge_search::fuse_ranks(lists);
     fused.sort_by(|left, right| {
         right.1.total_cmp(&left.1).then_with(|| {
-            let left_path = files.get(&left.0).map(|file| file.path.as_str()).unwrap_or("");
-            let right_path = files.get(&right.0).map(|file| file.path.as_str()).unwrap_or("");
+            let left_path = files
+                .get(&left.0)
+                .map(|file| file.path.as_str())
+                .unwrap_or("");
+            let right_path = files
+                .get(&right.0)
+                .map(|file| file.path.as_str())
+                .unwrap_or("");
             left_path.cmp(right_path).then(left.0.cmp(&right.0))
         })
     });
@@ -3616,7 +3786,7 @@ fn capture_bm25(run: &NativeBm25Run, keyword: &str) -> Result<DeliveryList> {
             DeliveryFile {
                 path: annotations.path.as_str().to_owned(),
                 score: hit.score,
-                evidence: vec![bm25_evidence(hit, keyword)?],
+                evidence: vec![bm25_evidence(run, hit, keyword)?],
                 annotations,
             },
         );
@@ -3662,7 +3832,17 @@ fn scan_wire_evidence(
         .iter()
         .map(|item| {
             let locator = match (item.start, item.end, item.metadata) {
-                (Some(start), Some(end), false) => byte_locator(start, end)?,
+                (Some(start), Some(end), false) => {
+                    let source = data.sources.get(source_id).context("actual scan source")?;
+                    representation_locator(
+                        &run.query,
+                        &run.claim,
+                        source,
+                        &item.representation_digest,
+                        start,
+                        end,
+                    )?
+                }
                 _ => wire::Locator::Unlocated,
             };
             Ok(wire::Evidence {
@@ -3684,19 +3864,55 @@ fn scan_wire_evidence(
         })
         .collect()
 }
-fn bm25_evidence(hit: &Hit, keyword: &str) -> Result<wire::Evidence> {
-    let (start, end) = shifted_span(&hit.locator, 0);
+fn bm25_evidence(run: &NativeBm25Run, hit: &Hit, keyword: &str) -> Result<wire::Evidence> {
+    let source = run
+        .data
+        .as_ref()
+        .context("actual bm25 owner")?
+        .sources
+        .get(&hit.key.id)
+        .context("actual bm25 source")?;
+    let (locator, metadata) = match &hit.locator {
+        knowledge_retrieval::Locator::Text {
+            start,
+            end,
+            original: Some(original),
+        } => {
+            let (digest, origin) = original
+                .strip_prefix("representation:")
+                .and_then(|text| text.split_once('@'))
+                .context("actual BM25 representation coordinate")?;
+            let origin = origin.parse::<u64>()?;
+            (
+                representation_locator(
+                    &run.query,
+                    &run.claim,
+                    source,
+                    digest,
+                    origin
+                        .checked_add(*start)
+                        .context("BM25 coordinate overflow")?,
+                    origin
+                        .checked_add(*end)
+                        .context("BM25 coordinate overflow")?,
+                )?,
+                false,
+            )
+        }
+        _ => (wire::Locator::Unlocated, true),
+    };
     Ok(wire::Evidence {
         method: wire::SearchMethod::Bm25,
         keyword: Some(keyword.to_owned()),
-        locator: match (start, end) {
-            (Some(start), Some(end)) => byte_locator(start, end)?,
-            _ => wire::Locator::Unlocated,
-        },
+        locator,
         snippet: hit.snippet.chars().take(500).collect(),
-        kind: wire::EvidenceKind::VerifiedMatch,
+        kind: if metadata {
+            wire::EvidenceKind::MetadataObservation
+        } else {
+            wire::EvidenceKind::VerifiedMatch
+        },
         source_digest: wire::Digest::new(hit.digest.clone()).ok(),
-        representation_digest: wire::Digest::new(hit.representation_digest.clone()).ok(),
+        representation_digest: wire::Digest::new(source.part.representation_digest.clone()).ok(),
         processor_id: hit.processor.clone(),
         model_space: None,
         score: hit
@@ -3726,6 +3942,8 @@ fn metadata_evidence(
     })
 }
 fn semantic_evidence(
+    run: &NativeWholeSemanticRun,
+    id: &str,
     item: &knowledge_search::VectorEvidence,
     keyword: &str,
     score: f32,
@@ -3733,19 +3951,19 @@ fn semantic_evidence(
     Ok(wire::Evidence {
         method: wire::SearchMethod::Semantic,
         keyword: Some(keyword.to_owned()),
-        locator: vector_locator(&item.locator)?,
+        locator: vector_locator(run, id, &item.locator)?,
         snippet: String::new(),
         kind: wire::EvidenceKind::SemanticCandidate,
         source_digest: wire::Digest::new(item.source_digest.clone()).ok(),
         representation_digest: wire::Digest::new(item.representation.digest.clone()).ok(),
         processor_id: Some(item.representation.processor.clone()),
-        model_space: None,
+        model_space: Some(run.model_space()?.to_owned()),
         score: Some(
             wire::FiniteNumber::new(score as f64).map_err(|_| anyhow::anyhow!("semantic score"))?,
         ),
     })
 }
-fn vector_locator(text: &str) -> Result<wire::Locator> {
+fn vector_locator(run: &NativeWholeSemanticRun, id: &str, text: &str) -> Result<wire::Locator> {
     let Some(rest) = text.strip_prefix("representation:") else {
         return Ok(wire::Locator::Unlocated);
     };
@@ -3761,15 +3979,96 @@ fn vector_locator(text: &str) -> Result<wire::Locator> {
     if wire::Digest::new(digest.to_owned()).is_err() {
         return Ok(wire::Locator::Unlocated);
     }
-    byte_locator(start, end)
+    run.evidence_locator(id, digest, start, end)
 }
-fn byte_locator(start: u64, end: u64) -> Result<wire::Locator> {
-    Ok(wire::Locator::OriginalLines {
-        start_line: wire::PositiveInteger::new(1).map_err(|_| anyhow::anyhow!("line"))?,
-        end_line: wire::PositiveInteger::new(1).map_err(|_| anyhow::anyhow!("line"))?,
-        start_byte: Some(wire::U64::new(start)),
-        end_byte: Some(wire::U64::new(end)),
-    })
+/// Map admitted global representation bytes to real lines with bounded, prepaid tape reads.
+/// Only an identical full original/representation digest permits original byte coordinates.
+pub(super) fn representation_locator(
+    query: &NativeTupleQuery,
+    claim: &Arc<Claim>,
+    source: &NativeQuerySource,
+    digest: &str,
+    start: u64,
+    end: u64,
+) -> Result<wire::Locator> {
+    source.source().check()?;
+    anyhow::ensure!(
+        digest == source.part.representation_digest && start <= end,
+        "representation identity/span differs"
+    );
+    let mut work = Work::split_claim(
+        claim,
+        query.key(),
+        Reservation {
+            memory_bytes: 64 * 1024,
+            temporary_bytes: 0,
+        },
+    )?;
+    let located = (|| {
+        let reader = &query.cause.libraries[source.library].reader;
+        let file = reader.physical.open_verified_admitted(
+            "representations.data",
+            || source.source().check(),
+            &|n| query.cause.admit_io(claim, n),
+        )?;
+        let base = source
+            .part
+            .tape_start
+            .checked_sub(source.part.representation_start)
+            .context("representation base underflow")?;
+        anyhow::ensure!(
+            base.checked_add(end)
+                .is_some_and(|n| n <= file.metadata().map_or(0, |m| m.len())),
+            "representation coordinate outside held tape"
+        );
+        let mut bytes = vec![0u8; 64 * 1024];
+        let mut at = 0u64;
+        let mut first = 1u64;
+        let mut last = 1u64;
+        while at < end {
+            source.source().check()?;
+            let n = (end - at).min(bytes.len() as u64) as usize;
+            query.cause.admit_io(claim, n as u64)?;
+            file.read_exact_at(&mut bytes[..n], base + at)?;
+            for (index, byte) in bytes[..n].iter().enumerate() {
+                if *byte == b'\n' {
+                    if at + (index as u64) < start {
+                        first += 1;
+                    }
+                    if at + (index as u64) < end.saturating_sub(1) {
+                        last += 1;
+                    }
+                }
+            }
+            at += n as u64;
+        }
+        source.source().check()?;
+        let start_line = wire::PositiveInteger::new(first).map_err(|_| anyhow::anyhow!("line"))?;
+        let end_line =
+            wire::PositiveInteger::new(last.max(first)).map_err(|_| anyhow::anyhow!("line"))?;
+        if source
+            .annotations()
+            .digest
+            .as_ref()
+            .is_some_and(|value| value.as_str() == digest)
+        {
+            Ok(wire::Locator::OriginalLines {
+                start_line,
+                end_line,
+                start_byte: Some(wire::U64::new(start)),
+                end_byte: Some(wire::U64::new(end)),
+            })
+        } else {
+            Ok(wire::Locator::RepresentationLines {
+                representation_digest: wire::Digest::new(digest.to_owned())?,
+                start_line,
+                end_line,
+            })
+        }
+    })();
+    // All tape descriptors and scratch have died before this synchronous exact-loan rejoin.
+    work.rejoin(claim, query.key())?;
+    located
 }
 fn wire_source(library_id: wire::Id, annotations: &NativeQueryAnnotations) -> Result<wire::Source> {
     Ok(wire::Source {
@@ -3801,5 +4100,18 @@ fn dedup_evidence(items: &mut Vec<wire::Evidence>) {
         .any(|item| !matches!(item.locator, wire::Locator::Unlocated));
     if located {
         items.retain(|item| !matches!(item.locator, wire::Locator::Unlocated));
+    }
+    let mut at = 0;
+    while at < items.len() {
+        if items[..at].iter().any(|prior| {
+            prior.method == items[at].method
+                && prior.keyword == items[at].keyword
+                && prior.locator == items[at].locator
+                && prior.representation_digest == items[at].representation_digest
+        }) {
+            items.remove(at);
+        } else {
+            at += 1;
+        }
     }
 }

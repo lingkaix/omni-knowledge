@@ -82,7 +82,28 @@ The owned model-code/metadata/receiver fixture composes actual HTML/Japanese M3 
 
 `vector_requirement` derives DATA from the actual held source table using the existing mature vector reader formula. A bounded `NativeQueryStage::semantic` uses that actual Claim's reader Work, selected tuple generation/full model identity and actual M1/original source SDK owners. It delegates cosine/distinct-file ranking/evidence to the SAME vector engine, admitting the exact tuple-bound metadata record span and checking source/digest/processor/representation/global-span/current native source before distance. Equal-byte windows still need their own admitted global span. `NativeSemanticRun` retains real result/error/reader/stage/source owners, rechecks access and destroys data/FD consumers before exact reader-credit rejoin. Empty eligible sources open no vector components. This is one bounded source set, not whole-library semantic coverage.
 
-`NativeQueryPartition::scan` uses the SAME actual SourceGeneration for selected literal/regex methods and original coordinates. The outer controller still owes every admitted representation, canonical authored tag/language/metadata projection, expansion/fusion, labelled libraries, final causality/delivery and application activation. See the [scoped ownership and ablation record](../../docs/changes/2026-11-07-native-query-provider-vector-and-scan-owners.md). Numeric HTTP/vector controls do not qualify loaded WeMM, quality, native Mac, installed product or physical M0.
+`NativeQueryPartition::scan` uses the SAME actual SourceGeneration for selected literal/regex methods and original coordinates. This primitive needs the whole-library controller below for every admitted representation, canonical metadata, fusion, labelled libraries, and final delivery; application activation remains separate. See the [scoped ownership and ablation record](../../docs/changes/2026-11-07-native-query-provider-vector-and-scan-owners.md). Numeric HTTP/vector controls do not qualify loaded WeMM, quality, native Mac, installed product or physical M0.
+
+## Whole-library Query and encoded delivery
+
+`NativeTupleQuery::start_controller(actual_claim)` composes the requested methods over every held library without entering the host mutex.
+The product caller must first use `NativeQueryInputs` to acquire all selected-library input owners under the same SDK invocation and original deadline.
+`requirement_all` quotes the maximum sequential method peak plus the simultaneous retained lists for every library, method, and keyword; a quote grants no resources.
+`NativeWholeSemanticRun` makes one vector-row pass with current source eligibility, while `NativeScanRun` visits every admitted lexical representation.
+The controller fuses distinct file ranks per method/keyword and keeps independent libraries in labelled groups.
+Each library retains its own winning source and pointer scopes through final result checks.
+Coverage counts come from the requested streams before result limiting; a metadata method reports current M1 observations, and an indexed method reports the admitted indexed stream.
+Processing statuses observed in an indexed stream remain in combined coverage.
+Representation positions are mapped to real lines through bounded prepaid tape reads; only identical original and full representation digests permit original byte coordinates.
+
+`search_result()` rechecks the actual Claim and winning dependencies before borrowing the result.
+`encode_response(request_id)` performs the same checks, prepays copied DTO and encoder capacity, and returns `EncodedResponse`.
+That carrier owns its bytes and existing `Work`, implements `Deref<Target = [u8]>`, and can move into an asynchronous transport or an `Arc` without tying its lifetime to the controller.
+The transport keeps the carrier until its final write consumer ends; bytes are destroyed before the credit is released.
+Controller `finish` closes its retained sources/pages before rejoining their loans and returns its actual owner if a scope consumer remains.
+An encoded carrier can outlive controller and Claim settlement while retaining its independent charge.
+See the [controller change record](../../docs/changes/2026-11-08-native-query-controller-delivery.md).
+Application face routing, tuple activation/recovery/retirement, trust/intent/drain activation, loaded-model quality, and installed/native platform acceptance remain separate work.
 
 ## Held EPUB and video staging
 
