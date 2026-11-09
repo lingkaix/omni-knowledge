@@ -1,10 +1,8 @@
 //! Human and agent command-line entry point with structured output and explicit failures.
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use knowledge_daemon::UnboundHandler;
-use omni_knowledge::{
-    IndexOptions, KnowledgeBase, SearchMode, SearchOptions, embedding, epub, extract,
-};
+use omni_knowledge::{IndexOptions, KnowledgeBase, embedding, epub, extract};
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -69,7 +67,7 @@ enum Operation {
         query: String,
         /// Lexical, grep, semantic, hybrid, or filename retrieval.
         #[arg(long, value_enum, default_value = "bm25")]
-        mode: SearchMode,
+        mode: QueryMode,
         /// Required complete tag, ignoring case by default; repeat for AND filtering.
         #[arg(long = "tag")]
         tags: Vec<String>,
@@ -82,6 +80,9 @@ enum Operation {
         /// Image query for semantic or hybrid retrieval.
         #[arg(long)]
         image: Option<PathBuf>,
+        /// Emit the complete labelled native Query result, including coverage and evidence.
+        #[arg(long)]
+        canonical: bool,
         /// Search independently indexed nested libraries and include root identity.
         #[arg(long)]
         recursive: bool,
@@ -144,6 +145,9 @@ enum Operation {
         /// Serve MCP 2025-11-25 on stdin and stdout.
         #[arg(long)]
         stdio: bool,
+        /// Select nested local libraries before accepting agent requests.
+        #[arg(long)]
+        recursive: bool,
         /// Serve opt-in loopback HTTP.
         #[arg(long)]
         http: bool,
@@ -157,6 +161,32 @@ enum Operation {
         #[arg(long)]
         daemon: Option<String>,
     },
+}
+
+/// Existing CLI aliases and the six frozen native methods; hybrid selects native fusion.
+#[derive(Clone, Copy, ValueEnum)]
+enum QueryMode {
+    Bm25,
+    Literal,
+    Regex,
+    Grep,
+    Files,
+    Tags,
+    Semantic,
+    Hybrid,
+}
+impl QueryMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Bm25 => "bm25",
+            Self::Literal => "literal",
+            Self::Regex | Self::Grep => "regex",
+            Self::Files => "files",
+            Self::Tags => "tags",
+            Self::Semantic => "semantic",
+            Self::Hybrid => "hybrid",
+        }
+    }
 }
 
 /// Runs one operation and writes machine-readable errors without hiding failure exits.
@@ -195,9 +225,17 @@ fn run(arguments: &Arguments) -> Result<()> {
     if matches!(arguments.command, Operation::ServeMcp) {
         return omni_knowledge::mcp::serve(&arguments.root);
     }
-    if let Operation::Serve { stdio, http } = &arguments.command {
+    if let Operation::Serve {
+        stdio,
+        http,
+        recursive,
+    } = &arguments.command
+    {
         if !stdio && !http {
             bail!("choose serve --stdio or serve --http");
+        }
+        if *stdio && !*http {
+            return omni_knowledge::mcp::serve_canonical(&arguments.root, *recursive);
         }
         return Err(UnboundHandler.into());
     }
@@ -206,7 +244,7 @@ fn run(arguments: &Arguments) -> Result<()> {
             bail!("mcp requires --stdio");
         }
         let Some(daemon) = daemon else {
-            return Err(UnboundHandler.into());
+            return omni_knowledge::mcp::serve_canonical(&arguments.root, false);
         };
         let address: std::net::SocketAddr = daemon
             .parse()
@@ -263,52 +301,36 @@ fn run(arguments: &Arguments) -> Result<()> {
             case_sensitive,
             image,
             recursive,
+            canonical,
         } => {
-            let options = SearchOptions {
-                query: query.clone(),
-                mode: *mode,
-                tags: tags.clone(),
-                limit: *limit,
-                case_sensitive: *case_sensitive,
-                query_image: image.clone(),
-            };
             let mut libraries = vec![kb.clone()];
             if *recursive {
                 libraries.extend(kb.children()?);
             }
-            let mut hits = vec![];
-            for library in libraries {
-                hits.extend(library.search(&options)?);
-            }
-            if *recursive {
-                hits.sort_by(|a, b| {
-                    b.score
-                        .total_cmp(&a.score)
-                        .then(a.root.cmp(&b.root))
-                        .then(a.path.cmp(&b.path))
-                });
-                hits.truncate(*limit);
-            }
-            if arguments.json {
-                print(&hits, true)
-            } else {
-                for hit in hits {
-                    let location = match (hit.start_seconds, hit.end_seconds, hit.line) {
-                        (Some(start), Some(end), _) => format!(" [{start:.1}–{end:.1}s]"),
-                        (_, _, Some(line)) => format!(":{line}"),
-                        _ => String::new(),
-                    };
-                    println!(
-                        "{}{}  {:.4}  {}\n  {}",
-                        hit.root.join(&hit.path).display(),
-                        location,
-                        hit.score,
-                        hit.tags.join(", "),
-                        hit.snippet.replace('\n', " ")
-                    );
+            let host = omni_knowledge::mcp_native::NativeQueryHost::open(libraries, true)?;
+            let request = omni_knowledge::mcp_native::legacy_request(
+                &host,
+                query,
+                mode.name(),
+                tags,
+                *limit,
+                *case_sensitive,
+                image.is_some(),
+            )?;
+            let mut output = std::io::stdout().lock();
+            host.with_query(&request, |reply| {
+                if *canonical && !reply.is_error() {
+                    reply.write_search(&mut output)?;
+                } else if arguments.json {
+                    reply.write_legacy(&mut output)?;
+                } else {
+                    reply.write_text(&mut output)?;
                 }
+                output.write_all(b"\n")?;
+                output.flush()?;
+                anyhow::ensure!(!reply.is_error(), "native query refused");
                 Ok(())
-            }
+            })
         }
         Operation::List => print(
             &kb.list()?

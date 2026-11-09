@@ -3030,6 +3030,15 @@ struct DeliveryList {
     ids: Vec<String>,
     files: BTreeMap<String, DeliveryFile>,
 }
+/// Context at the actual selected method boundary, without replacing its owning error.
+#[derive(Debug)]
+struct FailedMethod(wire::SearchMethod);
+impl std::fmt::Display for FailedMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "native query method {:?}", self.0)
+    }
+}
+impl std::error::Error for FailedMethod {}
 struct ControllerData {
     sources: Vec<NativeQuerySource>,
     permits: Vec<(usize, String, Permit)>,
@@ -3065,6 +3074,60 @@ pub struct NativeQueryController {
     base: Option<Work>,
 }
 impl NativeTupleQuery {
+    /// Method recorded at the actual failing boundary, including preflight. DATA, never a grant.
+    pub fn failure_method(error: &anyhow::Error) -> Option<wire::SearchMethod> {
+        error.downcast_ref::<FailedMethod>().map(|failed| failed.0)
+    }
+    /// Typed authority/budget failures remain observable without diagnostic parsing.
+    pub fn failure_code(error: &anyhow::Error) -> wire::ErrorCode {
+        if let Some(refusal) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<crate::native_service::source::NativeRefusal>())
+        {
+            return refusal.0;
+        }
+        if error
+            .chain()
+            .any(|cause| cause.is::<QueryBudgetExhausted>())
+        {
+            return wire::ErrorCode::BudgetExhausted;
+        }
+        if let Some(error) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<knowledge_retrieval::Error>())
+        {
+            match error {
+                knowledge_retrieval::Error::ReadBudget
+                | knowledge_retrieval::Error::Reservation => {
+                    return wire::ErrorCode::BudgetExhausted;
+                }
+                // These are the kernel's structured error codes, never its diagnostic message.
+                knowledge_retrieval::Error::Kernel(error) => {
+                    return match error.code.as_str() {
+                        "invalid-request" => wire::ErrorCode::InvalidRequest,
+                        "resource-limited" => wire::ErrorCode::BudgetExhausted,
+                        "cancelled" => wire::ErrorCode::Cancelled,
+                        "changed" => wire::ErrorCode::Changed,
+                        _ => wire::ErrorCode::Internal,
+                    };
+                }
+                _ => {}
+            }
+        }
+        if let Some(error) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<knowledge_retrieval::KernelError>())
+        {
+            return match error.code.as_str() {
+                "invalid-request" => wire::ErrorCode::InvalidRequest,
+                "resource-limited" => wire::ErrorCode::BudgetExhausted,
+                "cancelled" => wire::ErrorCode::Cancelled,
+                "changed" => wire::ErrorCode::Changed,
+                _ => wire::ErrorCode::Internal,
+            };
+        }
+        wire::ErrorCode::Internal
+    }
     /// Conservative peak for sequential whole-library methods plus retained winning scopes.
     pub fn requirement_all(&self) -> Result<Reservation> {
         self.cause.check()?;
@@ -3081,8 +3144,14 @@ impl NativeTupleQuery {
             };
             execution_peak = execution_peak.max(self.bm25_requirement(index)?.memory_bytes);
             if query.methods.contains(&wire::SearchMethod::Semantic) {
+                // Missing actual native model selection is a provider refusal, not a lexical fallback.
+                if lib.model.is_none() {
+                    return Err(refused_error(wire::ErrorCode::ProviderUnavailable)
+                        .context(FailedMethod(wire::SearchMethod::Semantic)));
+                }
                 execution_peak = execution_peak.max(
-                    self.vector_requirement(index)?
+                    self.vector_requirement(index)
+                        .with_context(|| FailedMethod(wire::SearchMethod::Semantic))?
                         .memory_bytes
                         .checked_add(64 * 1024 * 1024)
                         .context("semantic peak overflow")?,
@@ -3148,6 +3217,14 @@ impl NativeTupleQuery {
 impl NativeQueryController {
     pub fn failure(&self) -> Option<&anyhow::Error> {
         self.data.as_ref()?.failure.as_ref()
+    }
+    /// Actual failed method; absence means failure before a selected method boundary.
+    pub fn failure_method(&self) -> Option<wire::SearchMethod> {
+        self.failure().and_then(NativeTupleQuery::failure_method)
+    }
+    /// Actual typed failure code, retaining the original owning error in this controller.
+    pub fn failure_code(&self) -> Option<wire::ErrorCode> {
+        self.failure().map(NativeTupleQuery::failure_code)
     }
     /// Recheck the claim and every retained winner, then borrow the fused result.
     pub fn search_result(&self) -> Result<&wire::SearchResult> {
@@ -3372,7 +3449,18 @@ impl NativeQueryController {
         let mut lists: Vec<Vec<String>> = Vec::new();
         let mut files: BTreeMap<String, DeliveryFile> = BTreeMap::new();
         for job in jobs {
-            let list = self.run_job(&library_id, library, &query, job)?;
+            let method = match &job {
+                MethodJob::Browse => None,
+                MethodJob::Meta(method, _) | MethodJob::Scan(method, _) => Some(*method),
+                MethodJob::Bm25(_) => Some(wire::SearchMethod::Bm25),
+                MethodJob::Semantic(_) => Some(wire::SearchMethod::Semantic),
+            };
+            let list =
+                self.run_job(&library_id, library, &query, job)
+                    .map_err(|error| match method {
+                        Some(method) => error.context(FailedMethod(method)),
+                        None => error,
+                    })?;
             lists.push(list.ids);
             for (id, file) in list.files {
                 if let Some(existing) = files.get_mut(&id) {
@@ -3539,10 +3627,8 @@ impl NativeQueryController {
         loop {
             let step = run.step_library(library_id);
             if step.is_failed() {
-                let message = format!("{:#}", run.failure().expect("bm25 failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
-                let _ = run.finish();
-                bail!(message);
+                return Err(MethodRunFailure(Some(MethodRun::Bm25(Box::new(run)))).into());
             }
             if step.is_complete() {
                 break;
@@ -3574,10 +3660,8 @@ impl NativeQueryController {
         loop {
             let step = run.step_library(library_id);
             if step.is_failed() {
-                let message = format!("{:#}", run.failure().expect("scan failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
-                let _ = run.finish();
-                bail!(message);
+                return Err(MethodRunFailure(Some(MethodRun::Scan(Box::new(run)))).into());
             }
             if step.is_complete() {
                 break;
@@ -3608,10 +3692,8 @@ impl NativeQueryController {
         loop {
             let step = run.step_library(library_id);
             if step.is_failed() {
-                let message = format!("{:#}", run.failure().expect("metadata failure"));
                 self.data.as_mut().expect("actual owner").unavailable += run.unavailable_sources();
-                let _ = run.finish();
-                bail!(message);
+                return Err(MethodRunFailure(Some(MethodRun::Metadata(Box::new(run)))).into());
             }
             if step.is_complete() {
                 break;
@@ -3679,11 +3761,9 @@ impl NativeQueryController {
         let mut run =
             self.query
                 .start_semantic_for(library_id, self.claim.clone(), library, keyword);
-        if let Some(error) = run.failure() {
-            let message = format!("{error:#}");
+        if run.failure().is_some() {
             self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
-            let _ = run.finish();
-            bail!(message);
+            return Err(MethodRunFailure(Some(MethodRun::Semantic(Box::new(run)))).into());
         }
         self.data.as_mut().expect("actual owner").unavailable += run.unavailable_parts();
         self.keep_indexed_coverage(run.coverage()?);
@@ -3718,6 +3798,56 @@ impl NativeQueryController {
         data.sources.extend(sources.into_values());
         data.pages.extend(pages);
         Ok(DeliveryList { ids, files })
+    }
+}
+// Retain original owning failures until their existing finish/adoption path runs. In particular,
+// page/scope errors must remain inside the run so its real loans can be recovered and rejoined.
+enum MethodRun {
+    Bm25(Box<NativeBm25Run>),
+    Scan(Box<NativeScanRun>),
+    Metadata(Box<NativeMetadataRun>),
+    Semantic(Box<NativeWholeSemanticRun>),
+}
+struct MethodRunFailure(Option<MethodRun>);
+impl std::fmt::Debug for MethodRunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MethodRunFailure")
+    }
+}
+impl std::fmt::Display for MethodRunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native query method failed")
+    }
+}
+impl std::error::Error for MethodRunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self.0.as_ref()? {
+            MethodRun::Bm25(run) => run.failure(),
+            MethodRun::Scan(run) => run.failure(),
+            MethodRun::Metadata(run) => run.failure(),
+            MethodRun::Semantic(run) => run.failure(),
+        }
+        .map(|error| error.as_ref())
+    }
+}
+impl Drop for MethodRunFailure {
+    fn drop(&mut self) {
+        if let Some(run) = self.0.take() {
+            match run {
+                MethodRun::Bm25(run) => {
+                    let _ = (*run).finish();
+                }
+                MethodRun::Scan(run) => {
+                    let _ = (*run).finish();
+                }
+                MethodRun::Metadata(run) => {
+                    let _ = (*run).finish();
+                }
+                MethodRun::Semantic(run) => {
+                    let _ = (*run).finish();
+                }
+            }
+        }
     }
 }
 enum MethodJob {

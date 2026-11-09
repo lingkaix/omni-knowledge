@@ -465,8 +465,17 @@ pub(super) fn selected_context(library: &wire::Id, permit: &Permit) -> Result<St
         })
         .map_err(refused_error)
 }
+/// The original authority refusal remains typed through native owning error contexts.
+#[derive(Debug)]
+pub(super) struct NativeRefusal(pub(super) wire::ErrorCode);
+impl std::fmt::Display for NativeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "native source refused: {:?}", self.0)
+    }
+}
+impl std::error::Error for NativeRefusal {}
 pub(super) fn refused_error(code: wire::ErrorCode) -> anyhow::Error {
-    anyhow::anyhow!("native source refused: {code:?}")
+    NativeRefusal(code).into()
 }
 
 /// Real queued-work key bound to its selected source, not another executor/account or numeric grant.
