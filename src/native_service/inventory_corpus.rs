@@ -220,13 +220,55 @@ impl NativeRefreshJob {
             Some(model) => FundedTextProvider::requirement(model.config()?)?.memory_bytes,
             None => 0,
         };
+        let wire::Command::Refresh { budget, .. } =
+            self.permit.admitted_command().map_err(refused_error)?
+        else {
+            bail!("actual Refresh required");
+        };
+        // The direct processor's existing input/decoded limit is independent of compression.
+        // A smaller actual Refresh data ceiling remains authoritative.
+        let decoded = budget.max_bytes.get().min(crate::MAX_TEXT_BYTES as u64);
+        anyhow::ensure!(decoded > 0, "positive corpus extraction limit required");
+        // Same mature M3 layout: input extent+1; eight JSON capacities for the decoded result;
+        // two capture capacities plus 1MiB diagnostics and 1MiB watchdog; indexed metadata64KiB.
+        // Oversized originals are metadata-only before M3 allocates an input, so decoded+1 is
+        // a conservative source-input quote. The actual call still funds its true FD extent.
+        let cap = decoded
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(65_536))
+            .context("corpus parser transport quote overflow")?;
+        let m3 = cap
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(decoded.checked_add(1)?))
+            .and_then(|n| n.checked_add(2 * 1024 * 1024 + 64 * 1024))
+            .context("corpus parser peak overflow")?;
+        let shared = METADATA
+            .checked_add(PAGE_MEMORY + 128 * 1024 + 2 * 1024 * 1024)
+            .and_then(|n| n.checked_add(provider))
+            .context("corpus shared peak overflow")?;
+        // Source scopes/page/provider/admin remain live during M3. Kernel publication follows
+        // actual input.finish_stage/rejoin, so the two working phases need not overlap.
+        // Check all mandatory costs AND positive child credit before applying the unchanged cap.
+        let mandatory = shared
+            .checked_add(
+                kernel
+                    .memory_bytes
+                    .max(m3.checked_add(1).context("corpus child quote overflow")?),
+            )
+            .context("corpus mandatory peak overflow")?;
+        let ceiling = budget.max_memory_bytes.get();
+        anyhow::ensure!(
+            mandatory <= ceiling,
+            "complete corpus scope exceeds actual Refresh memory budget"
+        );
+        // Keep kernel-sized working headroom when it fits; None RSS still consumes only the
+        // actual Claim credit left after every M3 buffer and native sibling has been prepaid.
+        let desired = shared
+            .checked_add(kernel.memory_bytes)
+            .and_then(|n| n.checked_add(m3))
+            .context("corpus working peak overflow")?;
         Ok(Reservation {
-            memory_bytes: kernel.memory_bytes
-                + METADATA
-                + PAGE_MEMORY
-                + 128 * 1024
-                + 2 * 1024 * 1024
-                + provider,
+            memory_bytes: desired.min(ceiling),
             temporary_bytes: kernel.temporary_bytes + METADATA_DISK,
         })
     }
@@ -883,8 +925,11 @@ impl NativeCorpusDraft {
                     .job
                     .processing(self.actual_claim()?, observed, verification)
                     .context("corpus: admit current M1 source")?;
-                // Quote the SAME verified source's actual extent, not every source's whole request ceiling.
-                let max_bytes = usize::try_from(size.max(1))?; // Mature API requires a positive bound even for actual EOF.
+                // The compressed original extent counts toward the input-work budget above;
+                // decoded XML/text uses the existing independently configured finite bound.
+                let max_bytes =
+                    usize::try_from(verification.max_bytes.min(crate::MAX_TEXT_BYTES as u64))?;
+                anyhow::ensure!(max_bytes > 0, "positive corpus extraction limit required");
                 let start = self
                     .files
                     .as_ref()

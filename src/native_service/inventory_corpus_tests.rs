@@ -289,7 +289,10 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         .unwrap();
     let account = Account::current().unwrap();
     let need = job.corpus_requirement().unwrap();
-    assert!(need.memory_bytes < 256 * 1024 * 1024);
+    assert!(
+        need.memory_bytes > 0 && need.memory_bytes <= 512 * 1024 * 1024,
+        "complete producer quote must fit the unchanged actual Refresh memory budget"
+    );
     job.submit(NativeJobPlan {
         operation_id: "actual-corpus",
         job_id: "actual-corpus-job",
@@ -300,7 +303,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
             max_memory_bytes: 512 * 1024 * 1024,
         },
         reservation: Reservation {
-            memory_bytes: 256 * 1024 * 1024,
+            memory_bytes: need.memory_bytes.max(256 * 1024 * 1024),
             temporary_bytes: need.temporary_bytes,
         },
         priority: knowledge_core::jobs::Priority::Normal,

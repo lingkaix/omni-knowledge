@@ -91,7 +91,7 @@ fn prepared(
             max_memory_bytes: 512 * 1024 * 1024,
         },
         reservation: Reservation {
-            memory_bytes: 256 * 1024 * 1024,
+            memory_bytes: need.memory_bytes.max(256 * 1024 * 1024),
             temporary_bytes: need.temporary_bytes,
         },
         priority: knowledge_core::jobs::Priority::Normal,
@@ -640,7 +640,7 @@ fn actual_tuple_activation_recovery_and_writer_contention() {
                     max_memory_bytes: 512 * 1024 * 1024,
                 },
                 reservation: Reservation {
-                    memory_bytes: 256 * 1024 * 1024,
+                    memory_bytes: need.memory_bytes.max(256 * 1024 * 1024),
                     temporary_bytes: need.temporary_bytes,
                 },
                 priority: knowledge_core::jobs::Priority::Normal,

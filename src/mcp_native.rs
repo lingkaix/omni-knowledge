@@ -550,7 +550,7 @@ fn startup(service: &NativeLibraryService, owner: &Owner, session: &Session) -> 
             max_millis: 120000,
             max_memory_bytes: 512 * MIB,
         },
-        reservation: reservation(256 * MIB, need.temporary_bytes),
+        reservation: reservation(need.memory_bytes.max(256 * MIB), need.temporary_bytes),
         priority: Priority::Normal,
         max_attempts: 1,
     })?;
