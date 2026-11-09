@@ -1,22 +1,22 @@
 # Omni Knowledge
 
 Omni Knowledge keeps original files in ordinary folders and returns source-linked search results through a headless CLI and MCP.
-The first usable version is qualified on Linux x86_64 from code commit `c4d746e`.
+The first usable version is qualified on Linux x86_64 from code commit `c330983`.
 It covers lexical/BM25 search, Japanese BM25, DOCX extraction, and canonical and legacy MCP.
 See the [qualification summary](first-usable-version.md) for the exact artifact and evidence.
 
 ## Start On Linux
 
-Use `omni-knowledge-linux-x86_64-n06-c4d746e.tar.gz` supplied with this version.
-Its SHA-256 is `db6efe41c72e60254eab7b776d563d1042e4af3b16bce902d152845f59393e86`.
+Use `omni-knowledge-linux-x86_64-n07-c330983.tar.gz` supplied with this version.
+Its SHA-256 is `c179f63dc1ebfc86822291a3439bc69fb780ec6b11e08240b3ffd13c4357e217`.
 Keep the complete extracted directory, including `parser-worker`, licenses, and notices.
 
 ```sh
 set -e
-OMNI_ARCHIVE=/absolute/path/to/omni-knowledge-linux-x86_64-n06-c4d746e.tar.gz
-printf '%s  %s\n' 'db6efe41c72e60254eab7b776d563d1042e4af3b16bce902d152845f59393e86' "$OMNI_ARCHIVE" | sha256sum --check
+OMNI_ARCHIVE=/absolute/path/to/omni-knowledge-linux-x86_64-n07-c330983.tar.gz
+printf '%s  %s\n' 'c179f63dc1ebfc86822291a3439bc69fb780ec6b11e08240b3ffd13c4357e217' "$OMNI_ARCHIVE" | sha256sum --check
 mkdir -p "$HOME/.local/opt"
-OMNI_INSTALL="$HOME/.local/opt/omni-knowledge-c4d746e"
+OMNI_INSTALL="$HOME/.local/opt/omni-knowledge-c330983"
 mkdir "$OMNI_INSTALL"
 tar -xzf "$OMNI_ARCHIVE" -C "$OMNI_INSTALL" --strip-components=1
 OMNI_BIN="$OMNI_INSTALL/omni"
@@ -99,7 +99,7 @@ cargo build --workspace --release --bins --no-default-features --locked
 python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage "$PWD/dist/macos-arm64"
 python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage "$PWD/dist/macos-arm64" --verify
 mkdir -p "$HOME/.local/opt"
-OMNI_MAC_INSTALL="$HOME/.local/opt/omni-knowledge-c4d746e"
+OMNI_MAC_INSTALL="$HOME/.local/opt/omni-knowledge-c330983"
 mkdir "$OMNI_MAC_INSTALL"
 cp -R "$PWD/dist/macos-arm64/." "$OMNI_MAC_INSTALL/"
 OMNI_BIN="$OMNI_MAC_INSTALL/omni"
