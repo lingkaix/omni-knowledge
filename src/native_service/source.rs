@@ -344,6 +344,10 @@ impl NativeSource {
     pub fn context(&self) -> &str {
         &self.context
     }
+    /// Actual native selected source identity; observed data, never source or write authority.
+    pub fn id(&self) -> &wire::Id {
+        &self.wire_source
+    }
     /// Complete SAME-FD verified digest: current hash, or opaque producer receipt whose exact
     /// original FD/version is still current. Cached Query eligibility never rehashes whole sources.
     pub fn version(&self) -> &ContentDigest {

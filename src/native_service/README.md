@@ -148,3 +148,38 @@ For an EXISTING v1 `Response`, `source.into_delivery(response)` moves the same g
 `native_source_real_claim_key_and_delivery_bridge` executes real descriptor hash/version binding, two visible jobs while one is running, actual EEE funded-FD extraction, whole-value destruction before exact rejoin, terminal/stopped claim refusal, native queue settlement and source-change refusal after encoding. Original seven native controls remain active.
 
 This compiled boundary does not certify the consumer's five caller repairs, close consequential rereview of the three 9ed findings, or activate native M6. Generic held-archive lexical/vector IO and native provider ownership have separate qualified controls; full Root disk-vector/query activation, full-corpus streaming/complete generation selection and full native macOS acceptance remain required. No waiting for FSEvents and no host inotify changes/suppression are part of this slice.
+
+## Native publication and snapshot activation ports
+
+`src/mcp_native.rs` exports the native core ports for mechanical face adapters; it contains no dispatcher or separate job engine.
+Use `connect_selected` with the actual owner-created selection and `native_scope` for the real routed command and native approval channel.
+A fabricated metadata command, equal library label, callback Boolean or output path does not supply effect authority.
+
+`NativePublicationPlan::epub` binds the actual approved EpubPlan, ordered paid members, complete native recipe and a separate actual selected destination root.
+`derived` binds the actual Process/Extract or Process/Media command, selected source/version, explicit confined final names and that separate destination selection.
+Quote `metadata_requirement` or `derived_metadata_requirement` before copying the plan, then compose `plan.requirement(processing_requirement)` before queue submission.
+The recipe includes actual destination device/inode/revision; plan IDs and recipe digests are data only.
+`export_epub_planned`, `extract_planned` and `segment_video_planned` split the complete publication sibling from the same actual Claim before M3 chooses remaining child RSS.
+Call the resulting `NativeAdmitted::publish`, borrow its checked value if needed, and complete only after the last consumer.
+Text uses the existing paid UTF-8 bytes; EPUB and clips copy actual held FDs in one bounded window.
+Each final file uses a private exclusive inode, no-clobber link and durable directory sync; earlier completed clips retain their exact FD/version records through the final consumer.
+A later collision preserves earlier completed clips and the competitor.
+The owning error retains actual phase, FDs, Claim, guards and credit; collection finishes started effects independently of revoked policy without rolling back another actor's files.
+
+Only the exact EPUB empty-output receipt or exact initially empty private video-directory receipt can reconcile a collected unknown writer.
+The video receipt requires complete group/pipe collection, two matching bounded directory/actual returned-descriptor inventories and the original call's unique storage credit.
+It accounts only the remaining delta after prior clips, including zero at final verification; unknown or changed members retain the unresolved owner and charge.
+Generic unknown writes remain unresolved; EOF, child exit, an artifact name or an estimated extent cannot release their credit.
+Foreground owner drop continues actual bounded collection; hosts must not bypass it with process exit.
+
+`NativeTrustedArchive::verify` requires the actual approved OpenFrozen source, owner/selection, live Arc<Claim>, exact finite bounds and explicit native signer policy.
+The existing History native verifier checks a detached SSHSIG over the decoded snapshot digest under `omni-knowledge.snapshot.v1`, using native selected known keys and the same Claim.
+Known-required accepts only ValidKnown; explicit unsigned allows unsigned or known-valid, never invalid or unknown-key downgrade.
+Package framing remains Unverified until this native verification succeeds.
+`NativeTrustedArchive::open_generation` uses the mature STORED kernel reader with compiled Root identities and no extraction or loose-source fallback.
+Every verifier/read/refill spends the same aggregate byte bound and checks the real source, policy epoch, Claim and deadline.
+Retain that same live Claim until the last archive/range/result is destroyed, then settle its rightful job.
+
+`prepare_corpus_refresh` initializes the existing kernel runtime before queue admission and returns the existing owned refresh job.
+Its `activate_corpus` builds, seals, selects and retires through the existing tuple owner; the caller still settles the same real job after all consumers.
+These ports do not assert automatic CLI/MCP routing, installed artifact acceptance, external host publication or native macOS execution.

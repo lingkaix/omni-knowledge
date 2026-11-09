@@ -49,8 +49,11 @@ Package indexes stay STORED and are not copied into the home.
 `FrozenArchive`/`IndexDirectory` supply actual verified STORED ranges; native compatibility uses complete identities, not that boolean.
 After the `6deb711` partial review, `index_decision` returns `Result<IndexDecision, Error>` and `index_paths` returns `Result<&[RelativePath], Error>` with cooperative, pre-admitted linearithmic membership checks and no input-order requirement.
 The README compiles this migration for the kernel consumer.
-Until actual kernel queries compose that source, the installation preview's `kernel_not_wired` fallback remains truthful and core bytes stay usable.
-Search of STORED generations and exact float32 vectors remains required. It is unfinished. `required_features` still refuse installation.
+Ordinary unqualified capture retains the `kernel_not_wired` fallback and core bytes stay usable.
+`capture_with_indexes` records actual selected producer inventory and explicit native identity data using the same encoder; a nonempty set may contain legitimate zero-length components.
+Root `NativeTrustedArchive` composes actual known-key or explicit-unsigned native trust and the existing STORED kernel reader under the same live Claim and selection epoch.
+The consuming kernel independently checks native format and complete lexical/vector identities; `required_features` still refuse installation.
+Installed product routing and native macOS acceptance remain separate obligations.
 
 ## EPUB
 
@@ -61,15 +64,15 @@ The output inode is the caller's empty private file. A logical name is not opene
 
 ## Concrete Cross-Owner Binding Tasks
 
-These tasks remain obligations, not waivers or claims of a complete M5 delivery.
-The product edit is `knowledge-package`. Storage and history bodies are unchanged.
+These bindings have separate scopes; compiled Root trust/query controls do not imply installed or external-host acceptance.
+The package remains a data/descriptor boundary; it creates no authority, account or history engine.
 
 | Source owner | Required binding and acceptance |
 | --- | --- |
 | M1 storage owner | Call `Store::import_copy` with the held read-only descriptor and `Preflight`, or `Store::prepare` plus `Store::install`, on one `Scope` and the current `WritePolicy`. File-exists conflict and a stale expected version retain the destination and the original. Unknown files are not adopted or deleted. | 
 | History owner | Call `verify_bundle` and `admit_bundle` with the held descriptor, exact digest, and existing `Claim`. Admit objects only. Keep refs, checkout, config, hooks, remotes, and trust inert. Snapshot activation is not claimed. |
-| Signer-policy integration owner | Bind `inspect` signature observations to user/system SSHSIG trust verification over the decoded snapshot digest with namespace `omni-knowledge.snapshot.v1`; do not promote `Unverified` to trust. |
-| Retrieval integration owner | Connect `IndexSet` STORED generations to the kernel Directory provider with first-use digest/version checks and exact float32 query evidence; retain the explicit `kernel_not_wired` fallback until then. |
+| Signer-policy integration owner | Root binds `FrozenArchive::verify_manifest_signature` to the actual funded History native SSHSIG verifier over the decoded snapshot digest with namespace `omni-knowledge.snapshot.v1`; `Unverified` alone is never trust. |
+| Retrieval integration owner | Root uses the existing STORED generation provider with source/Claim/epoch/deadline and aggregate refill admission; unqualified capture retains `kernel_not_wired`, native indexed capture supplies explicit producer identities. |
 | Compatibility integration owner | `V1Package` verifies held genuine directories and TAR. `V1Projection` pins actual native and foreign files, maps paths, assets, parsed destinations, and Source scalars, and publishes only reopened output bound to separately supplied host context. Remapped locator scalars stay YAML strings, including plain `null`, boolean, and numeric filenames. Real external host publication is still open. |
 | Processing owner | Call `export_epub_held_funded` with `HeldMember` order equal to the spine order. Do not hash a descriptor and reopen a path. Do not treat the book as publication authority. |
 
@@ -77,7 +80,7 @@ The product edit is `knowledge-package`. Storage and history bodies are unchange
 
 These are not closed by this crate and are not waived:
 
-- SSH signer policy. `Signature::Unverified` is not trust. Git `ValidKnown` is not detached snapshot trust.
-- Kernel query of STORED index generations and exact float32 vectors. C5 `NativeSource` and `Delivery` live on the root service at `71290207` and are not a package dependency. Worker exit `c9` remains open. `FrozenArchive` is the held source and is not kernel search.
+- Installed integration must use the actual native signer policy and trust owner. `Signature::Unverified` is not trust. Git `ValidKnown` is not detached snapshot trust.
+- Installed kernel query acceptance must retain the actual Root archive owner and consuming native identities. `FrozenArchive` alone is a held source and does not execute kernel search.
 - Genuine external host publication. Supplied context fixtures are not Notebook acceptance.
-- Snapshot activation, remote publication, and schedule publication. Inert object admission does not close them. macOS execution of this binding is not observed. Admission stays P1 `d51cdde`.
+- Installed snapshot routing, remote publication and schedule publication acceptance. Inert object admission does not close them. macOS execution of this binding is not observed. The existing sole Core account remains the admission owner.

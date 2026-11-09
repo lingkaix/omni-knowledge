@@ -286,7 +286,7 @@ fn held_native_input<T>(source: &mut VerifiedSource, private: &Path,
 
 No registry or workflow engine is added in this slice.
 Same-core import, text install, inert object admission, and ordered held EPUB encoding are linked on Linux.
-Native SSH signer and revocation policy, kernel queries of STORED directories and float32 segments, snapshot activation, remote and schedule publication, macOS execution, and an external host publication receipt remain required and unclaimed.
+Root now composes actual native detached-signature trust and STORED kernel activation through `NativeTrustedArchive`; installed product routing, macOS execution and an external host publication receipt remain separate acceptance obligations.
 `Signature::Unverified` is not trust. A Git `ValidKnown` result is not detached snapshot trust for namespace `omni-knowledge.snapshot.v1`.
 `required_features` still refuse installation. Supplied context fixtures are not external Notebook acceptance.
 
@@ -298,3 +298,17 @@ cargo clippy -p knowledge-package --all-targets --locked --offline -- -D warning
 cargo test -p knowledge-package --locked --offline
 cargo doc -p knowledge-package --no-deps --locked --offline
 ```
+
+## Native indexed capture and detached snapshot verification
+
+`capture_with_indexes` uses the same streaming capture encoder with explicit producer `IndexRequirements` and the actual complete selected Role::Index inputs.
+It requires a nonempty index set, preserves legitimate zero-length STORED components and emits digested component inventory plus complete native identity data.
+It does not validate the index engine's binary format or grant trust; the consuming kernel independently validates that format and all required identities.
+Ordinary `capture` retains the explicit unqualified-index omission behavior.
+
+`FrozenArchive::verify_manifest_signature` reads bounded detached signature bytes from the same pinned verified archive and calls `History::verify_snapshot_signature` with the actual native owner and live HistoryWork.
+The signature covers the decoded canonical snapshot digest in namespace `omni-knowledge.snapshot.v1`.
+`ManifestVerificationError` preserves the actual typed native unsettled child owner for collection.
+The framing `Signature::Unverified` value alone still grants nothing; native Root selects known-key or explicit-unsigned policy and retains its current selection and Claim through later reads.
+`guarded_reader_metered_capped` borrows only its validated finite verifier cap from the caller's real Holding and charges aggregate read admission before archive I/O.
+It neither raises package bounds nor creates another account.

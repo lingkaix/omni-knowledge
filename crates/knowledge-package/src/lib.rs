@@ -12,7 +12,7 @@
 //! [`V1Package`] verifies genuine directory/TAR inventories without extracting a TAR filesystem.
 //! [`V1Projection`] pins explicit native/foreign core mappings and publishes host-manifest-bound artifacts.
 //! On Linux and macOS, held descriptors call `Store::import_copy`, `Store::install`, `History::verify_bundle`, `History::admit_bundle`, and ordered `export_epub_held_funded`.
-//! Signer trust, kernel search, snapshot activation, macOS execution, and external host publication remain open.
+//! Root composes detached native signer trust and STORED kernel activation; installed/macOS/external-host acceptance remains separate.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
@@ -53,12 +53,14 @@ mod scalar_control;
 mod source;
 mod tar;
 
-pub use capturing::capture;
+pub use capturing::{capture, capture_with_indexes};
 pub use compatibility::{
     IndexDecision, IndexDirectory, IndexOmission, IndexRequirements, VectorSpace,
 };
 pub use delegation::OwnerHandoff;
 pub use foreign::{V1Directory, V1Package};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use frozen::ManifestVerificationError;
 pub use frozen::{ArchiveVersion, EntryRange, FrozenArchive, StoredRange};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use owners::{
@@ -268,6 +270,8 @@ pub struct Work<'a> {
     current: Option<&'a dyn Fn() -> Result<(), Error>>,
     /// Read-only slice of the actual already reserved holding, never another pool.
     prepaid_memory: Option<u64>,
+    /// Native caller's aggregate byte admission, observed BEFORE controlled archive IO.
+    read_admission: Option<&'a dyn Fn(u64) -> Result<(), Error>>,
 }
 
 impl<'a> Work<'a> {
@@ -276,6 +280,14 @@ impl<'a> Work<'a> {
         bounds: &'a Bounds,
         holding: &'a mut Holding,
         cancel: &'a AtomicBool,
+    ) -> Result<Self, Error> {
+        Self::new_with_cap(bounds, holding, cancel, None)
+    }
+    fn new_with_cap(
+        bounds: &'a Bounds,
+        holding: &'a mut Holding,
+        cancel: &'a AtomicBool,
+        cap: Option<u64>,
     ) -> Result<Self, Error> {
         let quotas = bounds.quotas;
         if bounds.budget.max_files == 0
@@ -295,7 +307,11 @@ impl<'a> Work<'a> {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(bounds.budget.max_millis))
             .ok_or(Error::Invalid)?;
-        let retained = holding.remaining().map_err(admission_error)?.memory_bytes;
+        let held = holding.remaining().map_err(admission_error)?.memory_bytes;
+        let retained = cap.unwrap_or(held);
+        if cap.is_some() && (retained == 0 || retained > held) {
+            return Err(Error::TooLarge);
+        }
         if retained > bounds.budget.max_memory_bytes {
             return Err(Error::TooLarge);
         }
@@ -311,6 +327,7 @@ impl<'a> Work<'a> {
             temporary_total: 0,
             current: None,
             prepaid_memory: None,
+            read_admission: None,
         })
     }
 
@@ -352,6 +369,20 @@ impl<'a> Work<'a> {
         Ok(work)
     }
 
+    /// Bind the actual caller's aggregate read ceiling before each bounded archive refill.
+    /// The callback meters data only; actual source/Claim authority stays in `current`.
+    pub fn guarded_reader_metered(
+        bounds: &'a Bounds,
+        holding: &'a mut Holding,
+        cancel: &'a AtomicBool,
+        current: &'a dyn Fn() -> Result<(), Error>,
+        read: &'a dyn Fn(u64) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
+        let mut work = Self::guarded_reader(bounds, holding, cancel, current)?;
+        work.read_admission = Some(read);
+        Ok(work)
+    }
+
     /// Borrow only the initial verifier's portion of an ALREADY paid complete reader peak.
     /// This restricts the existing local liveness counter; it creates no credit/pool and
     /// cannot enlarge the actual holding. The remaining paid portion covers simultaneous
@@ -363,11 +394,27 @@ impl<'a> Work<'a> {
         current: &'a dyn Fn() -> Result<(), Error>,
         memory: u64,
     ) -> Result<Self, Error> {
-        let mut work = Self::guarded_reader(bounds, holding, cancel, current)?;
-        if memory == 0 || work.prepaid_memory.is_none_or(|held| memory > held) {
-            return Err(Error::TooLarge);
-        }
+        current()?;
+        let mut work = Self::new_with_cap(bounds, holding, cancel, Some(memory))?;
+        work.current = Some(current);
         work.prepaid_memory = Some(memory);
+        work.live.set(0);
+        gate(&work)?;
+        Ok(work)
+    }
+
+    /// Restrict the initial verifier's portion of a larger paid native reader, with aggregate byte admission.
+    /// The native range table and later opaque reader remain covered by the SAME external Holding.
+    pub fn guarded_reader_metered_capped(
+        bounds: &'a Bounds,
+        holding: &'a mut Holding,
+        cancel: &'a AtomicBool,
+        current: &'a dyn Fn() -> Result<(), Error>,
+        read: &'a dyn Fn(u64) -> Result<(), Error>,
+        memory: u64,
+    ) -> Result<Self, Error> {
+        let mut work = Self::guarded_reader_capped(bounds, holding, cancel, current, memory)?;
+        work.read_admission = Some(read);
         Ok(work)
     }
 
@@ -1370,6 +1417,12 @@ pub(crate) fn note_file(work: &mut Work<'_>) -> Result<(), Error> {
 }
 
 /// Charge actual read bytes against the call, never a declared source length.
+pub(crate) fn admit_read(work: &Work<'_>, bytes: u64) -> Result<(), Error> {
+    if let Some(read) = work.read_admission {
+        read(bytes)?;
+    }
+    Ok(())
+}
 pub(crate) fn note_read(work: &mut Work<'_>, bytes: u64) -> Result<(), Error> {
     work.read_bytes = work.read_bytes.checked_add(bytes).ok_or(Error::Quota)?;
     if work.read_bytes > work.bounds.budget.max_bytes {

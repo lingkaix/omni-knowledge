@@ -9,6 +9,10 @@ use knowledge_processing::extract::Extraction;
 use std::fs::File;
 use std::time::Duration;
 
+#[path = "publication.rs"]
+mod publication;
+pub use publication::{NativeDerivedRecipe, NativePublicationPlan};
+
 /// Paid extraction with the original public source/Claim lifetime contract.
 pub type NativeExtraction = NativeAdmitted<Extraction>;
 /// Extraction failure retaining its actual native resource owner.
@@ -21,10 +25,16 @@ pub(super) struct Inputs {
     pub leases: Vec<File>,
     pub _scratch: Option<super::held::Scratch>,
     pub resources: Vec<Holding>,
+    pub publication: Option<publication::Publication>,
+    pub epub_writer: Option<super::held::EpubWriteReceipt>,
+    pub video_writer: Option<super::held::VideoWriteReceipt>,
 }
 impl Inputs {
     /// Check each independently admitted member, including its current namespace and read policy.
     fn check(&self) -> Result<()> {
+        if let Some(publication) = &self.publication {
+            publication.check()?;
+        }
         for source in &self.sources {
             source.check()?;
         }
@@ -41,6 +51,9 @@ impl Drop for Inputs {
         self.sources = Vec::new();
         self.leases = Vec::new();
         self._scratch.take();
+        self.publication.take();
+        self.epub_writer.take();
+        self.video_writer.take();
         for holding in &mut self.resources {
             while holding.finish().is_err() {
                 std::thread::sleep(Duration::from_millis(250));
@@ -691,6 +704,9 @@ impl<T> NativeAdmitted<T> {
                 .expect("native processing owner")
                 .check_independent_completion()?;
             self.value()?;
+            if let Some(publication) = &self.inputs.publication {
+                publication.require_installed()?;
+            }
             self.collect()?;
             let processing = self.processing.as_ref().expect("native processing owner");
             let claim = self.claim.as_ref().expect("native claim owner");
@@ -753,9 +769,39 @@ impl<T> NativeAdmitted<T> {
             && let Some(child) =
                 pending.downcast_mut::<knowledge_processing::worker::UnsettledChild>()
         {
+            let start = self.retained.len();
             self.retained
                 .extend(child.collect()?.into_iter().map(|holding| (holding, false)));
             self.child_collected = true;
+            if let Some(receipt) = &mut self.inputs.epub_writer {
+                receipt.collected(start..self.retained.len());
+            }
+            if let Some(receipt) = &mut self.inputs.video_writer {
+                receipt.collected(start..self.retained.len());
+            }
+        }
+        if self.child_collected
+            && let Some(receipt) = &mut self.inputs.epub_writer
+        {
+            receipt.reconcile(&mut self.retained)?;
+        }
+        if self.child_collected
+            && let Some(receipt) = &mut self.inputs.video_writer
+            && let Some(child) = self
+                .pending
+                .as_ref()
+                .and_then(|e| e.downcast_ref::<knowledge_processing::worker::UnsettledChild>())
+        {
+            receipt.reconcile(&mut self.retained, child.descriptors())?;
+        }
+        if self.child_collected
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|error| error.is::<knowledge_processing::worker::UnsettledChild>())
+        {
+            // Actual child descriptors/artifact records must die before their returned costs finish.
+            self.pending.take();
         }
         if let Some(pending) = self.pending.as_mut()
             && let Some(write) =
@@ -795,6 +841,9 @@ impl<T> NativeAdmitted<T> {
             self.retained
                 .extend(retained.into_iter().map(|holding| (holding, true)));
             self.pending = Some(cause);
+        }
+        if let Some(publication) = &mut self.inputs.publication {
+            publication.collect()?;
         }
         if let Some(scratch) = &self.inputs._scratch {
             scratch.check()?;

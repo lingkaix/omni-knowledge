@@ -14,6 +14,66 @@ pub fn capture(
     inputs: &mut [Input<'_>],
     work: &mut Work<'_>,
 ) -> Result<Captured, Error> {
+    capture_inner(capture, inputs, None, work)
+}
+
+/// Capture the actual selected native generation with explicit producer identity data.
+/// The index set must be nonempty and all its inputs must be STORED; the consumer still verifies native formats.
+/// The ordinary `capture` entrypoint retains its explicit unqualified-index omission.
+pub fn capture_with_indexes(
+    capture: &mut Capture<'_>,
+    inputs: &mut [Input<'_>],
+    native: &IndexRequirements<'_>,
+    work: &mut Work<'_>,
+) -> Result<Captured, Error> {
+    capture_inner(capture, inputs, Some(native), work)
+}
+
+/// One encoder and ownership path for ordinary captures and native indexed captures.
+fn capture_inner(
+    capture: &mut Capture<'_>,
+    inputs: &mut [Input<'_>],
+    native: Option<&IndexRequirements<'_>>,
+    work: &mut Work<'_>,
+) -> Result<Captured, Error> {
+    let identity_bytes = native.map_or(Ok(0), |n| {
+        let fields = [
+            n.kernel_build,
+            n.lexical_format,
+            n.segment_format,
+            n.processor,
+            n.dictionary,
+            n.generation,
+        ];
+        if fields.iter().any(|f| f.is_empty()) || !inputs.iter().any(|i| i.role == Role::Index) {
+            return Err(Error::Invalid);
+        }
+        let mut size = fields.iter().try_fold(4096u64, |sum, f| {
+            sum.checked_add(f.len() as u64).ok_or(Error::TooLarge)
+        })?;
+        if let Some(m) = n.model_space {
+            if m.dimension == 0 {
+                return Err(Error::Invalid);
+            }
+            for field in [
+                m.provider,
+                m.model,
+                m.revision,
+                m.metric,
+                m.normalization,
+                m.preprocessing,
+            ] {
+                if field.is_empty() {
+                    return Err(Error::Invalid);
+                }
+                size = size
+                    .checked_add(field.len() as u64)
+                    .ok_or(Error::TooLarge)?;
+            }
+        }
+        size.checked_mul(16).ok_or(Error::TooLarge)
+    })?;
+    let _native_metadata = preallocate(work, identity_bytes)?;
     operation_id(capture.operation_id)?;
     gate(work)?;
     if inputs.len() as u64 + 1 > work.bounds.quotas.max_entries {
@@ -121,12 +181,35 @@ pub fn capture(
             if digested.windows(2).any(|p| p[0].path == p[1].path) {
                 return Err(Error::Invalid);
             }
-            let coverage = coverage_for(
+            let mut coverage = coverage_for(
                 digested.len() as u64,
                 capture.omitted,
                 &capture.external,
                 digested.iter().any(|i| i.role == Role::Index),
             );
+            let mut indexes = index_set(&digested);
+            if let Some(n) = native {
+                if digested
+                    .iter()
+                    .any(|i| i.role == Role::Index && i.method != Method::Stored)
+                {
+                    return Err(Error::Invalid);
+                }
+                let index = indexes.as_mut().ok_or(Error::Invalid)?;
+                let model = n.model_space.map(|m| serde_json::json!({
+                    "provider":m.provider,"model":m.model,"revision":m.revision,"dimension":m.dimension,
+                    "metric":m.metric,"normalization":m.normalization,"preprocessing":m.preprocessing,
+                    "representation":"exact-f32"
+                }));
+                index.metadata.insert("identity".into(), serde_json::json!({
+                    "version":1,"kernel_build":n.kernel_build,"lexical_format":n.lexical_format,
+                    "segment_format":n.segment_format,"processor":n.processor,"dictionary":n.dictionary,
+                    "generation":n.generation,"model_space":model
+                }));
+                index.compatible = true;
+                index.fallback = None;
+                coverage.indexes = IndexCoverage::Complete;
+            }
             if capture.require_complete
                 && (coverage.unverified > 0 || coverage.pending > 0 || coverage.unavailable > 0)
             {
@@ -160,7 +243,7 @@ pub fn capture(
                     });
                     e
                 },
-                indexes: index_set(&digested),
+                indexes,
                 history: blob_for(&digested, Role::History),
                 journal: blob_for(&digested, Role::Journal),
                 window: capture.window.clone(),

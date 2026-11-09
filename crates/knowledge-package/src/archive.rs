@@ -686,6 +686,7 @@ fn read_exact_at(
         return Err(Error::Quota);
     }
     gate(work)?;
+    crate::admit_read(work, len)?;
     file.seek(SeekFrom::Start(pos)).map_err(|_| Error::Io)?;
     let mut done = 0;
     while done < buf.len() {

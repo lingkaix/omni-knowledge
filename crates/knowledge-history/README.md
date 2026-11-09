@@ -237,3 +237,11 @@ These are local Git transaction facts, not a generic transaction registry or sec
 Run `cargo test --locked --offline -j2 -p knowledge-history`, strict package Clippy, and workspace formatting with private target/TMPDIR/dictionary directories.
 Builder tests use real disposable Git repositories and public operations, including interrupted prepare/publish, ref locks, concurrent writers, immutable old generations, proposals, and hostile inputs.
 Independent milestone durability review and public-interface tests are integration obligations, not self-approval by this builder.
+
+## Detached native snapshot signatures
+
+`History::verify_snapshot_signature` checks the decoded 32-byte canonical snapshot digest with the existing native SSHSIG verifier under namespace `omni-knowledge.snapshot.v1`.
+It requires the actual NativeHistoryOwner and HistoryWork with a live Arc<Claim> and exact full key; Git object verification still uses namespace `git`.
+Unsigned, valid unknown, valid known and invalid signatures remain distinct facts.
+The native caller decides known-key or explicit-unsigned activation policy; verification itself grants no imported root access or publication authority.
+Unknown native collection keeps its existing owning error and actual funded work until group, pipes and I/O settle.

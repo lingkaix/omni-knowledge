@@ -48,6 +48,12 @@ pub struct KnownSigner {
     public_key: String,
 }
 impl KnownSigner {
+    /// Observed retained public-policy bytes for a native caller's prepaid metadata quote.
+    /// This is data only, not trust or permission to use the key.
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.principal.capacity() + self.public_key.capacity()
+    }
+
     /// Select exact public material/principal; the native host, not this data constructor, owns human authorization.
     pub fn selected(principal: &str, public_key: &str) -> Result<Self, Error> {
         if principal.is_empty()
@@ -268,6 +274,48 @@ impl History {
             &call,
         )?;
         verify(&self.runtime, &actual, known, scratch.path(), &call)
+    }
+
+    /// Verify a detached SSHSIG over the actual decoded canonical snapshot digest.
+    /// Trust keys come only from the native host's explicit signer policy, never archive material.
+    /// The existing original Arc<Claim>/Holding/native group owner covers the actual verifier.
+    pub fn verify_snapshot_signature(
+        &self,
+        snapshot: &knowledge_core::data::ContentDigest,
+        signature: Option<&[u8]>,
+        known: &[KnownSigner],
+        owner: &NativeHistoryOwner,
+        work: HistoryWork<'_>,
+    ) -> Result<Verification, Error> {
+        let call = work.call(self, owner)?;
+        let Some(signature) = signature else {
+            return Ok(Verification {
+                state: SignatureState::Unsigned,
+                principal: None,
+                fingerprint: None,
+            });
+        };
+        if signature.len() > 65_536 {
+            return Err(Error::Capacity);
+        }
+        let mut payload = [0u8; 32];
+        for (out, pair) in payload
+            .iter_mut()
+            .zip(snapshot.as_str().as_bytes().as_chunks::<2>().0)
+        {
+            *out = u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| Error::Invalid)?, 16)
+                .map_err(|_| Error::Invalid)?;
+        }
+        let scratch = self.scratch(&call)?;
+        verify_detached(
+            &self.runtime,
+            &payload,
+            signature,
+            known,
+            "omni-knowledge.snapshot.v1",
+            scratch.path(),
+            &call,
+        )
     }
 
     /// Deterministic unsigned payload; its exact persisted signed bytes are retried without requesting another signature.
@@ -563,18 +611,41 @@ fn verify(
             fingerprint: None,
         });
     };
+    verify_detached(runtime, &payload, &signature, known, "git", scratch, call)
+}
+
+fn verify_detached(
+    runtime: &native::Runtime,
+    payload: &[u8],
+    signature: &[u8],
+    known: &[KnownSigner],
+    namespace: &str,
+    scratch: &Path,
+    call: &Call,
+) -> Result<Verification, Error> {
+    call.check()?;
+    if known.len() as u64 > call.files || signature.len() > call.limit {
+        return Err(Error::Capacity);
+    }
     if !signature.starts_with(b"-----BEGIN SSH SIGNATURE-----\n") {
         return Err(Error::Invalid);
     }
     let signature_path = scratch.join("verification.sig");
-    fs::write(&signature_path, &signature)?;
+    fs::write(&signature_path, signature)?;
     let signature_path = signature_path.to_str().ok_or(Error::Invalid)?;
     let checked = tool(
         runtime,
         scratch,
         "/usr/bin/ssh-keygen",
-        &["-Y", "check-novalidate", "-n", "git", "-s", signature_path],
-        &payload,
+        &[
+            "-Y",
+            "check-novalidate",
+            "-n",
+            namespace,
+            "-s",
+            signature_path,
+        ],
+        payload,
         None,
         call,
     )?;
@@ -595,8 +666,8 @@ fn verify(
         fs::write(
             &allowed,
             format!(
-                "{} namespaces=\"git\" {}",
-                signer.principal, signer.public_key
+                "{} namespaces=\"{}\" {}",
+                signer.principal, namespace, signer.public_key
             ),
         )?;
         let verified = tool(
@@ -611,11 +682,11 @@ fn verify(
                 "-I",
                 &signer.principal,
                 "-n",
-                "git",
+                namespace,
                 "-s",
                 signature_path,
             ],
-            &payload,
+            payload,
             None,
             call,
         )?;

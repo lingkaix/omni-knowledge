@@ -296,6 +296,119 @@ fn read_selected(service: &NativeLibraryService, owner: &Owner, session: &Sessio
     drop(permit);
 }
 
+/// Run the real cold whole-query controller against the startup/watch-selected tuple for each method.
+fn cold_query_selected(service: &NativeLibraryService, owner: &Owner, session: &Session) {
+    let account = Account::current().unwrap();
+    for (method, keyword) in [
+        ("bm25", "alpha"),
+        ("literal", "alpha survives native restart"),
+        ("regex", "^alpha.*restart$"),
+        ("files", "activation"),
+    ] {
+        let command = wire::decode_request(&serde_json::to_vec(&serde_json::json!({
+            "wire_version":1,"request_id":"cold-startup-query","command":{"op":"query","query":{
+                "library_ids":[service.library_id().as_str()],"keywords":[keyword],"methods":[method],
+                "required_tags":[],"case_sensitive":false,"limit":10,"image_query":null,
+                "budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"}
+            }}
+        })).unwrap()).unwrap().command;
+        let permit = service.native_scope(session, &command, None).unwrap();
+        let reader = service
+            .open_corpus_tuple(owner, permit.clone(), ready(NativeTupleRead::requirement()))
+            .unwrap();
+        let scan = reader.test_header().unwrap()["scan"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut scratch = holding(4 * 1024 * 1024, 0);
+        let inventory = service
+            .inventory_for_query(
+                owner,
+                &permit,
+                "wiki",
+                &scan,
+                holding(2 * 1024 * 1024, 0),
+                &Preflight {
+                    holding: &scratch,
+                    budget: Budget {
+                        max_files: 1000,
+                        max_bytes: 8 * 1024 * 1024,
+                        max_millis: 60000,
+                        max_memory_bytes: 4 * 1024 * 1024,
+                    },
+                },
+            )
+            .unwrap();
+        let query = NativeTupleQuery::prepare(
+            vec![NativeQueryLibrary::new(reader, inventory, None)],
+            ready(NativeTupleQuery::metadata_requirement()),
+        )
+        .unwrap();
+        let need = query.requirement_all().unwrap();
+        let wire::Command::Query { query: admitted } = &command else {
+            unreachable!()
+        };
+        assert!(
+            need.memory_bytes <= 512 * 1024 * 1024,
+            "cold fixture keeps its original512MiB ceiling"
+        );
+        let submitted = query
+            .submit(NativeJobPlan {
+                operation_id: method,
+                job_id: method,
+                budget: Budget {
+                    max_files: admitted.budget.max_files.get(),
+                    max_bytes: admitted.budget.max_bytes.get(),
+                    max_millis: admitted.budget.max_millis.get(),
+                    max_memory_bytes: need.memory_bytes,
+                },
+                reservation: need,
+                priority: knowledge_core::jobs::Priority::Normal,
+                max_attempts: 1,
+            })
+            .unwrap();
+        let claim = Arc::new(account.queue().claim(Instant::now()).unwrap().unwrap());
+        assert_eq!(claim.job(), submitted.job);
+        let controller = query.start_controller(claim.clone()).unwrap();
+        assert!(
+            controller.failure().is_none(),
+            "cold {method} controller: {:#}",
+            controller.failure().unwrap()
+        );
+        let result = controller.search_result().unwrap();
+        assert_eq!(result.groups.len(), 1);
+        let group = &result.groups[0];
+        assert_eq!(&group.library_id, service.library_id());
+        assert_eq!(group.generation_id.as_ref().unwrap().as_str(), scan);
+        assert_eq!(group.coverage.enumeration, wire::Enumeration::Complete);
+        assert_eq!(group.coverage.unsupported.get(), 0);
+        assert_eq!(
+            group.files.len(),
+            1,
+            "cold {method} must find the actual original"
+        );
+        assert_eq!(group.files[0].source.path.as_str(), "raw/activation.md");
+        assert_eq!(account.status().unwrap().queue.unsettled, 1);
+        let (returned, alias) = controller
+            .finish()
+            .unwrap_or_else(|_| panic!("cold {method} native consumers remained live"));
+        drop((returned, alias));
+        let claim = Arc::try_unwrap(claim)
+            .unwrap_or_else(|_| panic!("cold {method} retained its actual Claim"));
+        account
+            .queue()
+            .settle(
+                &claim,
+                query.key(),
+                knowledge_core::jobs::Outcome::Completed,
+            )
+            .unwrap();
+        drop(query);
+        scratch.finish().unwrap();
+        assert_eq!(account.status().unwrap().queue.unsettled, 0);
+    }
+}
+
 /// Run each scenario with its own actual process-wide Core account and private synthetic cache.
 fn child_command(
     mode: &str,
@@ -421,6 +534,7 @@ fn actual_tuple_activation_recovery_and_writer_contention() {
             "retire-generation-race",
             "retire-readers-race",
             "model-change",
+            "startup-watch",
         ] {
             let cache = tempfile::tempdir().unwrap();
             let home = tempfile::tempdir().unwrap();
@@ -447,7 +561,16 @@ fn actual_tuple_activation_recovery_and_writer_contention() {
             } else {
                 child(mode, home.path(), cache.path(), receipts.path());
             }
-            child("read", home.path(), cache.path(), receipts.path());
+            child(
+                if mode == "startup-watch" {
+                    "read-dispatch"
+                } else {
+                    "read"
+                },
+                home.path(),
+                cache.path(),
+                receipts.path(),
+            );
         }
         return;
     };
@@ -474,9 +597,12 @@ fn actual_tuple_activation_recovery_and_writer_contention() {
     )
     .unwrap();
     let session = service.connect(TransportFacts::OwnerStdio).unwrap();
-    if mode == "read" {
+    if mode == "read" || mode == "read-dispatch" {
         let expected = fs::read_to_string(receipts.join("selected")).unwrap();
         read_selected(&service, &owner, &session, &expected);
+        if mode == "read-dispatch" {
+            cold_query_selected(&service, &owner, &session);
+        }
         assert_eq!(
             Account::current()
                 .unwrap()
@@ -487,6 +613,61 @@ fn actual_tuple_activation_recovery_and_writer_contention() {
             0,
             "cold Query cannot fabricate Refresh settlement"
         );
+        return;
+    }
+    if mode == "startup-watch" {
+        let previous = current_stage();
+        let permit = refresh_permit(&service, &session, mode, false);
+        let inventory = reconcile(&service, &owner, permit.clone());
+        let job = service
+            .prepare_corpus_refresh(
+                &owner,
+                permit,
+                inventory,
+                None,
+                holding(NativeRefreshJob::metadata_requirement().memory_bytes, 0),
+            )
+            .unwrap();
+        let need = job.corpus_requirement().unwrap();
+        let submitted = job
+            .submit(NativeJobPlan {
+                operation_id: mode,
+                job_id: mode,
+                budget: Budget {
+                    max_files: 1000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_millis: 120000,
+                    max_memory_bytes: 512 * 1024 * 1024,
+                },
+                reservation: Reservation {
+                    memory_bytes: 256 * 1024 * 1024,
+                    temporary_bytes: need.temporary_bytes,
+                },
+                priority: knowledge_core::jobs::Priority::Normal,
+                max_attempts: 1,
+            })
+            .unwrap();
+        let account = Account::current().unwrap();
+        let claim = account.queue().claim(Instant::now()).unwrap().unwrap();
+        assert_eq!(claim.job(), submitted.job);
+        let (draft, report) = job
+            .activate_corpus(claim, |_| {})
+            .unwrap_or_else(|error| panic!("actual startup/watch activation: {:#}", error.cause()));
+        assert_eq!(
+            report.retired, 1,
+            "one-call activation retires the actual unpinned prior tuple"
+        );
+        assert_eq!(report.pinned, 0);
+        assert_eq!(report.retained_unknown, 0);
+        let selected = current_stage();
+        assert_ne!(selected, previous);
+        assert_eq!(
+            account.status().unwrap().queue.unsettled,
+            1,
+            "selection and retirement retain the actual Refresh until explicit settlement"
+        );
+        fs::write(receipts.join("selected"), selected).unwrap();
+        complete(draft);
         return;
     }
     let previous = (mode != "seed").then(current_stage);

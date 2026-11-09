@@ -172,6 +172,7 @@ impl StoredRange<'_, '_> {
         if next > self.work.bounds.budget.max_bytes {
             return Err(Error::Quota);
         }
+        crate::admit_read(self.work, count as u64)?;
         let n = self
             .file
             .read_at(&mut output[..count], absolute)
@@ -220,4 +221,91 @@ fn check_version(file: &File, expected: &Version, work: &mut Work<'_>) -> Result
         return Err(Error::Drift);
     }
     Ok(())
+}
+
+/// A native verification failure retains the real child owner; fixed package errors stay Copy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+pub enum ManifestVerificationError {
+    /// Actual archive/version/admission failure.
+    Package(Error),
+    /// Actual native verifier, possibly still owning its child/group/credit.
+    Native(knowledge_history::Error),
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl From<Error> for ManifestVerificationError {
+    fn from(error: Error) -> Self {
+        Self::Package(error)
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl std::fmt::Display for ManifestVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("native manifest verification failed; retain actual error ownership")
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl std::error::Error for ManifestVerificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Package(error) => error,
+            Self::Native(error) => error,
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl FrozenArchive<'_, '_> {
+    /// Verify actual detached manifest bytes from this SAME completely verified pinned archive.
+    /// Framing inspection alone stays Unverified; this invokes the existing funded native SSHSIG verifier.
+    /// The caller's actual native History owner, original Claim, and selected public policy remain live.
+    pub fn verify_manifest_signature(
+        &mut self,
+        history: &knowledge_history::History,
+        known: &[knowledge_history::KnownSigner],
+        owner: &knowledge_history::NativeHistoryOwner,
+        native_work: knowledge_history::HistoryWork<'_>,
+    ) -> Result<knowledge_history::Verification, ManifestVerificationError> {
+        self.revalidate()?;
+        let signature = if let Some(member) = self
+            .opened
+            .members
+            .iter()
+            .find(|member| member.name == "manifest.sig")
+        {
+            if member.uncompressed == 0 || member.uncompressed > 65_536 {
+                return Ok(knowledge_history::Verification {
+                    state: knowledge_history::SignatureState::Invalid,
+                    principal: None,
+                    fingerprint: None,
+                });
+            }
+            crate::charge_fresh(
+                self.work,
+                member.uncompressed.checked_mul(3).ok_or(Error::TooLarge)?,
+                0,
+            )?;
+            let mut bytes = Vec::new();
+            crate::stream(
+                &mut self.file,
+                member,
+                self.work,
+                &mut crate::Out::Keep(&mut bytes),
+            )?;
+            Some(bytes)
+        } else {
+            None
+        };
+        let verified = history
+            .verify_snapshot_signature(
+                self.snapshot_id(),
+                signature.as_deref(),
+                known,
+                owner,
+                native_work,
+            )
+            .map_err(ManifestVerificationError::Native)?;
+        self.revalidate()?;
+        Ok(verified)
+    }
 }

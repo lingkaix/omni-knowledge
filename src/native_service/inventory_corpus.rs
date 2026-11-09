@@ -237,7 +237,14 @@ impl NativeRefreshJob {
         claim: Claim,
         generated_path: &Path,
     ) -> std::result::Result<NativeCorpusDraft, NativeCorpusError> {
-        let mut owner = NativeCorpusDraft {
+        let mut owner = self.owned(claim);
+        match owner.begin(generated_path) {
+            Ok(()) => Ok(owner),
+            Err(cause) => Err(owner.error(cause)),
+        }
+    }
+    fn owned(self, claim: Claim) -> NativeCorpusDraft {
+        NativeCorpusDraft {
             job: Arc::new(self),
             claim: Some(claim),
             shared_claim: None,
@@ -264,11 +271,35 @@ impl NativeRefreshJob {
             source_bytes: 0,
             lexical_done: false,
             work: None,
-        };
-        match owner.begin(generated_path) {
-            Ok(()) => Ok(owner),
-            Err(cause) => Err(owner.error(cause)),
         }
+    }
+    /// Actual startup/watch execution of this already submitted Refresh cause and original Claim.
+    /// Prepare with NativeLibraryService::prepare_corpus_refresh before queueing; keep this owning
+    /// result/error through selection, recovery and last-consumer retirement, then explicitly settle.
+    pub fn activate_corpus(
+        self,
+        claim: Claim,
+        mut progress: impl FnMut(NativeCorpusProgress),
+    ) -> std::result::Result<(NativeCorpusDraft, NativeCorpusRetirement), NativeCorpusError> {
+        let vectors = self.cause.model.is_some();
+        let mut owner = self.owned(claim);
+        let placement = (|| {
+            let path = admitted::generated_path()?;
+            owner.begin(path)
+        })();
+        if let Err(cause) = placement {
+            return Err(owner.error(cause));
+        }
+        let owner = owner.build_lexical(&mut progress)?;
+        let owner = if vectors {
+            owner.build_vectors(&mut progress)?
+        } else {
+            owner
+        };
+        owner
+            .prepare_tuple(&mut progress)?
+            .select_tuple(&mut progress)?
+            .retire_previous(progress)
     }
 }
 impl NativeCorpusDraft {

@@ -148,8 +148,26 @@ impl StoredGeneration {
                 .map_err(|_| knowledge_package::Error::Cancelled)?;
             source.check().map_err(|_| knowledge_package::Error::Drift)
         };
-        let mut package_work =
-            knowledge_package::Work::guarded_reader(bounds, &mut work.0, cancel, &current)?;
+        let read = |bytes| {
+            source.admit_read(bytes).map_err(|error| match error {
+                Error::ReadBudget => knowledge_package::Error::Quota,
+                _ => knowledge_package::Error::Drift,
+            })
+        };
+        let verifier_memory = work
+            .remaining()?
+            .memory_bytes
+            .checked_sub(plan.table_bytes)
+            .ok_or(Error::Reservation)?
+            .min(bounds.budget.max_memory_bytes);
+        let mut package_work = knowledge_package::Work::guarded_reader_metered_capped(
+            bounds,
+            &mut work.0,
+            cancel,
+            &current,
+            &read,
+            verifier_memory,
+        )?;
         let mut frozen = FrozenArchive::open(file, &mut package_work)?;
         // Both Result-returning M5 admission operations run before table allocation or native open.
         frozen.index_paths(native)?;

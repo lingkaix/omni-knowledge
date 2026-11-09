@@ -75,6 +75,7 @@ pub(crate) mod gui_assets;
 )]
 mod legacy_search;
 pub mod mcp;
+pub mod mcp_native;
 /// Mature media compatibility uses actual shared resources and the actual owned-child RSS watchdog.
 pub mod media {
     pub use knowledge_processing::media::*;
@@ -339,7 +340,6 @@ mod admitted {
         native().map(|_| ())
     }
     /// Actual native generated-root metadata; callers still qualify it against Account's held FD.
-    #[cfg(test)]
     pub(super) fn generated_path() -> Result<&'static Path> {
         Ok(&native()?.cache)
     }
@@ -2841,14 +2841,25 @@ impl KnowledgeBase {
 /// Native selected-library composition for the existing service runtime.
 /// Transport adapters must retain `Delivery` until their bounded write has actually settled.
 pub mod native_service {
+    mod activation;
+    #[cfg(test)]
+    mod activation_tests;
+    #[cfg(test)]
+    mod derived_publication_tests;
     #[cfg(test)]
     mod embedding_tests;
     mod extraction;
+    pub use activation::{
+        NativeFrozenReadPlan, NativeSnapshotError, NativeSnapshotPolicy, NativeSnapshotRequest,
+        NativeTrustedArchive,
+    };
     mod held;
     #[cfg(test)]
     mod held_tests;
     mod inventory;
     mod models;
+    #[cfg(test)]
+    mod publication_tests;
     mod source;
     use super::*;
     use base64::Engine;
@@ -2857,6 +2868,7 @@ pub mod native_service {
         NativeEmbeddingProducer, NativeEmbeddingState, NativeExtraction, NativeExtractionError,
         NativeIndexInput,
     };
+    pub use extraction::{NativeDerivedRecipe, NativePublicationPlan};
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
         EncodedResponse, NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
@@ -3036,6 +3048,16 @@ pub mod native_service {
         ) -> std::result::Result<Session, wire::ErrorCode> {
             self.authority
                 .connect(std::slice::from_ref(&self.selection), facts)
+        }
+        /// Connect another actual selection created by this SAME native owner instance.
+        /// Used for separately selected publication destinations; IDs alone cannot join a foreign owner.
+        pub fn connect_selected(
+            &self,
+            selection: &Selection,
+            facts: TransportFacts,
+        ) -> std::result::Result<Session, wire::ErrorCode> {
+            self.authority
+                .connect(std::slice::from_ref(selection), facts)
         }
         /// Install real typed owner adapters while preserving this runtime's native checks.
         /// Missing owner implementations stay explicitly unsupported before effects, not fake successes.
