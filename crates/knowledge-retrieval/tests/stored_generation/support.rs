@@ -188,7 +188,7 @@ pub(super) fn archive_fixture_with_space(
         let mut member = zip.by_index(i).unwrap();
         let mut bytes = Vec::new();
         member.read_to_end(&mut bytes).unwrap();
-        if member.name() == "manifest.json" {
+        if member.name().unwrap() == "manifest.json" {
             let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             value["indexes"] = serde_json::json!({"compatible": true, "paths": paths, "identity": {
                 "version": 1, "kernel_build": requirements.kernel_build, "lexical_format": requirements.lexical_format,
@@ -201,7 +201,7 @@ pub(super) fn archive_fixture_with_space(
         }
         writer
             .start_file(
-                member.name(),
+                member.name().unwrap(),
                 zip::write::SimpleFileOptions::default().compression_method(member.compression()),
             )
             .unwrap();

@@ -213,3 +213,9 @@ At the reviewed `9a807f9` Root, migrate `src/lib.rs` extraction/parse-transcript
 Do not convert `AdmitError`, `WorkerFailure`, `UnsettledChild`, or `UnsettledWrite` into metadata-only success; keep visible waiting, failed, or unresolved job state with existing Core semantics.
 Root library/main/MCP/kernel were not edited in this lane; only the three re-export shims expose `Funding`.
 The selected installed tools, parser-worker basename/lookup order, explicit ASR executable/model requirement, MP4 H.264 width 640 / 25 fps / no audio recipe, contiguous source ranges, recording-clock timestamps, safe previews, and no-clobber behavior remain intact.
+
+## ZIP dependency boundary
+
+The ZIP reader/writer is pinned to9.0.5 with default features disabled and `deflate` enabled.
+Office and EPUB readers validate central/local header consistency before consuming member text and propagate fallible member-name decoding.
+They retain the existing member-count and expanded-byte bounds and read selected payloads into memory; they do not apply archive permissions or extract filesystem trees.

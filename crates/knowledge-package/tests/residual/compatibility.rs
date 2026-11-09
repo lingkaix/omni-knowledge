@@ -69,7 +69,7 @@ fn fixture(root: &Path, job: &mut Work<'_>, identity: Value, paths: Value) -> Pa
         let mut member = zip.by_index(i).unwrap();
         let mut bytes = Vec::new();
         member.read_to_end(&mut bytes).unwrap();
-        if member.name() == "manifest.json" {
+        if member.name().unwrap() == "manifest.json" {
             let mut value: Value = serde_json::from_slice(&bytes).unwrap();
             value["indexes"] = json!({"compatible": true, "paths": paths, "identity": identity, "extension": {"preserved": true}});
             value["coverage"]["indexes"] = json!("complete");
@@ -77,7 +77,7 @@ fn fixture(root: &Path, job: &mut Work<'_>, identity: Value, paths: Value) -> Pa
         }
         writer
             .start_file(
-                member.name(),
+                member.name().unwrap(),
                 zip::write::SimpleFileOptions::default().compression_method(member.compression()),
             )
             .unwrap();
@@ -229,7 +229,7 @@ fn component_membership_accepts_reverse_order_and_refuses_duplicate_substitution
                 let mut entry = input.by_index(i).unwrap();
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes).unwrap();
-                if entry.name() == "manifest.json" {
+                if entry.name().unwrap() == "manifest.json" {
                     let mut v: Value = serde_json::from_slice(&bytes).unwrap();
                     let mut fact = v["entries"]
                         .as_array()
@@ -249,7 +249,7 @@ fn component_membership_accepts_reverse_order_and_refuses_duplicate_substitution
                 }
                 writer
                     .start_file(
-                        entry.name(),
+                        entry.name().unwrap(),
                         zip::write::SimpleFileOptions::default()
                             .compression_method(entry.compression()),
                     )

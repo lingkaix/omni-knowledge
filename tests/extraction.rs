@@ -408,10 +408,13 @@ fn epub_export_is_readable_contained_and_no_clobber() {
     assert_eq!(fs::read(&output).unwrap(), original);
     let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
     let mime = zip.by_index(0).unwrap();
-    assert_eq!(mime.name(), "mimetype");
+    assert_eq!(mime.name().unwrap(), "mimetype");
     assert_eq!(mime.compression(), zip::CompressionMethod::Stored);
     drop(mime);
-    let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
     assert_eq!(
         names
             .iter()

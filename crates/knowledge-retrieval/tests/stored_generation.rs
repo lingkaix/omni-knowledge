@@ -300,7 +300,7 @@ fn actual_stored_generation_queries_and_current_native_lifetimes() {
     fs::copy(&archive, &bad_path).unwrap();
     let offset = {
         let mut zip = zip::ZipArchive::new(File::open(&bad_path).unwrap()).unwrap();
-        zip.by_name(SOURCE).unwrap().data_start()
+        zip.by_name(SOURCE).unwrap().data_start().unwrap()
     };
     {
         use std::os::unix::fs::FileExt;

@@ -342,7 +342,7 @@ fn package(root: &Path, output: &Path, mode: &str) -> (String, ContentDigest, St
         let mut member = zip.by_index(index).unwrap();
         let mut bytes = Vec::new();
         member.read_to_end(&mut bytes).unwrap();
-        if member.name() == "manifest.json" {
+        if member.name().unwrap() == "manifest.json" {
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let mut ordered = paths.clone();
             ordered.sort();
@@ -362,7 +362,11 @@ fn package(root: &Path, output: &Path, mode: &str) -> (String, ContentDigest, St
             );
             manifest = bytes.clone();
         }
-        entries.push((member.name().to_owned(), bytes, member.compression()));
+        entries.push((
+            member.name().unwrap().into_owned(),
+            bytes,
+            member.compression(),
+        ));
     }
     assert!(!manifest.is_empty());
     let snapshot = digest(&manifest);

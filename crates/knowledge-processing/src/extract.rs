@@ -786,6 +786,22 @@ pub(crate) fn read_zip_text<R: Read + Seek>(
     String::from_utf8(bytes).with_context(|| format!("Archive member is not UTF-8: {name}"))
 }
 
+/// Decode selected ZIP names without discarding malformed member names or allocating an unselected inventory.
+fn selected_zip_names<R: Read + Seek>(
+    archive: &zip::ZipArchive<R>,
+    select: impl Fn(&str) -> bool,
+) -> Result<Vec<String>> {
+    archive
+        .file_names()
+        .filter_map(|name| match name {
+            Ok(name) if select(&name) => Some(Ok(name.into_owned())),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<zip::result::ZipResult<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 /// Extract Office text against the shared XML byte budget; return read/parse/admission errors.
 /// Set output_truncated when XLSX applies max_bytes during assembly rather than after return.
 fn office_text(
@@ -798,22 +814,19 @@ fn office_text(
     if archive.len() > 100_000 {
         bail!("Office archive contains too many members");
     }
+    archive.validate_header_consistency()?;
     let mut remaining = max_bytes;
     match format {
         "docx" => {
-            let mut names: Vec<String> = archive
-                .file_names()
-                .filter(|name| {
-                    *name == "word/document.xml"
-                        || (name.starts_with("word/")
-                            && (name.contains("header")
-                                || name.contains("footer")
-                                || name.contains("footnotes")
-                                || name.contains("endnotes"))
-                            && name.ends_with(".xml"))
-                })
-                .map(str::to_owned)
-                .collect();
+            let mut names = selected_zip_names(&archive, |name| {
+                name == "word/document.xml"
+                    || (name.starts_with("word/")
+                        && (name.contains("header")
+                            || name.contains("footer")
+                            || name.contains("footnotes")
+                            || name.contains("endnotes"))
+                        && name.ends_with(".xml"))
+            })?;
             names.sort_by_key(|name| (name != "word/document.xml", name.clone()));
             let mut output = String::new();
             for name in names {
@@ -825,15 +838,11 @@ fn office_text(
             Ok(output)
         }
         "pptx" => {
-            let mut names: Vec<String> = archive
-                .file_names()
-                .filter(|name| {
-                    name.starts_with("ppt/slides/slide")
-                        && name.ends_with(".xml")
-                        && !name.contains("/_rels/")
-                })
-                .map(str::to_owned)
-                .collect();
+            let mut names = selected_zip_names(&archive, |name| {
+                name.starts_with("ppt/slides/slide")
+                    && name.ends_with(".xml")
+                    && !name.contains("/_rels/")
+            })?;
             names.sort_by_key(|name| numeric_member_order(name));
             let mut output = String::new();
             for (index, name) in names.iter().enumerate() {
@@ -949,10 +958,7 @@ fn spreadsheet_text<R: Read + Seek>(
     remaining: &mut usize,
     max_bytes: usize,
 ) -> Result<(String, bool)> {
-    let shared_xml = if archive
-        .file_names()
-        .any(|name| name == "xl/sharedStrings.xml")
-    {
+    let shared_xml = if archive.index_for_name("xl/sharedStrings.xml").is_some() {
         Some(read_zip_text(archive, "xl/sharedStrings.xml", remaining)?)
     } else {
         None
@@ -970,11 +976,9 @@ fn spreadsheet_text<R: Read + Seek>(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut names: Vec<String> = archive
-        .file_names()
-        .filter(|name| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
-        .map(str::to_owned)
-        .collect();
+    let mut names = selected_zip_names(archive, |name| {
+        name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml")
+    })?;
     names.sort_by_key(|name| numeric_member_order(name));
     let mut output = SpreadsheetOutput {
         text: String::new(),

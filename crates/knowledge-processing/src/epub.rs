@@ -127,6 +127,7 @@ pub fn read_epub_bytes(bytes: &[u8], max_bytes: usize) -> Result<String> {
     if archive.len() > 100_000 {
         bail!("EPUB contains too many archive members");
     }
+    archive.validate_header_consistency()?;
     let mut remaining = max_bytes;
     let container = read_zip_text(&mut archive, "META-INF/container.xml", &mut remaining)?;
     let document = roxmltree::Document::parse(&container)?;
@@ -631,10 +632,7 @@ fn encrypted_paths<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     remaining: &mut usize,
 ) -> Result<Vec<String>> {
-    if !archive
-        .file_names()
-        .any(|name| name == "META-INF/encryption.xml")
-    {
+    if archive.index_for_name("META-INF/encryption.xml").is_none() {
         return Ok(Vec::new());
     }
     let xml = read_zip_text(archive, "META-INF/encryption.xml", remaining)?;
