@@ -97,8 +97,20 @@ impl History {
         claim: &Claim,
     ) -> Result<BundleReport, BundleError> {
         let call = Call::new(claim)?;
-        self.validate()?;
         let _lock = self.lock(&call)?;
+        self.bundle_call(file, expected, admit, &call)
+    }
+
+    /// Reuse inert bundle admission inside an already locked, original native claim/call.
+    pub(crate) fn bundle_call(
+        &self,
+        file: &File,
+        expected: &ContentDigest,
+        admit: bool,
+        call: &Call,
+    ) -> Result<BundleReport, BundleError> {
+        self.validate()?;
+        call.check()?;
         let initial = file.metadata()?;
         if !initial.is_file() {
             return Err(BundleError::Integrity);
@@ -110,7 +122,7 @@ impl History {
         if initial.len() == 0 || need > call.bytes_left.get() {
             return Err(Error::Capacity.into());
         }
-        let scratch = self.scratch(&call)?;
+        let scratch = self.scratch(call)?;
         let input = scratch.path().join("held-input.bundle");
         let mut output = OpenOptions::new()
             .create_new(true)
@@ -144,7 +156,7 @@ impl History {
             return Err(BundleError::Changed);
         }
         output.sync_all()?;
-        let (refs, prerequisites) = header(&output, &call)?;
+        let (refs, prerequisites) = header(&output, call)?;
         let quarantine = scratch.path().join("quarantine.git");
         fs::create_dir(&quarantine)?;
         run(
@@ -153,7 +165,7 @@ impl History {
             &["init", "--bare", "--object-format=sha1", "--template=", "."],
             b"",
             None,
-            &call,
+            call,
             (None, &self.runtime),
         )?;
         fs::write(quarantine.join("config"), CONFIG)?;
@@ -174,7 +186,7 @@ impl History {
             &["bundle", "verify", path],
             b"",
             None,
-            &call,
+            call,
             (None, &self.runtime),
         ))?;
         call.account_bytes(usize::try_from(copied).map_err(|_| Error::Capacity)?)?;
@@ -192,7 +204,7 @@ impl History {
             ],
             b"",
             None,
-            &call,
+            call,
             (None, &self.runtime),
         ))?;
         for advertised in &refs {
@@ -202,7 +214,7 @@ impl History {
                 &["cat-file", "-t", advertised.version.as_str()],
                 b"",
                 None,
-                &call,
+                call,
                 (None, &self.runtime),
             ))?;
             if kind != b"commit\n" {
@@ -228,7 +240,7 @@ impl History {
                 b"",
                 scratch.path(),
                 None,
-                &call,
+                call,
             ))?;
         }
         Ok(BundleReport {

@@ -1,8 +1,9 @@
 # Knowledge History
 
-This crate owns only local Git objects, private indexes, operation receipts, and expected-ref transactions.
+This crate owns Git objects, private indexes, operation receipts, expected-ref transactions, and native-selected remote effects.
 Read [history](../../docs/specs/history.md) and [service](../../docs/specs/service.md) for product authority.
-It does not install home files, admit callers, run a scheduler, contact remotes, or activate durable service authority.
+It does not install home files, admit service callers, create a scheduler/executor pool, or activate durable service authority.
+Native remote consent and external observation use the existing Git executor and the host's actual Core queue.
 
 ## Frozen Local Seam
 
@@ -134,8 +135,96 @@ Core whole-call byte/entry ceilings and the earliest claim/call deadline remain 
 Native resident observations and file extent ceilings are not an OS/cgroup physical sandbox; the admitted host owns the complete resource plan and actual retained Core-credit lifetime.
 Home/repository native identities are rechecked; use-existing requires explicit native selection and bounded inert config validation. Unsupported/widening config, control-file symlinks, alternates and unsafe changed text paths refuse.
 The host selects an external local non-synced history root and validates all mount overlaps; this crate checks home overlap, not provider residency.
-Native SSH signed commit production/verification and inert bundle admission are real implemented mechanisms; real OS Keychain/GUI prompts and macOS native lifetime behavior remain platform qualification. Actual remote synchronization/scheduling remain active completion work, not accepted scope reductions; use-existing/separate selection is implemented as above and still needs integrated/native review.
+Native SSH signed commit production/verification and inert bundle admission are real implemented mechanisms; real OS Keychain/GUI prompts and macOS native lifetime behavior remain platform qualification. The local native-selected remote and queued-observation framework below is implemented; actual service binding and broader transport/platform qualification remain active obligations, not accepted scope reductions.
+Use-existing/separate selection remains implemented as above and still needs integrated/native review.
 This narrow backend does not claim complete history.md product acceptance.
+
+## Native Remote And Queued Observation API
+
+`NativeHistoryOwner::select(&History, context, library)` is a trusted native host selection, separate from `OwnerContext` attribution.
+The host must first establish actual current owner/root/effect admission and call `revoke()` when that selection or policy changes.
+This non-serializable live capability cannot be recovered from URLs, timestamps, public keys, manifest data, queue keys or a saved schedule.
+`HistoryWork { claim: &Arc<Claim>, key }` checks the actual original Claim generation with `stop_requested(key)`, deadline and cancellation before effects and on every native I/O tick. It splits an actual same-Claim Core Holding for `required_resources` before copying descriptors or starting native work. The call returns known-dead credit to that exact generation; stale settlement finishes only known-dead credit. An unresolved native owner retains the actual Holding and Arc<Claim> through whole group, pipe, reap and writer-lock collection.
+The original claim and retained credit must remain held through results, unresolved owners and recovery artifacts.
+New native methods can return `Error::Denied` or `Error::Cancelled`; service adapters must map them explicitly without stringifying or dropping `Error::Unsettled`.
+
+`approve_local_remote(history, path, ref, RemoteEffects, work)` records native human consent for an exact local bare transport and branch.
+It rejects active imported config, alternates and widening hooks/helpers; it never uses personal Git/SSH configuration, credentials or network discovery.
+`pull_remote(operation_id, consent, work)` fetches real objects into private quarantine, verifies/adopts them through the existing inert bundle owner, and CAS-publishes a retained proposal only.
+It returns actual accepted/fetched versions, divergence class and complete comparison digest/paths, without changing accepted refs or home bytes.
+`confirm_remote(consent, RemotePull)` is a separate trusted native human decision on the displayed tuple, not a model flag or scheduled action.
+`prepare_remote_confirmation(operation_id, approval, consent, work)` continues through the existing signing/expected-proposal transaction owner.
+Initial continuation retains imported history as a parent; an empty-tree adoption reuses the exact imported commit without an empty operation commit.
+Imported authors/signatures are not rewritten.
+M1 must safely install and journal the exact prepared tree before ordinary `publish`; `Published` remains Git-only.
+`approve_push(consent, operation_id, candidate, expected_remote)` binds a distinct native intention to one exact push.
+`push_remote(approval, consent, work)` requires accepted ancestry, an actual fast-forward proof and an exact expected-ref lease; it preserves competing remote writers and retained local candidates.
+An uncertain restarted push inspects without blind replay; a completed retry remains idempotent after later remote advancement.
+
+`external_batch_version(&[ExternalText])` identifies the complete qualified versions and observation IDs for `Key.version`.
+`observe_external_batch` accepts the concrete `LocalMount<P: LocalReadPolicy>`, binds its actual current held root to the selected home before every read/deletion and prepublication, and reads actual versions through the backend. It checks before/after metadata and full byte digests, waits an actual monotonic quiet period, and rechecks sources after preparing/signing.
+It commits one multi-file `external_unknown` operation under the chosen observing identity, not the external editor's invented identity.
+`ExternalText.deleted` requires actual before/after backend deletion observations; offline, denial and reappearance refuse rather than deleting history.
+Reopen conservatively starts a fresh monotonic quiet period; wall-clock next-due facts cannot bypass it.
+A completed retry and an unchanged later observation produce no duplicate text commit.
+This is the Git side of observation, not proof of M1 journal/install publication.
+
+Schedules default disabled/no-push.
+`enable_remote_schedule` and `enable_external_schedule` return `(HistorySchedule, ScheduleConsent)` after explicit native enablement.
+The live, non-serializable `ScheduleConsent` separately binds current selection, exact schedule/remote, interval, allowed effects and base recipe; stored flags cannot widen it.
+Keep that capability for submission/execution/completion; reopening requires a fresh native decision with the same narrowed scope.
+`schedule_status` exposes interval, next due, current operation ID and attempts, but cannot mint a schedule capability.
+`HistorySchedule::work_recipe()` qualifies the host's immutable base recipe by occurrence; use it as `Key.recipe` for that submitted/claimed occurrence.
+This prevents Core terminal-key dedup from swallowing later periodic polls while preserving same-occurrence idempotency.
+`submit_remote_schedule`/`submit_external_schedule` actually submit that stable operation/job ID and full descriptor to the host's existing Core queue.
+`run_remote_schedule` performs real fetch and, only for local-ahead state under explicit scheduled push consent, a leased push; divergence stays a proposal.
+`run_external_schedule` performs actual quiet-batch work; `Waiting` is not completion and the original claim stays unsettled.
+`finish_schedule` verifies actual immutable domain publication while the original claim still owns the lifetime, advances due facts and settles that exact claim.
+Before calling it, the host must reconcile returned data/artifacts and transfer any remaining lifetimes into its actual retained Core holding; queue counters alone are not retained credit.
+`backoff_schedule` accepts only actual settled-offline queue status; retry/reconnect is explicit and Core-attempt-bounded.
+Reopening and resubmitting an active occurrence uses the same operation ID; a saved enabled flag still needs a fresh current native capability.
+`disable_schedule` stops later dispatch but never asserts that an existing worker stopped.
+
+### Host Binding Need And Qualification
+
+The integrated owner uses the existing Core Account and actual nonforgeable Arc<Claim>, never deadline/status equality as a generation grant. A standalone Queue without the native Account cannot pay native HistoryWork effects. The concrete LocalMount root binding rejects an unrelated empty root before accepting deletion. No second account, resource engine or liveness token was introduced.
+The minimum product binding remains a current native NativeHistoryOwner, the actual full-key HistoryWork, and M1's prepared-tree install/journal/publication sequence. Git publication alone does not install home bytes.
+Actual local transport and disposable signatures can qualify this Git framework; production CLI/MCP admission, M1 publication, native macOS events/prompts and SSH/HTTPS transport remain separate open qualification work, not an `Unsupported` completion waiver.
+No production remote or real credential is contacted by this crate's deterministic tests.
+The [change record](../../docs/changes/2026-11-05-native-history-remotes-and-observation.md#remaining-queue-and-evidence-limits) tracks the remaining owners; close these limits only after actual host binding, native observations and consequential review.
+
+```no_run
+use knowledge_history::{History, HistoryWork, NativeHistoryOwner, RemoteConsent, RemoteEffects, RemotePull, Prepared, ScheduleConsent, Error};
+use knowledge_core::jobs::{Queue, Key, Submission, Submitted, Priority};
+use std::path::Path;
+// Called only by the admitted interactive native owner, never from portable DTO authorization fields.
+fn inspect_selected_remote(history: &History, native: &NativeHistoryOwner, bare: &Path,
+                           work: HistoryWork<'_>) -> Result<RemotePull, Error> {
+    let consent = native.approve_local_remote(history, bare, "refs/heads/main", RemoteEffects::FetchOnly, work)?;
+    history.pull_remote("owner-inspected-pull", &consent, work)
+}
+// NEED: the actual native M1 adapter consumes this Prepared through its safe installer and visible journal.
+// This function performs real tuple/signing preparation, not a fake successful file-install callback.
+fn prepare_for_m1_installer(history: &History, native: &NativeHistoryOwner,
+                            consent: &RemoteConsent, displayed: RemotePull,
+                            work: HistoryWork<'_>) -> Result<Prepared, Error> {
+    let human_intention = native.confirm_remote(consent, displayed)?;
+    history.prepare_remote_confirmation("human-integration", &human_intention, consent, work)
+}
+// Retain the returned native capability for actual dispatch; do not reconstruct one from schedule_status.
+fn enqueue_native_schedule(history: &History, consent: &RemoteConsent, queue: &Queue,
+                           bootstrap: HistoryWork<'_>) -> Result<(ScheduleConsent, Option<Submitted>), Error> {
+    let (status, schedule_intention) = history.enable_remote_schedule("selected-sync", consent, 15, false, bootstrap)?;
+    let recipe = status.work_recipe()?;
+    let key = Key { recipe: &recipe, ..bootstrap.key };
+    let budget = bootstrap.claim.budget();
+    let submitted = history.submit_remote_schedule("selected-sync", &schedule_intention, consent, queue, Submission {
+        operation_id: &status.operation_id, job_id: &status.operation_id, key, budget,
+        reservation: History::required_resources(&budget)?, priority: Priority::Normal, max_attempts: 3,
+    })?;
+    Ok((schedule_intention, submitted))
+}
+```
 
 ## Necessity And Checks
 

@@ -36,6 +36,8 @@ struct Pending {
     artifacts: Vec<PathBuf>,
     /// Only set after actual group absence, pipe EOF and native reap.
     collected: bool,
+    /// Same-Claim actual prepaid work retained through whole native collection.
+    funding: Vec<(knowledge_core::admission::Holding, Arc<Claim>)>,
 }
 
 /// Actual machine-only retained native owner; never serialize/reconstruct it from PID data.
@@ -89,6 +91,12 @@ impl UnsettledChild {
                 return Err(Error::Unsettled(self.clone()));
             }
         }
+        while let Some((mut credit, claim)) = pending.funding.pop() {
+            if credit.finish().is_err() {
+                pending.funding.push((credit, claim));
+                return Err(Error::Unsettled(self.clone()));
+            }
+        }
         self.settled.store(true, Ordering::Release);
         Ok(())
     }
@@ -96,6 +104,26 @@ impl UnsettledChild {
     /// The runtime may retire only this exact owner after whole native/lock collection.
     fn is_settled(&self) -> bool {
         self.settled.load(Ordering::Acquire)
+    }
+
+    /// Attach this call's actual loan, never a numerical promise or another worker's credit.
+    pub(crate) fn retain_funding(
+        &self,
+        mut credit: knowledge_core::admission::Holding,
+        claim: Arc<Claim>,
+    ) {
+        match self.inner.lock() {
+            Ok(mut pending) if pending.owner_pid == std::process::id() => {
+                if self.is_settled() {
+                    let _ = credit.finish();
+                } else {
+                    pending.funding.push((credit, claim));
+                }
+            }
+            _ => {
+                std::mem::forget((credit, claim));
+            }
+        }
     }
 
     /// Attach only this call's actual descriptor, serialized against this owner's whole collection.
@@ -149,8 +177,17 @@ pub(crate) struct Scratch {
 impl Scratch {
     /// Create only below the selected external state directory, bound to this exact call's native owner.
     pub fn new(parent: &Path, call: &Call) -> Result<Self, Error> {
+        call.check()?;
+        let directory = tempfile::tempdir_in(parent)?;
+        if call.current.is_some() {
+            let mut roots = call.artifacts.borrow_mut();
+            if !roots.iter().any(|root| directory.path().starts_with(root)) {
+                roots.retain(|root| !root.starts_with(directory.path()));
+                roots.push(directory.path().to_owned());
+            }
+        }
         Ok(Self {
-            directory: Some(tempfile::tempdir_in(parent)?),
+            directory: Some(directory),
             retention: call.retention.clone(),
         })
     }
@@ -410,6 +447,7 @@ impl Runtime {
                 artifacts: Vec::new(),
                 owner_pid: std::process::id(),
                 collected: false,
+                funding: Vec::new(),
             })),
             settled: Arc::new(AtomicBool::new(false)),
         };

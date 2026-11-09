@@ -147,6 +147,7 @@ impl History {
             runtime,
             signer: None,
             committer: None,
+            quiet: Default::default(),
         };
         let lock = history.lock(&call)?;
         if binding_path.exists() {

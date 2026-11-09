@@ -4163,6 +4163,7 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "knowledge-core",
+ "knowledge-local",
  "libc",
  "rustix 1.1.5",
  "serde",
