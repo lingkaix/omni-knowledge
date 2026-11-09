@@ -648,22 +648,11 @@ fn validate_lexical_metadata(
             && !reference.generations.is_empty(),
         "Incompatible native kernel reference; rebuild index"
     );
-    let cache_path = std::env::var_os("OMNI_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "omni-knowledge-derived-{}",
-                rustix::process::geteuid().as_raw()
-            ))
-        });
-    let cache = File::from(rustix::fs::open(
-        cache_path,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?);
+    // Inspect the already selected actual account namespace; status must not start a new account
+    // or guess another directory from ambient cache/temporary settings.
+    let cache = knowledge_core::admission::Account::current()?
+        .generated_directory()?
+        .try_clone()?;
     let metadata = cache.metadata()?;
     ensure!(
         metadata.uid() == rustix::process::geteuid().as_raw() && metadata.mode() & 0o7777 == 0o700,

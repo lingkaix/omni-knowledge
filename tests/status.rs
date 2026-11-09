@@ -7,6 +7,7 @@ use omni_knowledge::{CONFIG_FILE, IndexOptions, KnowledgeBase, SearchOptions};
 use std::fs::{self, File, FileTimes};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -38,17 +39,46 @@ fn kernel_reference(kb: &KnowledgeBase) -> serde_json::Value {
     serde_json::from_slice(&fs::read(generation(kb).join("tantivy/kernel-reference.json")).unwrap())
         .unwrap()
 }
+/// Locate fixture derived data only through the actual account-held cache directory identity.
 fn native_generation(kb: &KnowledgeBase) -> PathBuf {
     use sha2::{Digest, Sha256};
     let reference = kernel_reference(kb);
-    let cache = std::env::var_os("OMNI_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "omni-knowledge-derived-{}",
-                rustix::process::geteuid().as_raw()
-            ))
-        });
+    let selected = knowledge_core::admission::Account::current()
+        .unwrap()
+        .generated_directory()
+        .unwrap()
+        .metadata()
+        .unwrap();
+    let suffix = format!(
+        "omni-knowledge-derived-{}",
+        rustix::process::geteuid().as_raw()
+    );
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("OMNI_CACHE_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join("Library/Caches").join(&suffix));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+            candidates.push(PathBuf::from(path).join(&suffix));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join(".cache").join(&suffix));
+        }
+    }
+    candidates.push(std::env::temp_dir().join(suffix));
+    let cache = candidates
+        .into_iter()
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|metadata| {
+                (metadata.dev(), metadata.ino()) == (selected.dev(), selected.ino())
+            })
+        })
+        .expect("fixture cache candidate must match the actual account-held directory");
     cache
         .join(reference["corpus"].as_str().unwrap())
         .join("kernel")

@@ -204,10 +204,14 @@ mod admitted {
             ALLOCATION.with(|a| *a.borrow_mut() = self.0.take());
         }
     }
-    /// Use the operating-system cache on the legacy publication volume when available.
-    /// The temporary fallback preserves libraries created on a separate temporary filesystem.
-    /// Explicit OMNI_CACHE_DIR is selected separately and is never silently replaced.
-    fn build_cache(root: &Path, uid: u32) -> Result<PathBuf> {
+    /// Locate the selected cache without creating it or starting an account.
+    /// Root-aware reads/builds agree on actual publication volume; rootless work uses the OS default.
+    /// Explicit OMNI_CACHE_DIR remains authoritative and is qualified before any namespace creation.
+    fn configured_cache(root: Option<&Path>, uid: u32) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os("OMNI_CACHE_DIR") {
+            return Ok(PathBuf::from(path));
+        }
+
         #[cfg(target_os = "macos")]
         let os_cache =
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"));
@@ -216,19 +220,23 @@ mod admitted {
             .filter(|path| Path::new(path).is_absolute())
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
-        let target = fs::metadata(root)?.dev();
+        let target = root
+            .map(|root| fs::metadata(root).map(|m| m.dev()))
+            .transpose()?;
         if let Some(parent) = os_cache {
             let existing = parent
                 .ancestors()
                 .find(|path| path.exists())
                 .context("OS cache has no existing parent")?;
-            if fs::metadata(existing)?.dev() == target {
+            let device = fs::metadata(existing)?.dev();
+            if target.is_none_or(|target| device == target) {
                 return Ok(parent.join(format!("omni-knowledge-derived-{uid}")));
             }
         }
         let temporary = std::env::temp_dir();
+        let device = fs::metadata(&temporary)?.dev();
         anyhow::ensure!(
-            fs::metadata(&temporary)?.dev() == target,
+            target.is_none_or(|target| device == target),
             "legacy publication requires an explicit external cache on its selected volume"
         );
         Ok(temporary.join(format!("omni-knowledge-derived-{uid}")))
@@ -237,36 +245,46 @@ mod admitted {
     fn native() -> Result<&'static Native> {
         native_for_build(None)
     }
-    /// Qualify legacy build placement before account startup and generated writes.
-    /// Native tuple consumers keep the same process account and explicit cache configuration.
-    fn native_for_build(root: Option<&Path>) -> Result<&'static Native> {
-        if let Some(native) = NATIVE.get() {
-            return Ok(native);
-        }
-        let _start = START
-            .lock()
-            .map_err(|_| anyhow::anyhow!("native startup unavailable"))?;
-        if let Some(native) = NATIVE.get() {
-            return Ok(native);
-        }
-        let uid = rustix::process::geteuid().as_raw();
-        let cache = match (std::env::var_os("OMNI_CACHE_DIR"), root) {
-            (Some(path), _) => PathBuf::from(path),
-            (None, Some(root)) => build_cache(root, uid)?,
-            (None, None) => std::env::temp_dir().join(format!("omni-knowledge-derived-{uid}")),
-        };
-        if let Some(root) = root {
-            let root = root.canonicalize()?;
+    /// Reject a selected cache inside the known authored home before creation or reuse.
+    fn cache_outside_home(cache: &Path, home: Option<&Path>) -> Result<()> {
+        if let Some(home) = home {
+            let home = home.canonicalize()?;
             let ancestor = cache
                 .ancestors()
                 .find(|path| path.exists())
                 .context("derived cache has no existing ancestor")?
                 .canonicalize()?;
             anyhow::ensure!(
-                !ancestor.starts_with(&root),
+                !ancestor.starts_with(home),
                 "derived cache must remain outside the authored library"
             );
         }
+        Ok(())
+    }
+    /// Legacy publication/read placement retains its target-volume qualification.
+    fn native_for_build(root: Option<&Path>) -> Result<&'static Native> {
+        native_selected(root, root)
+    }
+    /// Select one generated namespace while independently excluding a known source home.
+    /// Native sources may be on another volume; only legacy publication requires target equality.
+    fn native_selected(
+        root: Option<&Path>,
+        excluded_home: Option<&Path>,
+    ) -> Result<&'static Native> {
+        if let Some(native) = NATIVE.get() {
+            cache_outside_home(&native.cache, excluded_home)?;
+            return Ok(native);
+        }
+        let _start = START
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native startup unavailable"))?;
+        if let Some(native) = NATIVE.get() {
+            cache_outside_home(&native.cache, excluded_home)?;
+            return Ok(native);
+        }
+        let uid = rustix::process::geteuid().as_raw();
+        let cache = configured_cache(root, uid)?;
+        cache_outside_home(&cache, excluded_home)?;
         if let Some(parent) = cache.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -284,6 +302,7 @@ mod admitted {
             bail!("derived cache is not an owned private native directory");
         }
         let cache = cache.canonicalize()?;
+        cache_outside_home(&cache, excluded_home)?;
         if let Some(root) = root {
             anyhow::ensure!(
                 !cache.starts_with(root.canonicalize()?)
@@ -336,8 +355,13 @@ mod admitted {
         }
     }
     /// Establish native startup without creating a second process account.
+    #[cfg(test)]
     pub(super) fn start() -> Result<()> {
         native().map(|_| ())
+    }
+    /// Qualify a known native source home before starting/reusing the one generated namespace.
+    pub(super) fn start_for_home(home: &Path) -> Result<()> {
+        native_selected(None, Some(home)).map(|_| ())
     }
     /// Actual native generated-root metadata; callers still qualify it against Account's held FD.
     pub(super) fn generated_path() -> Result<&'static Path> {
@@ -442,7 +466,7 @@ mod admitted {
     ) -> Result<T> {
         checkpoint()?;
         funded_checkpoint(funding)?;
-        let native = native_for_build(build.then_some(kb.root.as_path()))?;
+        let native = native_for_build(Some(kb.root.as_path()))?;
         if native.cache.starts_with(&kb.root) {
             bail!("derived cache must remain outside the authored library");
         }
@@ -2965,7 +2989,7 @@ pub mod native_service {
             policy: LocalPolicy,
             owner: &Owner,
         ) -> Result<(Self, Selection)> {
-            admitted::start()?;
+            admitted::start_for_home(&kb.root)?;
             let marker_memory = match Work::reserve(
                 Reservation {
                     memory_bytes: 64 * 1024,
