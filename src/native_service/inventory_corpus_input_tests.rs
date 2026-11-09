@@ -77,7 +77,7 @@ fn inputs<'a>(
             NativeQueryLibraryInput::new(
                 s,
                 owner,
-                "wiki",
+                "pages",
                 None,
                 ready(Reservation {
                     memory_bytes: if underpaid == 1 && i == services.len() - 1 {
@@ -180,9 +180,11 @@ fn actual_two_library_inputs_share_prepaid_span_and_original_deadline() {
         !permit.same_input_scope(&other),
         "equal bytes cannot replace actual invocation/frame identity"
     );
-    let quote =
-        NativeQueryInputs::requirement(&permit, &[(&services[0], "wiki"), (&services[1], "wiki")])
-            .unwrap();
+    let quote = NativeQueryInputs::requirement(
+        &permit,
+        &[(&services[0], "pages"), (&services[1], "pages")],
+    )
+    .unwrap();
     assert!(
         quote.memory_bytes > 24 * 1024 * 1024
             && quote.memory_bytes < 28 * 1024 * 1024 + permit.retained_input_memory().unwrap()

@@ -248,7 +248,7 @@ fn bound_original(
         .inventory_for_query(
             owner,
             permit,
-            "wiki",
+            "pages",
             header["scan"].as_str().unwrap(),
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -325,7 +325,7 @@ fn cold_query_selected(service: &NativeLibraryService, owner: &Owner, session: &
             .inventory_for_query(
                 owner,
                 &permit,
-                "wiki",
+                "pages",
                 &scan,
                 holding(2 * 1024 * 1024, 0),
                 &Preflight {

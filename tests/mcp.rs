@@ -1,5 +1,7 @@
 //! Protocol and mutation checks through the actual stdio agent interface.
 use omni_knowledge::{IndexOptions, KnowledgeBase};
+#[path = "support/canonical.rs"]
+mod canonical;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -9,9 +11,21 @@ use std::process::{Command, Stdio};
 fn stdio_tools_preserve_metadata_on_invalid_inputs() {
     let directory = tempfile::tempdir().unwrap();
     let kb = KnowledgeBase::init(directory.path(), "Agent library").unwrap();
-    std::fs::write(kb.root.join("raw/note.txt"), "agentprotocolword").unwrap();
-    kb.set_metadata("raw/note.txt", &["keep".into()], Some("description"))
-        .unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let original = source.path().join("note.txt");
+    std::fs::write(&original, "agentprotocolword").unwrap();
+    assert_eq!(
+        kb.import(&original, &["keep".into()]).unwrap(),
+        "raw/note.txt"
+    );
+    // Retain the same initial authored description in the current visible fixture format.
+    let (pointer, mut annotations) = canonical::pointer(&kb.root, "raw/note.txt");
+    annotations["description"] = serde_yaml::Value::String("description".into());
+    std::fs::write(
+        pointer,
+        format!("---\n{}---\n", serde_yaml::to_string(&annotations).unwrap()),
+    )
+    .unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     let requests = [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
@@ -59,9 +73,10 @@ fn stdio_tools_preserve_metadata_on_invalid_inputs() {
     for response in &responses[3..] {
         assert_eq!(response["result"]["isError"], true);
     }
+    let (_, annotations) = canonical::pointer(&kb.root, "raw/note.txt");
     assert_eq!(
-        kb.metadata("raw/note.txt").unwrap().tags,
-        vec!["keep".to_string()]
+        annotations["tags"],
+        serde_yaml::to_value(vec!["keep".to_string()]).unwrap()
     );
 }
 

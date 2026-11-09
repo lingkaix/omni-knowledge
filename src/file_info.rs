@@ -99,15 +99,23 @@ fn unix_millis(time: std::io::Result<SystemTime>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use crate as fixture_library;
+    mod retained {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/retained.rs"
+        ));
+    }
     use super::*;
-    use crate::{CONFIG_FILE, KnowledgeBase};
+    use crate::CONFIG_FILE;
+    use retained::legacy_init;
     use std::time::Duration;
 
     /// Read canonical dates and the exact authored sidecar before and after saving without index effects.
     #[test]
     fn live_dates_and_sidecar_location_preserve_authored_identity() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Inspector facts")?;
+        let kb = legacy_init(directory.path(), "Inspector facts")?;
         let relative = "raw/资料 + #1.md";
         let source = kb.root.join(relative);
         fs::write(&source, "# Original source\n")?;

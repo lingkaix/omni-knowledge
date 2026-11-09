@@ -56,7 +56,7 @@ fn reconcile(service: &NativeLibraryService, owner: &Owner, permit: Permit) -> N
         .reconcile_inventory(
             owner,
             permit,
-            "wiki",
+            "pages",
             context,
             &Preflight {
                 holding: &scratch,
@@ -223,7 +223,7 @@ fn canonical_inventory_asset_rename_and_actual_refresh_embedding_use_the_held_de
         .reconcile_inventory(
             &owner,
             metadata_permit,
-            "wiki",
+            "pages",
             holding(2 * 1024 * 1024, 0),
             &Preflight {
                 holding: &scratch,

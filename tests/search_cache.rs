@@ -1,15 +1,20 @@
 //! Contract regressions for resident searches, publication leases, and live provider compatibility.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use omni_knowledge::{IndexOptions, KnowledgeBase, SearchMode, SearchOptions};
 use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Create an isolated indexed source whose exact path and content can be reconciled repeatedly.
+/// Create a retained v1 indexed source with unchanged metadata/publication component oracles.
 fn library() -> (tempfile::TempDir, KnowledgeBase) {
     let directory = tempfile::tempdir().unwrap();
-    let kb = KnowledgeBase::init(directory.path(), "Resident search fixture").unwrap();
+    let kb = legacy_init(directory.path(), "Resident search fixture").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "cachewarmword\n").unwrap();
     kb.set_metadata("raw/note.txt", &["research".into()], Some("Authored note"))
         .unwrap();
@@ -136,7 +141,7 @@ fn warm_search_refuses_replaced_manifest_and_marker() {
 fn idle_resident_snapshot_does_not_block_publication_or_relocation() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("original");
-    let kb = KnowledgeBase::init(&source, "Portable resident search").unwrap();
+    let kb = legacy_init(&source, "Portable resident search").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "cachewarmword").unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     let options = SearchOptions {
@@ -172,7 +177,7 @@ fn idle_resident_snapshot_does_not_block_publication_or_relocation() {
 fn warm_search_refuses_root_location_replaced_by_symlink() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("original");
-    let kb = KnowledgeBase::init(&source, "Original root").unwrap();
+    let kb = legacy_init(&source, "Original root").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "cachewarmword").unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     let options = SearchOptions {

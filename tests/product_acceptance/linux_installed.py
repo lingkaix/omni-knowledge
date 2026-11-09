@@ -256,7 +256,7 @@ def actual(artifact, evidence):
     library = work / "library"
     runner.run("init", [binary, "init", library, "--name", "Installed synthetic acceptance", "--json"])
     library_id = json.loads((library / "omni-knowledge.json").read_text())["library_id"]
-    markdown = library / "wiki/installed.md"
+    markdown = library / "pages/installed.md"
     markdown.write_text("---\ntags: [InstallTag, Both]\n---\n# Installed synthetic\ninstallalpha 日本語\n")
     office = library / "raw/installed.docx"
     docx(office, "installeddocxword")
@@ -268,11 +268,11 @@ def actual(artifact, evidence):
         return json.loads(runner.run(label, args))
 
     lexical = search("cold-lexical", "installalpha", tags=["installtag", "Both"])
-    require(paths(lexical, library_id) == {"wiki/installed.md"}, "cold native lexical query lost source/tags")
+    require(paths(lexical, library_id) == {"pages/installed.md"}, "cold native lexical query lost source/tags")
     source = lexical["groups"][0]["files"][0]["source"]
     require(source["digest"] == sha(markdown), "installed query does not bind actual source bytes")
     japanese = search("lexical-dictionary", "日本語", tags=["InstallTag", "Both"])
-    require(paths(japanese, library_id) == {"wiki/installed.md"}, "installed multilingual lexical runtime failed")
+    require(paths(japanese, library_id) == {"pages/installed.md"}, "installed multilingual lexical runtime failed")
     parsed = search("parser-positive", "installeddocxword", mode="literal")
     parser_ok = paths(parsed, library_id) == {"raw/installed.docx"}
     failures = []
@@ -334,7 +334,7 @@ def actual(artifact, evidence):
         require(result["isError"] == (decoded["result"]["type"] == "error"), "MCP error flag differs from typed result")
         native.append(decoded["result"])
     require(native[0]["libraries"][0]["library_id"] == library_id and native[0]["libraries"][0]["exposure"]["mode"] == "read_only", "MCP did not use actual selected read-only library")
-    require(paths(native[1]["search"], library_id) == {"wiki/installed.md"}, "installed MCP query failed")
+    require(paths(native[1]["search"], library_id) == {"pages/installed.md"}, "installed MCP query failed")
     for result, expected_code, method in [(native[2], "invalid_request", "regex"), (native[3], "provider_unavailable", "semantic")]:
         require(result["type"] == "error" and result["error"]["code"] == expected_code and result["error"]["method"] == method, "installed typed method failure lost")
     require(native[1] == native[4], "failed/repeated installed queries changed prior result or generation")
@@ -350,7 +350,7 @@ def actual(artifact, evidence):
     legacy_docx = json.loads(legacy[2]["result"]["content"][0]["text"])
     if not legacy_docx or legacy_docx[0]["path"] != "raw/installed.docx":
         failures.append("legacy installed DOCX Query has the same failed native representation")
-    require(legacy[3]["result"]["isError"] is False and json.loads(legacy[3]["result"]["content"][0]["text"])[0]["path"] == "wiki/installed.md", "independent legacy MCP lexical Query failed")
+    require(legacy[3]["result"]["isError"] is False and json.loads(legacy[3]["result"]["content"][0]["text"])[0]["path"] == "pages/installed.md", "independent legacy MCP lexical Query failed")
     require(verify(stage) == archive_proof, "installed product changed during acceptance")
     return {"status": "FAIL" if failures else "PASS", "failures": failures, "blocked_checks": blocked_checks,
             "artifact": str(artifact), "artifact_sha256": sha(artifact), "product_version": version,

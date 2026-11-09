@@ -75,8 +75,8 @@ fn actual_root_held_epub_and_video_keep_funded_native_owners() {
     let kb = KnowledgeBase::init(&directory.path().join("home"), "Native held caller").unwrap();
     let first = "# First\nNative first Ω 中文 chapter\n";
     let second = "# Second\nNative second Ω 中文 chapter\n";
-    fs::write(kb.root.join("wiki/z-first.md"), first).unwrap();
-    fs::write(kb.root.join("wiki/a-second.md"), second).unwrap();
+    fs::write(kb.root.join("pages/z-first.md"), first).unwrap();
+    fs::write(kb.root.join("pages/a-second.md"), second).unwrap();
     let policy = LocalPolicy {
         mode: wire::ExposureMode::ReadOnly,
         sensitive: false,
@@ -112,11 +112,11 @@ fn actual_root_held_epub_and_video_keep_funded_native_owners() {
     };
     let members = vec![
         NativeEpubMember {
-            source: source("wiki/z-first.md"),
+            source: source("pages/z-first.md"),
             name: RelativePath::new("z-first.md").unwrap(),
         },
         NativeEpubMember {
-            source: source("wiki/a-second.md"),
+            source: source("pages/a-second.md"),
             name: RelativePath::new("a-second.md").unwrap(),
         },
     ];
@@ -129,7 +129,7 @@ fn actual_root_held_epub_and_video_keep_funded_native_owners() {
     }
     let processor =
         ContentDigest::new(hex::encode(Sha256::digest(include_bytes!("held_tests.rs")))).unwrap();
-    let processing = source("wiki/z-first.md")
+    let processing = source("pages/z-first.md")
         .processing(
             ContentDigest::new(hex::encode(recipe.finalize())).unwrap(),
             processor.clone(),
@@ -193,16 +193,16 @@ fn actual_root_held_epub_and_video_keep_funded_native_owners() {
     drop(chapters);
     let source_after = book.complete().unwrap();
     assert_eq!(
-        fs::read_to_string(kb.root.join("wiki/z-first.md")).unwrap(),
+        fs::read_to_string(kb.root.join("pages/z-first.md")).unwrap(),
         first
     );
     assert_eq!(
-        fs::read_to_string(kb.root.join("wiki/a-second.md")).unwrap(),
+        fs::read_to_string(kb.root.join("pages/a-second.md")).unwrap(),
         second
     );
     // Member scopes are distinct. The final anchor scope must retain the second member's real native pin.
     fs::write(
-        kb.root.join("wiki/a-second.md"),
+        kb.root.join("pages/a-second.md"),
         "changed after actual EPUB collection",
     )
     .unwrap();

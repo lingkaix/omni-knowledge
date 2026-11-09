@@ -1,4 +1,9 @@
 //! Contract tests for source preservation, general metadata, and lexical retrieval.
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use omni_knowledge::{IndexOptions, KnowledgeBase, SearchMode, SearchOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -115,10 +120,10 @@ fn portable_query_service() -> (
     (config, thread)
 }
 
-/// Creates an isolated library for public-interface acceptance checks.
+/// Creates an explicit v1 fixture for retained metadata/index API component checks.
 fn library() -> (tempfile::TempDir, KnowledgeBase) {
     let directory = tempfile::tempdir().unwrap();
-    let kb = KnowledgeBase::init(directory.path(), "Test Library").unwrap();
+    let kb = legacy_init(directory.path(), "Test Library").unwrap();
     (directory, kb)
 }
 
@@ -133,10 +138,10 @@ fn initialization_preserves_existing_content() {
         "keep me"
     );
     assert!(KnowledgeBase::init(dir.path(), "Again").is_err());
-    assert!(dir.path().join("wiki/sources/llm-wiki.md").exists());
+    assert!(dir.path().join("pages/sources/llm-wiki.md").exists());
     assert!(
         dir.path()
-            .join("wiki/sources/open-knowledge-format.md")
+            .join("pages/sources/open-knowledge-format.md")
             .exists()
     );
 }
@@ -248,7 +253,7 @@ fn reconciliation_updates_and_removes_content() {
 #[test]
 fn nested_roots_and_path_containment() {
     let (_dir, parent) = library();
-    let child = KnowledgeBase::init(&parent.root.join("child"), "Child").unwrap();
+    let child = legacy_init(&parent.root.join("child"), "Child").unwrap();
     fs::write(child.root.join("raw/child.txt"), "childonlytoken").unwrap();
     parent.index(&IndexOptions::default()).unwrap();
     child.index(&IndexOptions::default()).unwrap();
@@ -272,7 +277,8 @@ fn nested_roots_and_path_containment() {
 /// Proves import keeps originals and does not overwrite name collisions.
 #[test]
 fn import_preserves_sources_and_rejects_collisions() {
-    let (_dir, kb) = library();
+    let directory = tempfile::tempdir().unwrap();
+    let kb = KnowledgeBase::init(directory.path(), "Current import fixture").unwrap();
     let external = tempfile::tempdir().unwrap();
     let source = external.path().join("a.bin");
     fs::write(&source, [4, 0, 9]).unwrap();
@@ -425,8 +431,9 @@ fn second_writer_is_rejected() {
 /// Import must reject a raw directory owned by a child root before creating any destination.
 #[test]
 fn import_cannot_write_into_child_owned_raw() {
-    let (_dir, kb) = library();
-    KnowledgeBase::init(&kb.root.join("raw"), "Child raw").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let kb = KnowledgeBase::init(directory.path(), "Current import fixture").unwrap();
+    legacy_init(&kb.root.join("raw"), "Child raw").unwrap();
     let external = tempfile::tempdir().unwrap();
     let source = external.path().join("payload.bin");
     fs::write(&source, [0, 3, 9]).unwrap();
@@ -457,7 +464,8 @@ fn missing_asr_does_not_block_lexical_index() {
 /// A marker-named ordinary asset cannot hide existing raw sources from their parent library.
 #[test]
 fn import_aliases_reserved_root_marker_name() {
-    let (_dir, kb) = library();
+    let directory = tempfile::tempdir().unwrap();
+    let kb = KnowledgeBase::init(directory.path(), "Current import fixture").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "muststaysearchable").unwrap();
     let external = tempfile::tempdir().unwrap();
     let source = external.path().join("omni-knowledge.json");
@@ -666,7 +674,7 @@ fn missing_derived_index_directory_is_recreated() {
 fn moved_library_uses_existing_index_and_current_source_root() {
     let directory = tempfile::tempdir().unwrap();
     let original = directory.path().join("original");
-    let kb = KnowledgeBase::init(&original, "Portable").unwrap();
+    let kb = legacy_init(&original, "Portable").unwrap();
     fs::write(kb.root.join("raw/portable.txt"), "portableevidenceword\n").unwrap();
     kb.set_metadata(
         "raw/portable.txt",
@@ -725,7 +733,7 @@ fn moved_library_uses_existing_index_and_current_source_root() {
 fn moved_library_preserves_cached_vector_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let original_path = directory.path().join("original");
-    let kb = KnowledgeBase::init(&original_path, "Vectors").unwrap();
+    let kb = legacy_init(&original_path, "Vectors").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "cachedvectorword").unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     let (config, service) = portable_query_service();
@@ -780,7 +788,7 @@ fn moved_library_preserves_cached_vector_evidence() {
 #[test]
 fn copied_library_identity_is_distinct_from_an_independent_root() {
     let directory = tempfile::tempdir().unwrap();
-    let original = KnowledgeBase::init(&directory.path().join("original"), "Same name").unwrap();
+    let original = legacy_init(&directory.path().join("original"), "Same name").unwrap();
     fs::write(original.root.join("raw/note.txt"), "copiedlineageword").unwrap();
     original.index(&IndexOptions::default()).unwrap();
     let copied_path = directory.path().join("copy");
@@ -794,8 +802,7 @@ fn copied_library_identity_is_distinct_from_an_independent_root() {
         })
         .unwrap();
     assert_eq!(hits[0].root, copied.root);
-    let independent =
-        KnowledgeBase::init(&directory.path().join("independent"), "Same name").unwrap();
+    let independent = legacy_init(&directory.path().join("independent"), "Same name").unwrap();
     assert_ne!(independent.config.library_id, original.config.library_id);
     copy_tree(
         &original.root.join(".omni"),
@@ -817,7 +824,7 @@ fn copied_library_identity_is_distinct_from_an_independent_root() {
 fn legacy_open_is_read_only_until_explicit_index_upgrade() {
     let directory = tempfile::tempdir().unwrap();
     let original_path = directory.path().join("legacy");
-    let kb = KnowledgeBase::init(&original_path, "Legacy").unwrap();
+    let kb = legacy_init(&original_path, "Legacy").unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     make_legacy(&kb.root);
     let marker = fs::read(kb.root.join("omni-knowledge.json")).unwrap();
@@ -843,7 +850,7 @@ fn legacy_open_is_read_only_until_explicit_index_upgrade() {
 fn legacy_index_upgrade_assigns_portable_identity_without_losing_settings() {
     let directory = tempfile::tempdir().unwrap();
     let original_path = directory.path().join("legacy");
-    let kb = KnowledgeBase::init(&original_path, "Legacy").unwrap();
+    let kb = legacy_init(&original_path, "Legacy").unwrap();
     fs::write(kb.root.join("raw/note.txt"), "upgradedportableword").unwrap();
     kb.index(&IndexOptions::default()).unwrap();
     make_legacy(&kb.root);

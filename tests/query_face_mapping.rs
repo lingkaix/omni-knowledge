@@ -42,7 +42,7 @@ impl Fixture {
             ("lower", "alphatag, Both", "facelower\nexactcase needle\n"),
         ] {
             fs::write(
-                fixture.root.join(format!("wiki/face-{name}.md")),
+                fixture.root.join(format!("pages/face-{name}.md")),
                 format!("---\ntags: [{tags}]\n---\n{body}"),
             )
             .unwrap();
@@ -77,13 +77,10 @@ impl Fixture {
             "init: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let mut kb = KnowledgeBase::open(root).unwrap();
-        kb.config.embedding = None;
-        fs::write(
-            root.join(CONFIG_FILE),
-            serde_json::to_vec(&kb.config).unwrap(),
-        )
-        .unwrap();
+        let marker = root.join(CONFIG_FILE);
+        let mut document: Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        document["embedding"] = Value::Null;
+        fs::write(marker, serde_json::to_vec(&document).unwrap()).unwrap();
     }
     /// Execute one cold search and require the full public labelled result shape.
     fn search(&self, arguments: &[&str]) -> Value {
@@ -160,7 +157,7 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     );
     assert_eq!(
         paths(&insensitive, &fixture.id),
-        expected(&["wiki/face-alpha.md", "wiki/face-lower.md"])
+        expected(&["pages/face-alpha.md", "pages/face-lower.md"])
     );
     let sensitive = fixture.search(&[
         "face-",
@@ -177,7 +174,7 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     assert_eq!(sensitive["applied"]["case_sensitive"], true);
     assert_eq!(
         paths(&sensitive, &fixture.id),
-        expected(&["wiki/face-lower.md"])
+        expected(&["pages/face-lower.md"])
     );
     let regex = fixture.search(&[
         "^ExactCase needle$",
@@ -195,7 +192,7 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     assert_eq!(regex["applied"]["keywords"], json!(["^ExactCase needle$"]));
     assert_eq!(
         paths(&regex, &fixture.id),
-        expected(&["wiki/face-alpha.md"])
+        expected(&["pages/face-alpha.md"])
     );
     assert!(
         regex["groups"][0]["files"][0]["evidence"]
@@ -217,7 +214,7 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     ]);
     assert_eq!(
         paths(&lexical, &fixture.id),
-        expected(&["wiki/face-alpha.md"])
+        expected(&["pages/face-alpha.md"])
     );
     let legacy = fixture
         .command()
@@ -245,12 +242,12 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     );
     let hits: Value = serde_json::from_slice(&legacy.stdout).unwrap();
     assert_eq!(hits.as_array().unwrap().len(), 1);
-    assert_eq!(hits[0]["path"], "wiki/face-alpha.md");
+    assert_eq!(hits[0]["path"], "pages/face-alpha.md");
 
     let child = fixture.root.join("nested");
     fixture.initialize(&child);
     fs::write(
-        child.join("wiki/face-child.md"),
+        child.join("pages/face-child.md"),
         "---\ntags: [AlphaTag, Both]\n---\nfacechild\n",
     )
     .unwrap();
@@ -274,11 +271,11 @@ fn cold_cli_query_preserves_labels_tags_case_and_grep() {
     assert_eq!(recursive["groups"].as_array().unwrap().len(), 2);
     assert_eq!(
         paths(&recursive, &fixture.id),
-        expected(&["wiki/face-alpha.md", "wiki/face-lower.md"])
+        expected(&["pages/face-alpha.md", "pages/face-lower.md"])
     );
     assert_eq!(
         paths(&recursive, &child_id),
-        expected(&["wiki/face-child.md"])
+        expected(&["pages/face-child.md"])
     );
 }
 
@@ -432,7 +429,7 @@ fn canonical_mcp_catalog_selection_and_readonly_are_real() {
     let foreign = fixture.directory.path().join("foreign-library");
     fixture.initialize(&foreign);
     fs::write(
-        foreign.join("wiki/foreign-secret.md"),
+        foreign.join("pages/foreign-secret.md"),
         "syntheticforeignsecret\n",
     )
     .unwrap();
@@ -472,7 +469,7 @@ fn canonical_mcp_catalog_selection_and_readonly_are_real() {
     );
     assert_eq!(
         paths(&result["search"], &fixture.id),
-        expected(&["wiki/face-alpha.md"])
+        expected(&["pages/face-alpha.md"])
     );
     let refused = session.canonical(
         "query",
@@ -518,7 +515,7 @@ fn canonical_mcp_recursive_selection_preserves_independent_library_groups() {
     let child = fixture.root.join("nested");
     fixture.initialize(&child);
     fs::write(
-        child.join("wiki/face-child.md"),
+        child.join("pages/face-child.md"),
         "---\ntags: [AlphaTag, Both]\n---\nfacechild\n",
     )
     .unwrap();
@@ -530,7 +527,7 @@ fn canonical_mcp_recursive_selection_preserves_independent_library_groups() {
     let foreign = fixture.directory.path().join("foreign-library");
     fixture.initialize(&foreign);
     fs::write(
-        foreign.join("wiki/foreign-secret.md"),
+        foreign.join("pages/foreign-secret.md"),
         "syntheticrecursiveforeignsecret\n",
     )
     .unwrap();
@@ -571,11 +568,11 @@ fn canonical_mcp_recursive_selection_preserves_independent_library_groups() {
     assert_eq!(result["search"]["groups"].as_array().unwrap().len(), 2);
     assert_eq!(
         paths(&result["search"], &fixture.id),
-        expected(&["wiki/face-alpha.md"])
+        expected(&["pages/face-alpha.md"])
     );
     assert_eq!(
         paths(&result["search"], &child_id),
-        expected(&["wiki/face-child.md"])
+        expected(&["pages/face-child.md"])
     );
     let refused = session.canonical(
         "query",
@@ -609,7 +606,7 @@ fn canonical_mcp_repeated_queries_preserve_keywords_errors_and_prior_results() {
     assert_eq!(first["search"]["applied"], arguments["query"]);
     assert_eq!(
         paths(&first["search"], &fixture.id),
-        expected(&["wiki/face-alpha.md", "wiki/face-lower.md"])
+        expected(&["pages/face-alpha.md", "pages/face-lower.md"])
     );
     let keywords = first["search"]["groups"][0]["files"]
         .as_array()
@@ -656,7 +653,7 @@ fn canonical_mcp_repeated_queries_preserve_keywords_errors_and_prior_results() {
     );
     assert_eq!(
         paths(&sensitive["search"], &fixture.id),
-        expected(&["wiki/face-lower.md"])
+        expected(&["pages/face-lower.md"])
     );
     let missing = session.canonical(
         "query",
@@ -682,7 +679,7 @@ fn canonical_mcp_repeated_queries_preserve_keywords_errors_and_prior_results() {
     let hits: Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(hits.as_array().unwrap().len(), 1);
-    assert_eq!(hits[0]["path"], "wiki/face-alpha.md");
+    assert_eq!(hits[0]["path"], "pages/face-alpha.md");
     legacy.finish();
 }
 
@@ -774,7 +771,7 @@ fn healthy_direct(host: &omni_knowledge::mcp_native::NativeQueryHost, id: &str, 
     let value = serde_json::to_value(wire).unwrap();
     assert_eq!(
         paths(&value["result"]["search"], id),
-        expected(&["wiki/face-beta.md"])
+        expected(&["pages/face-beta.md"])
     );
     assert_eq!(
         knowledge_core::admission::Account::current()
@@ -864,7 +861,7 @@ fn public_native_reply_rechecks_writes_and_collects_after_flush_failure() {
             baseline,
             "retry after regex retained actual native credit"
         );
-        let source = root.join("wiki/face-alpha.md");
+        let source = root.join("pages/face-alpha.md");
         let original = fs::read(&source).unwrap();
         let request = direct_request(id.as_str(), "actual-writer-mutation", "facealpha");
         let mut writer = BoundaryWriter {

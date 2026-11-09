@@ -16,7 +16,7 @@ pub(super) fn run(
         .inventory_for_query(
             owner,
             permit,
-            "wiki",
+            "pages",
             scan,
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -641,7 +641,7 @@ pub(super) fn run_whole_bm25(
     let inventory = service.inventory_for_query(
         owner,
         permit,
-        "wiki",
+        "pages",
         scan,
         holding(2 * 1024 * 1024, 0),
         &Preflight {
@@ -1057,7 +1057,7 @@ fn open_live_model(
         .inventory_for_query(
             owner,
             &permit,
-            "wiki",
+            "pages",
             scan,
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -1301,7 +1301,7 @@ pub(super) fn run_semantic_tag_exclusion(
         .inventory_for_query(
             owner,
             &permit,
-            "wiki",
+            "pages",
             scan,
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -1491,7 +1491,7 @@ pub(super) fn run_canonical_metadata_controls(
 ) {
     let _cleanup = MetadataFixtureCleanup(source_root);
     let scan = query_inventory.scan();
-    let llm_wiki_id = observed(query_inventory, "wiki/sources/llm-wiki.md")
+    let llm_wiki_id = observed(query_inventory, "pages/sources/llm-wiki.md")
         .source_id()
         .to_owned();
     let page_001_id = observed(query_inventory, "raw/page-001.md")
@@ -1506,13 +1506,13 @@ pub(super) fn run_canonical_metadata_controls(
     .unwrap();
     let sidecar_name = format!(
         "{}.json",
-        hex::encode(Sha256::digest("wiki/sources/llm-wiki.md".as_bytes()))
+        hex::encode(Sha256::digest("pages/sources/llm-wiki.md".as_bytes()))
     );
     let sidecar_dir = source_root.join(".omni/metadata");
     fs::create_dir_all(&sidecar_dir).unwrap();
     fs::write(
         sidecar_dir.join(sidecar_name),
-        r#"{"version":1,"path":"wiki/sources/llm-wiki.md","tags":["hidden-sidecar-tag"],"description":"hidden sidecar"}"#,
+        r#"{"version":1,"path":"pages/sources/llm-wiki.md","tags":["hidden-sidecar-tag"],"description":"hidden sidecar"}"#,
     )
     .unwrap();
     let live = open_live(
@@ -1537,7 +1537,7 @@ pub(super) fn run_canonical_metadata_controls(
     live.finish();
     let hit = hits
         .iter()
-        .find(|hit| hit.path.as_str() == "wiki/sources/llm-wiki.md")
+        .find(|hit| hit.path.as_str() == "pages/sources/llm-wiki.md")
         .unwrap_or_else(|| panic!("pointer wiki missing from metadata hits"));
     assert_eq!(hit.title, "Pointer LLM Wiki");
     assert_eq!(
@@ -1720,7 +1720,7 @@ pub(super) fn run_canonical_metadata_controls(
     live.finish();
     assert!(
         hits.iter()
-            .any(|hit| hit.path.as_str() == "wiki/sources/llm-wiki.md")
+            .any(|hit| hit.path.as_str() == "pages/sources/llm-wiki.md")
     );
     fs::write(
         sources.join(format!("{page_001_id}.md")),
@@ -2985,7 +2985,7 @@ fn semantic_pass(
         .inventory_for_query(
             owner,
             &permit,
-            "wiki",
+            "pages",
             scan,
             holding(2 * 1024 * 1024, 0),
             &Preflight {

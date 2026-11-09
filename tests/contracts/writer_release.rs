@@ -22,7 +22,7 @@ unsafe extern "C" {
 #[test]
 fn completed_operation_releases_writer_before_unrelated_child_exec() {
     let home = tempfile::tempdir().unwrap();
-    let kb = KnowledgeBase::init(home.path(), "Writer lifetime fixture").unwrap();
+    let kb = super::retained::legacy_init(home.path(), "Writer lifetime fixture").unwrap();
     std::fs::write(kb.root.join("raw/note.txt"), "writer lifetime\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

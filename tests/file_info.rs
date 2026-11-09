@@ -1,5 +1,10 @@
 //! Selected-file facts regressions; fixtures never invoke native viewers or read a full search snapshot.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use anyhow::Result;
 use fs2::FileExt;
 use omni_knowledge::{CONFIG_FILE, KnowledgeBase, file_info};
@@ -21,7 +26,7 @@ fn sidecar(kb: &KnowledgeBase, relative: &str) -> PathBuf {
 #[test]
 fn live_facts_do_not_require_index_or_parse_source() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "File facts")?;
+    let kb = legacy_init(directory.path(), "File facts")?;
     let relative = "raw/资料 + #1.jpg";
     let source = kb.root.join(relative);
     let bytes = [0, 1, 255];
@@ -63,7 +68,7 @@ fn live_facts_do_not_require_index_or_parse_source() -> Result<()> {
 #[test]
 fn live_facts_ignore_derived_state_and_active_writer() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "File facts")?;
+    let kb = legacy_init(directory.path(), "File facts")?;
     let relative = "raw/source.bin";
     fs::write(kb.root.join(relative), [0, 255])?;
     fs::write(kb.root.join(".omni/current.json"), "not a JSON pointer")?;
@@ -104,7 +109,7 @@ fn live_facts_ignore_derived_state_and_active_writer() -> Result<()> {
 #[test]
 fn source_updates_and_aliases_use_current_authored_metadata() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "File facts")?;
+    let kb = legacy_init(directory.path(), "File facts")?;
     let relative = "raw/source.md";
     fs::write(
         kb.root.join(relative),
@@ -129,8 +134,8 @@ fn source_updates_and_aliases_use_current_authored_metadata() -> Result<()> {
 #[test]
 fn selected_facts_enforce_source_and_root_ownership() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let parent = KnowledgeBase::init(directory.path(), "Parent")?;
-    let child = KnowledgeBase::init(&parent.root.join("child"), "Child")?;
+    let parent = legacy_init(directory.path(), "Parent")?;
+    let child = legacy_init(&parent.root.join("child"), "Child")?;
     fs::write(parent.root.join("raw/source.txt"), "parent")?;
     fs::write(child.root.join("raw/source.txt"), "child")?;
     fs::create_dir(parent.root.join(".git"))?;
@@ -174,7 +179,7 @@ fn selected_facts_enforce_source_and_root_ownership() -> Result<()> {
 #[test]
 fn malformed_authored_metadata_has_a_contextual_error() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "File facts")?;
+    let kb = legacy_init(directory.path(), "File facts")?;
     let relative = "raw/source.bin";
     fs::write(kb.root.join(relative), [0, 1])?;
     let path = sidecar(&kb, relative);

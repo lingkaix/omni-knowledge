@@ -4,6 +4,13 @@
 //! Replacing coupled coverage of still-required behavior needs an OLD/NEW passing pair.
 //! The separately named writer-release module is a defect regression, not a passing OLD replacement.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+#[path = "support/canonical.rs"]
+mod canonical;
+
 #[cfg(unix)]
 #[path = "contracts/writer_release.rs"]
 mod writer_release;
@@ -15,10 +22,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::sync::{Arc, Barrier};
 
-/// Create a disposable real library; fixture creation failures fail the test.
+/// Create a disposable retained v1 component fixture; current imports use v2 separately.
 fn library() -> (tempfile::TempDir, KnowledgeBase) {
     let directory = tempfile::tempdir().unwrap();
-    let library = KnowledgeBase::init(directory.path(), "Preservation contracts").unwrap();
+    let library = legacy_init(directory.path(), "Preservation contracts").unwrap();
     (directory, library)
 }
 
@@ -33,7 +40,8 @@ fn coordinates(hits: &[omni_knowledge::SearchHit]) -> Vec<(&str, Option<usize>)>
 /// Storage / Mutations owns exclusive import and source preservation, including retry refusal.
 #[test]
 fn competing_imports_preserve_sources_and_the_winning_destination() {
-    let (_home, kb) = library();
+    let directory = tempfile::tempdir().unwrap();
+    let kb = KnowledgeBase::init(directory.path(), "Current competing imports").unwrap();
     let left = tempfile::tempdir().unwrap();
     let right = tempfile::tempdir().unwrap();
     let sources = [
@@ -73,8 +81,11 @@ fn competing_imports_preserve_sources_and_the_winning_destination() {
         contents[winner]
     );
     let reopened = KnowledgeBase::open(&kb.root).unwrap();
-    let before = reopened.metadata(destination).unwrap();
-    assert_eq!(before.tags, vec![format!("Author{winner}")]);
+    let (_, before) = canonical::pointer(&reopened.root, destination);
+    assert_eq!(
+        before["tags"],
+        serde_yaml::to_value(vec![format!("Author{winner}")]).unwrap()
+    );
     assert!(
         reopened
             .import(&sources[1 - winner], &["Replacement".into()])
@@ -84,7 +95,8 @@ fn competing_imports_preserve_sources_and_the_winning_destination() {
         fs::read(reopened.resolve(destination).unwrap()).unwrap(),
         contents[winner]
     );
-    assert_eq!(reopened.metadata(destination).unwrap().tags, before.tags);
+    let (_, after) = canonical::pointer(&reopened.root, destination);
+    assert_eq!(after["tags"], before["tags"]);
     for (source, bytes) in sources.iter().zip(&contents) {
         assert_eq!(&fs::read(source).unwrap(), bytes);
     }

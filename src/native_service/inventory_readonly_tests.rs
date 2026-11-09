@@ -39,7 +39,7 @@ fn tree(path: &std::path::Path) -> Vec<(std::path::PathBuf, u64, u64, i64, i64, 
 fn actual_readonly_query_binds_existing_complete_inventory_without_writable_context() {
     let home = tempfile::tempdir().unwrap();
     let kb = KnowledgeBase::init(home.path(), "readonly query").unwrap();
-    fs::write(kb.root.join("wiki/a.md"), "# 日本語 read-only source\n").unwrap();
+    fs::write(kb.root.join("pages/a.md"), "# 日本語 read-only source\n").unwrap();
     let mut policy = LocalPolicy {
         mode: wire::ExposureMode::ReadWrite,
         sensitive: false,
@@ -75,7 +75,7 @@ fn actual_readonly_query_binds_existing_complete_inventory_without_writable_cont
         .inventory_for_query(
             &owner,
             &permit,
-            "wiki",
+            "pages",
             &scan,
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -88,7 +88,7 @@ fn actual_readonly_query_binds_existing_complete_inventory_without_writable_cont
         !inventory.owner.policy.0.write.writable,
         "actual readonly context, not forged writable Refresh"
     );
-    let source = observed(&inventory, "wiki/a.md");
+    let source = observed(&inventory, "pages/a.md");
     assert_eq!(source.observation().scan, scan);
     assert_eq!(
         tree(&kb.root),
@@ -100,7 +100,7 @@ fn actual_readonly_query_binds_existing_complete_inventory_without_writable_cont
             .inventory_for_query(
                 &owner,
                 &permit,
-                "wiki",
+                "pages",
                 &uuid::Uuid::new_v4().to_string(),
                 holding(2 * 1024 * 1024, 0),
                 &Preflight {
@@ -120,7 +120,7 @@ fn actual_readonly_query_binds_existing_complete_inventory_without_writable_cont
             .inventory_for_query(
                 &owner,
                 &status,
-                "wiki",
+                "pages",
                 &scan,
                 holding(2 * 1024 * 1024, 0),
                 &Preflight {

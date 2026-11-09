@@ -1,5 +1,10 @@
 //! Acceptance checks for read-only folder classification, freshness, and local service observations.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use fs2::FileExt;
 use omni_knowledge::embedding::EmbeddingConfig;
 use omni_knowledge::status::{FolderState, ServiceState, StatusProbe};
@@ -11,10 +16,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-/// Creates a local fixture without an implicit provider connection and optionally indexes it.
+/// Creates an explicit v1 status-component fixture without a provider connection.
 fn library(indexed: bool) -> (tempfile::TempDir, KnowledgeBase) {
     let directory = tempfile::tempdir().unwrap();
-    let mut kb = KnowledgeBase::init(directory.path(), "Status fixture").unwrap();
+    let mut kb = legacy_init(directory.path(), "Status fixture").unwrap();
     kb.config.embedding = None;
     fs::write(
         kb.root.join(CONFIG_FILE),
@@ -293,7 +298,7 @@ fn authored_metadata_changes_need_reindexing() {
 #[test]
 fn child_roots_and_excluded_paths_do_not_dirty_the_parent() {
     let (_directory, parent) = library(false);
-    let child = KnowledgeBase::init(&parent.root.join("child"), "Child").unwrap();
+    let child = legacy_init(&parent.root.join("child"), "Child").unwrap();
     parent.index(&IndexOptions::default()).unwrap();
     fs::write(child.root.join("new.txt"), "Child-owned change").unwrap();
     fs::create_dir(parent.root.join(".git")).unwrap();

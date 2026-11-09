@@ -1,15 +1,20 @@
 //! Contract checks for unified literal keywords, peer retrieval methods, and source evidence.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use omni_knowledge::{
     IndexOptions, KnowledgeBase, SearchMethod, SearchMode, SearchOptions, UnifiedSearchOptions,
 };
 use std::collections::BTreeSet;
 use std::fs;
 
-/// Create an isolated library with independently identifiable text, tag, and filename sources.
+/// Create an explicit v1 retrieval component fixture with independent text/tag/filename sources.
 fn library() -> (tempfile::TempDir, KnowledgeBase) {
     let directory = tempfile::tempdir().unwrap();
-    let kb = KnowledgeBase::init(directory.path(), "Unified retrieval fixture").unwrap();
+    let kb = legacy_init(directory.path(), "Unified retrieval fixture").unwrap();
     fs::write(kb.root.join("raw/content.txt"), "needle\nNEEDLE and a+b\n").unwrap();
     fs::write(kb.root.join("raw/other.txt"), "secondkeyword\n").unwrap();
     fs::write(kb.root.join("raw/needle.bin"), [0, 255, 0]).unwrap();

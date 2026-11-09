@@ -752,7 +752,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         .inventory_for_query(
             &owner,
             &source_permit,
-            "wiki",
+            "pages",
             reopened["scan"].as_str().unwrap(),
             holding(2 * 1024 * 1024, 0),
             &Preflight {
@@ -832,7 +832,7 @@ fn actual_corpus_m3_persists_and_publishes_all_sources_without_resident_body_or_
         .reconcile_inventory(
             &owner,
             stat_permit,
-            "wiki",
+            "pages",
             holding(2 * 1024 * 1024, 0),
             &Preflight {
                 holding: &stat_scratch,

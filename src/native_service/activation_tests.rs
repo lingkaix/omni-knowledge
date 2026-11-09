@@ -509,7 +509,7 @@ fn history(root: &Path, home: &Path) -> History {
     let history = History::init(
         &root.join("native-history.git"),
         home,
-        "wiki",
+        "pages",
         OwnerContext {
             name: "Synthetic Snapshot Owner".into(),
             email: "snapshot@example.invalid".into(),

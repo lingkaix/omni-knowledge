@@ -434,8 +434,8 @@ sys.exit(0)
     let output = fixture.path().join("selected-output");
     fs::create_dir(&output).unwrap();
     let kb = KnowledgeBase::init(&home, "Synthetic native publication").unwrap();
-    fs::write(home.join("wiki/first.md"), FIRST).unwrap();
-    fs::write(home.join("wiki/second.md"), SECOND).unwrap();
+    fs::write(home.join("pages/first.md"), FIRST).unwrap();
+    fs::write(home.join("pages/second.md"), SECOND).unwrap();
     let (service, owner, _source_selection) =
         NativeLibraryService::ordinary_local(kb, policy()).unwrap();
     let owner = Arc::new(owner);
@@ -446,7 +446,7 @@ sys.exit(0)
         .unwrap();
     let plan_command = command(
         serde_json::json!({"op":"epub_plan","library_id":service.library_id(),
-        "page_paths":["wiki/first.md","wiki/second.md"],"media_source_ids":[],"destination":FINAL,
+        "page_paths":["pages/first.md","pages/second.md"],"media_source_ids":[],"destination":FINAL,
         "budget":{"max_files":8,"max_bytes":"16777216","max_millis":60000,"max_memory_bytes":"268435456"}}),
     );
     if mode == "no-approval" {
@@ -477,11 +477,11 @@ sys.exit(0)
     };
     let mut members = vec![
         NativeEpubMember {
-            source: source(&service, member_permit, "wiki/first.md"),
+            source: source(&service, member_permit, "pages/first.md"),
             name: RelativePath::new("first.md").unwrap(),
         },
         NativeEpubMember {
-            source: source(&service, member_permit, "wiki/second.md"),
+            source: source(&service, member_permit, "pages/second.md"),
             name: RelativePath::new("second.md").unwrap(),
         },
     ];
@@ -566,7 +566,7 @@ sys.exit(0)
     } else {
         &source_plan_permit
     };
-    let processing = source(&service, anchor_permit, "wiki/first.md")
+    let processing = source(&service, anchor_permit, "pages/first.md")
         .processing(
             plan.recipe().clone(),
             digest(include_bytes!("publication_tests.rs")),
@@ -685,11 +685,11 @@ sys.exit(0)
         drop(error);
         assert_eq!(account.status().unwrap().queue.unsettled, 0);
         assert_eq!(
-            fs::read_to_string(home.join("wiki/first.md")).unwrap(),
+            fs::read_to_string(home.join("pages/first.md")).unwrap(),
             FIRST
         );
         assert_eq!(
-            fs::read_to_string(home.join("wiki/second.md")).unwrap(),
+            fs::read_to_string(home.join("pages/second.md")).unwrap(),
             SECOND
         );
         return;
@@ -723,7 +723,7 @@ sys.exit(0)
         "complete private processing is not destination publication"
     );
     if mode == "source-changed" {
-        fs::write(home.join("wiki/second.md"), "concurrent original edit").unwrap();
+        fs::write(home.join("pages/second.md"), "concurrent original edit").unwrap();
     }
     if mode == "destination-revoked" {
         owner.revoke(&selected).unwrap();
@@ -798,7 +798,7 @@ sys.exit(0)
         }
         if mode == "source-changed" {
             assert_eq!(
-                fs::read_to_string(home.join("wiki/second.md")).unwrap(),
+                fs::read_to_string(home.join("pages/second.md")).unwrap(),
                 "concurrent original edit"
             );
         }
@@ -829,11 +829,11 @@ sys.exit(0)
     drop(pressure);
     drop(processing_pressure);
     assert_eq!(
-        fs::read_to_string(home.join("wiki/first.md")).unwrap(),
+        fs::read_to_string(home.join("pages/first.md")).unwrap(),
         FIRST
     );
     assert_eq!(
-        fs::read_to_string(home.join("wiki/second.md")).unwrap(),
+        fs::read_to_string(home.join("pages/second.md")).unwrap(),
         SECOND
     );
 }

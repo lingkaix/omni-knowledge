@@ -758,15 +758,23 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    use crate as fixture_library;
+    mod retained {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/retained.rs"
+        ));
+    }
     use super::*;
     use fs2::FileExt;
+    use retained::legacy_init;
     use std::fs::OpenOptions;
 
     /// Resolve only a real saved record for the validated source; do not launch Finder or publish an index.
     #[test]
     fn metadata_reveal_requires_a_saved_record_and_preserves_its_identity() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Metadata reveal")?;
+        let kb = legacy_init(directory.path(), "Metadata reveal")?;
         let relative = "raw/资料 + #1.txt";
         fs::write(kb.root.join(relative), "source")?;
         let missing = metadata_reveal_path(&kb.root, relative).unwrap_err();
@@ -786,8 +794,8 @@ mod tests {
     #[test]
     fn metadata_reveal_revalidates_source_and_sidecar_containment() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let parent = KnowledgeBase::init(directory.path(), "Parent")?;
-        let child = KnowledgeBase::init(&parent.root.join("child"), "Child")?;
+        let parent = legacy_init(directory.path(), "Parent")?;
+        let child = legacy_init(&parent.root.join("child"), "Child")?;
         let relative = "raw/source.txt";
         fs::write(parent.root.join(relative), "parent source")?;
         fs::write(child.root.join(relative), "child source")?;
@@ -857,7 +865,7 @@ mod tests {
     #[test]
     fn trash_guard_refuses_a_competing_writer() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+        let kb = legacy_init(directory.path(), "Actions")?;
         fs::write(kb.root.join("raw/source.txt"), "source")?;
         kb.set_metadata("raw/source.txt", &["keep".into()], Some("notes"))?;
         let gate = OpenOptions::new()
@@ -881,7 +889,7 @@ mod tests {
     #[test]
     fn failed_transfer_rolls_back_its_reserved_metadata() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Transfer")?;
+        let kb = legacy_init(directory.path(), "Transfer")?;
         fs::write(kb.root.join("raw/source.txt"), "source")?;
         kb.set_metadata("raw/source.txt", &["keep".into()], Some("notes"))?;
         let original_path = kb.metadata_path("raw/source.txt")?;
@@ -911,7 +919,7 @@ mod tests {
     #[test]
     fn failed_transfer_keeps_a_replaced_sidecar() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Transfer")?;
+        let kb = legacy_init(directory.path(), "Transfer")?;
         let metadata = destination_metadata("new.txt", None);
         let reservation = kb.metadata_path("new.txt")?;
         let _writer = kb.writer_lock()?;
@@ -931,7 +939,7 @@ mod tests {
     #[test]
     fn failed_transfer_keeps_an_in_place_sidecar_edit() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Transfer")?;
+        let kb = legacy_init(directory.path(), "Transfer")?;
         let mut metadata = destination_metadata("new.txt", None);
         metadata.description = "before".into();
         let reservation = kb.metadata_path("new.txt")?;
@@ -975,7 +983,7 @@ mod tests {
     #[test]
     fn trash_adapter_preserves_metadata_and_published_generation() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+        let kb = legacy_init(directory.path(), "Actions")?;
         let relative = "raw/source.txt";
         fs::write(kb.root.join(relative), "source")?;
         kb.set_metadata(relative, &["keep".into()], Some("authored notes"))?;
@@ -1009,8 +1017,8 @@ mod tests {
     #[test]
     fn trash_adapter_refuses_ancestor_rebinding() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let parent = KnowledgeBase::init(directory.path(), "Parent")?;
-        let child = KnowledgeBase::init(&parent.root.join("child"), "Child")?;
+        let parent = legacy_init(directory.path(), "Parent")?;
+        let child = legacy_init(&parent.root.join("child"), "Child")?;
         let relative = "raw/source.txt";
         fs::write(parent.root.join(relative), "parent source")?;
         fs::write(child.root.join(relative), "child source")?;
@@ -1039,7 +1047,7 @@ mod tests {
     #[test]
     fn trash_receipt_allows_an_unreported_destination() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+        let kb = legacy_init(directory.path(), "Actions")?;
         fs::write(kb.root.join("raw/source.txt"), "source")?;
         let destination = directory.path().join("fixture-trash.txt");
         let receipt = trash_with(&kb.root, "raw/source.txt", |source| {
@@ -1057,7 +1065,7 @@ mod tests {
     #[test]
     fn trash_adapter_failure_preserves_the_source() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+        let kb = legacy_init(directory.path(), "Actions")?;
         let relative = "raw/source.txt";
         fs::write(kb.root.join(relative), "source")?;
         kb.set_metadata(relative, &["keep".into()], Some("authored notes"))?;

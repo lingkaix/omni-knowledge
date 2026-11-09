@@ -1,5 +1,10 @@
 //! Source-action preflight tests; no test changes the host pasteboard, Finder, or Trash.
 
+use omni_knowledge as fixture_library;
+#[path = "support/retained.rs"]
+mod retained;
+use retained::legacy_init;
+
 use anyhow::Result;
 use fs2::FileExt;
 use omni_knowledge::{CONFIG_FILE, KnowledgeBase, file_actions};
@@ -18,7 +23,7 @@ fn sidecar(kb: &KnowledgeBase, relative: &str) -> std::path::PathBuf {
 #[test]
 fn source_paths_preserve_owned_files() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+    let kb = legacy_init(directory.path(), "Actions")?;
     let relative = "raw/研究 notes #1.bin";
     fs::write(kb.root.join(relative), [0, 1, 255])?;
     kb.set_metadata(relative, &["research".into()], Some("Keep this note"))?;
@@ -33,8 +38,8 @@ fn source_paths_preserve_owned_files() -> Result<()> {
 #[test]
 fn explicit_roots_refuse_ancestor_rebinding_after_marker_removal() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let parent = KnowledgeBase::init(directory.path(), "Parent")?;
-    let child = KnowledgeBase::init(&parent.root.join("child"), "Child")?;
+    let parent = legacy_init(directory.path(), "Parent")?;
+    let child = legacy_init(&parent.root.join("child"), "Child")?;
     let relative = "raw/source.txt";
     fs::write(parent.root.join(relative), "parent source")?;
     fs::write(child.root.join(relative), "child source")?;
@@ -89,12 +94,12 @@ fn explicit_roots_refuse_ancestor_rebinding_after_marker_removal() -> Result<()>
 #[test]
 fn source_actions_reject_unowned_targets() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+    let kb = legacy_init(directory.path(), "Actions")?;
     fs::create_dir_all(kb.root.join(".git"))?;
     fs::write(kb.root.join(".git/config"), "private")?;
     fs::create_dir_all(kb.root.join("raw/.omni"))?;
     fs::write(kb.root.join("raw/.omni/hidden"), "private")?;
-    let child = KnowledgeBase::init(&kb.root.join("child"), "Child")?;
+    let child = legacy_init(&kb.root.join("child"), "Child")?;
     fs::write(child.root.join("raw/source.txt"), "child")?;
     for relative in [
         "",
@@ -127,7 +132,7 @@ fn source_actions_reject_unowned_targets() -> Result<()> {
 #[test]
 fn source_actions_reject_symlink_components() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+    let kb = legacy_init(directory.path(), "Actions")?;
     fs::write(kb.root.join("raw/source.txt"), "safe")?;
     std::os::unix::fs::symlink(kb.root.join("raw/source.txt"), kb.root.join("raw/link.txt"))?;
     std::os::unix::fs::symlink(kb.root.join("raw"), kb.root.join("alias"))?;
@@ -141,7 +146,7 @@ fn source_actions_reject_symlink_components() -> Result<()> {
 #[test]
 fn transfers_refuse_an_active_writer_without_touching_source() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Actions")?;
+    let kb = legacy_init(directory.path(), "Actions")?;
     fs::write(kb.root.join("raw/source.txt"), "safe")?;
     kb.set_metadata("raw/source.txt", &["preserve".into()], Some("notes"))?;
     fs::create_dir(kb.root.join("destination"))?;
@@ -164,10 +169,10 @@ fn transfers_refuse_an_active_writer_without_touching_source() -> Result<()> {
 #[test]
 fn live_directory_browsing_is_complete_and_scoped() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Browse")?;
+    let kb = legacy_init(directory.path(), "Browse")?;
     fs::create_dir(kb.root.join("empty"))?;
     fs::create_dir(kb.root.join(".git"))?;
-    let child = KnowledgeBase::init(&kb.root.join("child"), "Child")?;
+    let child = legacy_init(&kb.root.join("child"), "Child")?;
     let original_raw_children = fs::read_dir(kb.root.join("raw"))?.count();
     for index in 0..1100 {
         fs::write(
@@ -207,7 +212,7 @@ fn live_directory_browsing_is_complete_and_scoped() -> Result<()> {
 #[test]
 fn copy_preserves_source_and_authored_metadata() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Copy")?;
+    let kb = legacy_init(directory.path(), "Copy")?;
     fs::write(kb.root.join("raw/资料.bin"), [0, 7, 255])?;
     kb.set_metadata("raw/资料.bin", &["研究".into()], Some("authored note"))?;
     fs::create_dir(kb.root.join("copies"))?;
@@ -230,9 +235,9 @@ fn copy_preserves_source_and_authored_metadata() -> Result<()> {
 #[test]
 fn external_copy_has_explicit_empty_metadata() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Copy")?;
+    let kb = legacy_init(directory.path(), "Copy")?;
     let outside = tempfile::tempdir()?;
-    let other = KnowledgeBase::init(outside.path(), "Other")?;
+    let other = legacy_init(outside.path(), "Other")?;
     let source = other.root.join("raw/other.bin");
     fs::write(&source, [4, 3, 2, 1])?;
     other.set_metadata(
@@ -255,7 +260,7 @@ fn external_copy_has_explicit_empty_metadata() -> Result<()> {
 #[test]
 fn transfers_refuse_file_and_metadata_collisions() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Collision")?;
+    let kb = legacy_init(directory.path(), "Collision")?;
     fs::write(kb.root.join("raw/source.txt"), "source")?;
     kb.set_metadata("raw/source.txt", &["original".into()], Some("keep"))?;
     fs::create_dir(kb.root.join("destination"))?;
@@ -294,9 +299,9 @@ fn transfers_refuse_file_and_metadata_collisions() -> Result<()> {
 #[test]
 fn transfers_refuse_unowned_sources_and_destinations() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Scope")?;
+    let kb = legacy_init(directory.path(), "Scope")?;
     fs::write(kb.root.join("raw/source.txt"), "source")?;
-    let child = KnowledgeBase::init(&kb.root.join("child"), "Child")?;
+    let child = legacy_init(&kb.root.join("child"), "Child")?;
     fs::write(child.root.join("raw/child.txt"), "child")?;
     for target in [
         "../escape",
@@ -336,7 +341,7 @@ fn transfers_refuse_unowned_sources_and_destinations() -> Result<()> {
 #[test]
 fn malformed_nested_marker_still_blocks_parent_actions() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Boundary")?;
+    let kb = legacy_init(directory.path(), "Boundary")?;
     fs::create_dir(kb.root.join("marked"))?;
     fs::write(kb.root.join("marked/source.txt"), "preserved")?;
     fs::create_dir(kb.root.join("marked/subfolder"))?;
@@ -373,7 +378,7 @@ fn malformed_nested_marker_still_blocks_parent_actions() -> Result<()> {
 #[test]
 fn move_migrates_metadata_without_reindexing() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let kb = KnowledgeBase::init(directory.path(), "Move")?;
+    let kb = legacy_init(directory.path(), "Move")?;
     fs::write(kb.root.join("raw/source.txt"), "source")?;
     kb.set_metadata("raw/source.txt", &["keep".into()], Some("authored notes"))?;
     fs::create_dir(kb.root.join("destination"))?;
