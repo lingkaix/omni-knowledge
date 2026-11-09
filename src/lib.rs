@@ -1,4 +1,5 @@
 //! Shared local knowledge-library lifecycle and retrieval for agents and the GPUI interface.
+mod annotations;
 pub mod embedding;
 /// Compatibility IO uses the mature M3 bodies under the actual process account.
 pub mod epub {
@@ -2076,22 +2077,21 @@ impl KnowledgeBase {
                 bail!("initialization collision: {relative}; existing content is preserved");
             }
         }
-        storage::check_components(&root, Path::new(".omni/metadata"), false)?;
         for directory in [
             "raw",
-            "wiki/sources",
-            "wiki/concepts",
-            ".omni/metadata",
+            "pages/sources",
+            "pages/concepts",
+            "sources",
             ".omni/indexes",
         ] {
             storage::check_components(&root, Path::new(directory), false)?;
             fs::create_dir_all(root.join(directory))?;
         }
         let config = Config {
-            version: 1,
+            version: 2,
             name: name.to_owned(),
             library_id: Some(uuid::Uuid::new_v4().to_string()),
-            embedding: Some(embedding::EmbeddingConfig::default()),
+            embedding: None,
             whisper_executable: None,
             whisper_model: None,
         };
@@ -2110,7 +2110,18 @@ impl KnowledgeBase {
             .write(true)
             .create_new(true)
             .open(root.join(CONFIG_FILE))?;
-        serde_json::to_writer_pretty(&mut marker, &config)?;
+        serde_json::to_writer_pretty(
+            &mut marker,
+            &serde_json::json!({
+                "version": 2,
+                "name": config.name,
+                "library_id": config.library_id,
+                "text_root": "pages",
+                "mounts": [],
+                "exposure": {"mode":"off", "sensitive":false, "excluded_paths":[], "transports":[]},
+                "convention_version": "0.2"
+            }),
+        )?;
         marker.write_all(b"\n")?;
         marker.sync_all()?;
         Ok(Self { root, config })
@@ -2168,6 +2179,10 @@ impl KnowledgeBase {
 
     /// Copies an external regular source to raw/ and records tags without overwriting a destination.
     pub fn import(&self, source: &Path, tags: &[String]) -> Result<String> {
+        anyhow::ensure!(
+            self.config.version == 2,
+            "legacy migration is not yet shipped; use inventory or preview for version-1 libraries"
+        );
         if !source.is_file() {
             bail!("import source must be a regular file");
         }
@@ -2198,17 +2213,21 @@ impl KnowledgeBase {
             tags: normalized_tags(tags),
             description: String::new(),
         };
-        self.write_metadata(&metadata)?;
+        annotations::imported(self, &metadata)?;
         Ok(relative)
     }
 
-    /// Replaces editable tags and optionally the description of an existing owned source.
+    /// Retained version-1 editor; version 2 refuses before effects instead of creating hidden tags.
     pub fn set_metadata(
         &self,
         relative: &str,
         tags: &[String],
         description: Option<&str>,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.config.version == 1,
+            "version-2 annotations are owned by sources/<source-id>.md; the retained metadata editor is not supported; edit the canonical pointer instead"
+        );
         let path = self.resolve(relative)?;
         if !path.is_file() {
             bail!("metadata target must be a regular file");
@@ -2224,6 +2243,10 @@ impl KnowledgeBase {
 
     /// Returns one source's user metadata; absent sidecars return an empty editable record.
     pub fn metadata(&self, relative: &str) -> Result<AssetMetadata> {
+        anyhow::ensure!(
+            self.config.version == 1,
+            "version-2 annotations are owned by sources/<source-id>.md; inspect that canonical pointer instead of the retained metadata editor"
+        );
         self.resolve(relative)?;
         self.read_metadata(relative)
     }
@@ -2467,7 +2490,7 @@ impl KnowledgeBase {
                     record.tags = normalized_tags(&record.tags);
                 }
                 // Create a general metadata record for every regular file without replacing edits.
-                if !self.metadata_path(&relative)?.exists() {
+                if self.config.version == 1 && !self.metadata_path(&relative)?.exists() {
                     self.write_metadata(&metadata)?;
                 }
                 let content_unchanged = previous.get(relative.as_str()).is_some_and(|r| {
@@ -2660,9 +2683,13 @@ impl KnowledgeBase {
 
     /// Acquires the sole mutation lock and recreates missing managed directories after restoration.
     fn writer_lock(&self) -> Result<WriterGuard> {
-        for path in [".omni", ".omni/metadata", ".omni/indexes"] {
+        for path in [".omni", ".omni/indexes"] {
             storage::check_components(&self.root, Path::new(path), false)?;
             fs::create_dir_all(self.root.join(path))?;
+        }
+        if self.config.version == 1 {
+            storage::check_components(&self.root, Path::new(".omni/metadata"), false)?;
+            fs::create_dir_all(self.root.join(".omni/metadata"))?;
         }
         storage::check_components(&self.root, Path::new(".omni/write.lock"), false)?;
         let file = OpenOptions::new()
@@ -2707,6 +2734,14 @@ impl KnowledgeBase {
         relative: &str,
         funding: &mut knowledge_processing::funding::Funding<'_>,
     ) -> Result<AssetMetadata> {
+        if self.config.version == 2 {
+            return Ok(AssetMetadata {
+                version: 1,
+                path: relative.into(),
+                tags: vec![],
+                description: String::new(),
+            });
+        }
         let path = self.metadata_path(relative)?;
         if !path.exists() {
             return Ok(AssetMetadata {

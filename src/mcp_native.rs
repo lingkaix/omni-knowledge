@@ -108,6 +108,10 @@ impl NativeQueryHost {
     /// Select the actual local homes, activate their native corpus, then install agent policy.
     pub fn open(libraries: Vec<KnowledgeBase>, read_only: bool) -> Result<Self> {
         anyhow::ensure!(!libraries.is_empty(), "select a local library");
+        anyhow::ensure!(
+            libraries.iter().all(|library| library.config.version == 2),
+            "version-1 libraries require legacy migration (not yet shipped); use list for inventory or preview for inspection; native Query and Refresh are refused"
+        );
         let _foreground = FOREGROUND
             .lock()
             .map_err(|_| refusal(wire::ErrorCode::Internal))?;

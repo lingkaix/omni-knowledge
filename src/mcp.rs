@@ -205,6 +205,10 @@ fn call(name: &str, arguments: &Value, default_root: &Path) -> Result<Value> {
     validate_arguments(arguments)?;
     let root = selected_root(arguments, default_root)?;
     let kb = KnowledgeBase::open(&root)?;
+    anyhow::ensure!(
+        kb.config.version == 2 || matches!(name, "list" | "read" | "status"),
+        "version-1 libraries require legacy migration (not yet shipped); only inventory and preview reads are supported"
+    );
     let tags: Vec<String> = arguments["tags"]
         .as_array()
         .map(|values| {
@@ -245,8 +249,14 @@ fn call(name: &str, arguments: &Value, default_root: &Path) -> Result<Value> {
                 extracted.status = "partial".into();
                 extracted.warnings.push("Read output limited to 128 KiB; use the original file or CLI conversion for the rest".into());
             }
+            // Version 2 has no retained metadata projection; preview must still return source text.
+            let metadata = if kb.config.version == 1 {
+                serde_json::to_value(kb.metadata(path)?)?
+            } else {
+                Value::Null
+            };
             Ok(
-                json!({"path":path,"text":extracted.text,"status":extracted.status,"warnings":extracted.warnings,"metadata":kb.metadata(path)?}),
+                json!({"path":path,"text":extracted.text,"status":extracted.status,"warnings":extracted.warnings,"metadata":metadata}),
             )
         }
         "metadata" => {

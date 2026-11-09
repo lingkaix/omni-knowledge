@@ -266,6 +266,17 @@ fn run(arguments: &Arguments) -> Result<()> {
         );
     }
     let kb = KnowledgeBase::open(&arguments.root)?;
+    anyhow::ensure!(
+        kb.config.version == 2
+            || matches!(
+                arguments.command,
+                Operation::List
+                    | Operation::Status
+                    | Operation::Preview { .. }
+                    | Operation::Search { .. }
+            ),
+        "version-1 libraries require legacy migration (not yet shipped); use list for inventory or preview for inspection"
+    );
     match &arguments.command {
         Operation::Add { files, tags } => {
             let mut paths = vec![];
