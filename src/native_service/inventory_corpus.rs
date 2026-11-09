@@ -29,9 +29,12 @@ pub use query::{
 };
 #[path = "inventory_corpus_reader.rs"]
 mod reader;
+#[path = "inventory_corpus_retirement.rs"]
+mod retirement;
 #[path = "inventory_corpus_selection.rs"]
 mod selection;
 pub use reader::NativeTupleRead;
+pub use retirement::NativeCorpusRetirement;
 #[path = "inventory_corpus_tuple.rs"]
 mod tuple;
 #[path = "inventory_corpus_vectors.rs"]
@@ -151,6 +154,10 @@ pub struct NativeCorpusDraft {
     selection: Option<selection::Selection>,
     #[cfg(test)]
     test_fail_after_switch: bool,
+    #[cfg(test)]
+    test_after_switch: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    test_before_retirement_delete: Option<Box<dyn FnOnce() + Send>>,
     sealed_files: Option<[[u64; 8]; 4]>,
     coverage: NativeCorpusCoverage,
     source_errors: Arc<Mutex<Vec<anyhow::Error>>>,
@@ -243,6 +250,10 @@ impl NativeRefreshJob {
             selection: None,
             #[cfg(test)]
             test_fail_after_switch: false,
+            #[cfg(test)]
+            test_after_switch: None,
+            #[cfg(test)]
+            test_before_retirement_delete: None,
             sealed_files: None,
             coverage: NativeCorpusCoverage::default(),
             source_errors: Arc::new(Mutex::new(Vec::with_capacity(64))),
@@ -649,6 +660,23 @@ impl NativeCorpusDraft {
             Err(cause) => Err(self.error(cause)),
         }
     }
+    /// Retire only sealed previous generations under this durable Refresh writer owner.
+    /// Live aggregate consumers and unknown cache material keep their entire generation intact.
+    pub fn retire_previous(
+        mut self,
+        mut progress: impl FnMut(NativeCorpusProgress),
+    ) -> std::result::Result<(Self, NativeCorpusRetirement), NativeCorpusError> {
+        let mut state = match self.selection.take() {
+            Some(state) => state,
+            None => return Err(self.error(anyhow::anyhow!("actual selector owner unavailable"))),
+        };
+        let result = retirement::retire(&mut state, &mut self, &mut progress);
+        self.selection = Some(state);
+        match result {
+            Ok(report) => Ok((self, report)),
+            Err(cause) => Err(self.error(cause)),
+        }
+    }
     fn resolve_publication(&mut self) -> Result<()> {
         let Some(mut state) = self.selection.take() else {
             return Ok(());
@@ -660,6 +688,21 @@ impl NativeCorpusDraft {
         };
         self.selection = Some(state);
         result
+    }
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_before_retirement_delete(
+        &mut self,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        self.test_before_retirement_delete = Some(Box::new(hook));
+    }
+    /// Install a fixture-only barrier at the actual switched-pointer boundary.
+    #[cfg(test)]
+    pub(in crate::native_service) fn test_after_switch(
+        &mut self,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        self.test_after_switch = Some(Box::new(hook));
     }
     #[cfg(test)]
     pub(in crate::native_service) fn test_switch_fault(&mut self) {

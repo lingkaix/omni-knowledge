@@ -203,8 +203,42 @@ mod admitted {
             ALLOCATION.with(|a| *a.borrow_mut() = self.0.take());
         }
     }
+    /// Use the operating-system cache on the legacy publication volume when available.
+    /// The temporary fallback preserves libraries created on a separate temporary filesystem.
+    /// Explicit OMNI_CACHE_DIR is selected separately and is never silently replaced.
+    fn build_cache(root: &Path, uid: u32) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        let os_cache =
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"));
+        #[cfg(not(target_os = "macos"))]
+        let os_cache = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|path| Path::new(path).is_absolute())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")));
+        let target = fs::metadata(root)?.dev();
+        if let Some(parent) = os_cache {
+            let existing = parent
+                .ancestors()
+                .find(|path| path.exists())
+                .context("OS cache has no existing parent")?;
+            if fs::metadata(existing)?.dev() == target {
+                return Ok(parent.join(format!("omni-knowledge-derived-{uid}")));
+            }
+        }
+        let temporary = std::env::temp_dir();
+        anyhow::ensure!(
+            fs::metadata(&temporary)?.dev() == target,
+            "legacy publication requires an explicit external cache on its selected volume"
+        );
+        Ok(temporary.join(format!("omni-knowledge-derived-{uid}")))
+    }
     /// Start/reuse the ONE process account and a private external derived-cache directory.
     fn native() -> Result<&'static Native> {
+        native_for_build(None)
+    }
+    /// Qualify legacy build placement before account startup and generated writes.
+    /// Native tuple consumers keep the same process account and explicit cache configuration.
+    fn native_for_build(root: Option<&Path>) -> Result<&'static Native> {
         if let Some(native) = NATIVE.get() {
             return Ok(native);
         }
@@ -215,9 +249,26 @@ mod admitted {
             return Ok(native);
         }
         let uid = rustix::process::geteuid().as_raw();
-        let cache = std::env::var_os("OMNI_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("omni-knowledge-derived-{uid}")));
+        let cache = match (std::env::var_os("OMNI_CACHE_DIR"), root) {
+            (Some(path), _) => PathBuf::from(path),
+            (None, Some(root)) => build_cache(root, uid)?,
+            (None, None) => std::env::temp_dir().join(format!("omni-knowledge-derived-{uid}")),
+        };
+        if let Some(root) = root {
+            let root = root.canonicalize()?;
+            let ancestor = cache
+                .ancestors()
+                .find(|path| path.exists())
+                .context("derived cache has no existing ancestor")?
+                .canonicalize()?;
+            anyhow::ensure!(
+                !ancestor.starts_with(&root),
+                "derived cache must remain outside the authored library"
+            );
+        }
+        if let Some(parent) = cache.parent() {
+            fs::create_dir_all(parent)?;
+        }
         match fs::create_dir(&cache) {
             Ok(()) => fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))?,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -232,6 +283,13 @@ mod admitted {
             bail!("derived cache is not an owned private native directory");
         }
         let cache = cache.canonicalize()?;
+        if let Some(root) = root {
+            anyhow::ensure!(
+                !cache.starts_with(root.canonicalize()?)
+                    && fs::metadata(&cache)?.dev() == fs::metadata(root)?.dev(),
+                "legacy publication cache differs from its actual target volume"
+            );
+        }
         let account = match Account::current() {
             Ok(account) => account,
             Err(knowledge_core::admission::Error::NotStarted) => Account::start(
@@ -384,7 +442,7 @@ mod admitted {
     ) -> Result<T> {
         checkpoint()?;
         funded_checkpoint(funding)?;
-        let native = native()?;
+        let native = native_for_build(build.then_some(kb.root.as_path()))?;
         if native.cache.starts_with(&kb.root) {
             bail!("derived cache must remain outside the authored library");
         }
@@ -2802,14 +2860,14 @@ pub mod native_service {
     pub use held::{NativeEpubMember, NativeEpubPlan, NativeVideoPlan};
     pub use inventory::{
         EncodedResponse, NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
-        NativeCorpusProgress, NativeInventory, NativeInventoryPage, NativeMetadataRun,
-        NativeObservedSource, NativePartitionResult, NativeQueryAnnotations, NativeQueryController,
-        NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary, NativeQueryLibraryInput,
-        NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal, NativeQueryPartition,
-        NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage, NativeQueryStageRefusal,
-        NativeQueryStageResources, NativeQueryStep, NativeRefreshJob, NativeRefreshScopeError,
-        NativeScanOccurrence, NativeScanRun, NativeSemanticRun, NativeTupleQuery, NativeTupleRead,
-        NativeWholeSemanticRun,
+        NativeCorpusProgress, NativeCorpusRetirement, NativeInventory, NativeInventoryPage,
+        NativeMetadataRun, NativeObservedSource, NativePartitionResult, NativeQueryAnnotations,
+        NativeQueryController, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
+        NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
+        NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
+        NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
+        NativeRefreshScopeError, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
+        NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
     };
     use knowledge_core::admission::{Decision, Origin};
     use knowledge_core::jobs::Reservation;

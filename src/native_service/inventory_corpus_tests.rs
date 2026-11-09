@@ -4,12 +4,12 @@ use super::*;
 mod query_job;
 use std::io::Read;
 use std::os::unix::fs::{FileExt, PermissionsExt};
-struct ContractFixture {
+pub(super) struct ContractFixture {
     server: crate::native_service::embedding_tests::server::Server,
     _files: tempfile::TempDir,
     _work: knowledge_retrieval::Work,
 }
-fn contract_model(
+pub(super) fn contract_model(
     service: &NativeLibraryService,
     owner: &Owner,
 ) -> (NativeEmbeddingSelection, ContractFixture) {

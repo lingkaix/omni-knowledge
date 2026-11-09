@@ -326,6 +326,10 @@ impl Selection {
         )?;
         self.phase = Phase::Switched; // Must precede every fallible operation after the atomic switch.
         #[cfg(test)]
+        if let Some(hook) = owner.test_after_switch.take() {
+            hook();
+        }
+        #[cfg(test)]
         if owner.test_fail_after_switch {
             owner.test_fail_after_switch = false;
             bail!("injected post-switch durability observation failure");
@@ -399,6 +403,24 @@ impl Selection {
         self.candidate.take();
         self.phase = Phase::Unselected;
         Ok(())
+    }
+    pub(super) fn retirement_context(&self, owner: &NativeCorpusDraft) -> Result<(File, String)> {
+        owner.check()?;
+        self.check(owner)?;
+        anyhow::ensure!(
+            self.writer_locked && self.phase == Phase::Durable,
+            "retirement requires the actual durable selector writer"
+        );
+        self.check_selected()?;
+        Ok((
+            self.namespace.try_clone()?,
+            self.candidate
+                .as_ref()
+                .context("actual selected candidate")?
+                .pointer
+                .stage
+                .clone(),
+        ))
     }
     #[cfg(test)]
     pub fn selected_pointer(&self) -> Result<&Pointer> {

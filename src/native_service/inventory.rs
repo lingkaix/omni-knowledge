@@ -9,13 +9,13 @@ use super::*;
 pub(super) use job::RefreshCause;
 pub use job::{
     EncodedResponse, NativeBm25Run, NativeCorpusCoverage, NativeCorpusDraft, NativeCorpusError,
-    NativeCorpusProgress, NativeMetadataRun, NativePartitionResult, NativeQueryAnnotations,
-    NativeQueryController, NativeQueryEmbedding, NativeQueryInputs, NativeQueryLibrary,
-    NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan, NativeQueryPageRefusal,
-    NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource, NativeQueryStage,
-    NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep, NativeRefreshJob,
-    NativeRefreshScopeError, NativeScanOccurrence, NativeScanRun, NativeSemanticRun,
-    NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
+    NativeCorpusProgress, NativeCorpusRetirement, NativeMetadataRun, NativePartitionResult,
+    NativeQueryAnnotations, NativeQueryController, NativeQueryEmbedding, NativeQueryInputs,
+    NativeQueryLibrary, NativeQueryLibraryInput, NativeQueryLoans, NativeQueryPageLoan,
+    NativeQueryPageRefusal, NativeQueryPartition, NativeQueryPartitionPage, NativeQuerySource,
+    NativeQueryStage, NativeQueryStageRefusal, NativeQueryStageResources, NativeQueryStep,
+    NativeRefreshJob, NativeRefreshScopeError, NativeScanOccurrence, NativeScanRun,
+    NativeSemanticRun, NativeTupleQuery, NativeTupleRead, NativeWholeSemanticRun,
 };
 use knowledge_core::{
     admission::Holding,
