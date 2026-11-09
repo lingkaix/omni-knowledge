@@ -110,7 +110,7 @@ impl NativeQueryHost {
         anyhow::ensure!(!libraries.is_empty(), "select a local library");
         anyhow::ensure!(
             libraries.iter().all(|library| library.config.version == 2),
-            "version-1 libraries require legacy migration (not yet shipped); use list for inventory or preview for inspection; native Query and Refresh are refused"
+            "libraries created before 7852835 are pre-release format: re-run init and re-import; use a new empty library; inventory and preview remain available"
         );
         let _foreground = FOREGROUND
             .lock()
@@ -252,6 +252,24 @@ impl NativeQueryHost {
     pub fn with_query<T>(
         &self,
         request: &wire::Request,
+        deliver: impl FnOnce(&mut NativeQueryReply<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.with_query_path(request, None, deliver)
+    }
+    /// Use the same Query owner while restricting metadata to the requested preview path.
+    pub(crate) fn with_read_query<T>(
+        &self,
+        request: &wire::Request,
+        path: &str,
+        deliver: impl FnOnce(&mut NativeQueryReply<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.with_query_path(request, Some(path), deliver)
+    }
+    /// Shared foreground execution; a local predicate changes neither admission nor authority.
+    fn with_query_path<T>(
+        &self,
+        request: &wire::Request,
+        metadata_path: Option<&str>,
         deliver: impl FnOnce(&mut NativeQueryReply<'_>) -> Result<T>,
     ) -> Result<T> {
         let _serial = FOREGROUND
@@ -397,7 +415,12 @@ impl NativeQueryHost {
             return Err(OwnedClaim(Some(Arc::new(claim))).into());
         }
         let claim = Arc::new(claim);
-        let mut controller = match query.start_controller(claim.clone()) {
+        let started = if let Some(path) = metadata_path {
+            query.start_read_controller(claim.clone(), path)
+        } else {
+            query.start_controller(claim.clone())
+        };
+        let mut controller = match started {
             Ok(controller) => controller,
             Err(error) => {
                 let delivered = deliver(&mut NativeQueryReply::error(
@@ -429,6 +452,7 @@ impl NativeQueryHost {
                         encoded,
                     },
                     libraries: &self.libraries,
+                    read_context: Some((self, &request.command)),
                     _transport: transport,
                 }),
                 Err(error) => {
@@ -621,6 +645,7 @@ pub struct NativeQueryReply<'a> {
     request_id: wire::Id,
     content: ReplyContent<'a>,
     libraries: &'a [KnowledgeBase],
+    read_context: Option<(&'a NativeQueryHost, &'a wire::Command)>,
     _transport: Work,
 }
 impl<'a> NativeQueryReply<'a> {
@@ -636,12 +661,138 @@ impl<'a> NativeQueryReply<'a> {
                     .or_else(|| NativeTupleQuery::failure_method(cause)),
             },
             libraries: &[],
+            read_context: None,
             _transport: transport,
         }
     }
     /// Whether native execution refused, independent of JSON-RPC framing success.
     pub fn is_error(&self) -> bool {
         matches!(self.content, ReplyContent::Error { .. })
+    }
+    /// Deliver a bounded preview and Query's canonical source record under the same live guards.
+    pub fn write_read_mcp(
+        &mut self,
+        output: &mut impl Write,
+        id: &serde_json::Value,
+        path: &str,
+    ) -> Result<()> {
+        let ReplyContent::Search { controller, .. } = &mut self.content else {
+            return self.write_mcp(output, id, true);
+        };
+        let result = controller
+            .search_result()
+            .context("preview metadata scope")?;
+        let source = result
+            .groups
+            .iter()
+            .flat_map(|group| &group.files)
+            .find(|hit| hit.source.path.as_str() == path)
+            .map(|hit| &hit.source);
+        let preview = (|| {
+            let source = source.context("source unavailable in the current native Query")?;
+            let (host, command) = self.read_context.context("actual native read host")?;
+            let service = host
+                .services
+                .iter()
+                .find(|service| service.library_id() == &source.library_id)
+                .context("source library is not selected by this Query host")?;
+            let permit = service
+                .native_scope(&host.session, command, None)
+                .map_err(refusal)
+                .context("preview native scope")?;
+            let native = service
+                .source(
+                    &permit,
+                    &source.path,
+                    Budget {
+                        max_files: 1,
+                        max_bytes: result.applied.budget.max_bytes.get(),
+                        max_millis: result.applied.budget.max_millis.get(),
+                        max_memory_bytes: 4 * MIB,
+                    },
+                )
+                .context("preview confined original")?;
+            if let Some(digest) = &source.digest {
+                anyhow::ensure!(
+                    digest.as_str() == native.version().as_str(),
+                    "preview source version differs from Query"
+                );
+            }
+            // Query pins the original witness, so even an equal-byte replacement refuses before parsing.
+            controller
+                .search_result()
+                .context("preview original witness")?;
+            let input = native
+                .file()
+                .context("preview source before extraction")?
+                .try_clone()?;
+            let extracted =
+                crate::extract::extract_file(&input, native.hint(), crate::MAX_TEXT_BYTES, None)
+                    .map_err(|error| crate::admitted::input_error(error, input))?;
+            Ok((extracted, native))
+        })();
+        let (mut extracted, native) = match preview {
+            Ok(value) => value,
+            Err(error) => {
+                if error.is::<crate::admitted::UnsettledProcessing>() {
+                    return Err(error);
+                }
+                let mut checked = Checked { output, controller };
+                serde_json::to_writer(
+                    &mut checked,
+                    &serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("{error:#}")}],"isError":true}}),
+                )?;
+                checked.flush()?;
+                checked.write_all(b"\n")?;
+                checked.output.flush()?;
+                return Ok(());
+            }
+        };
+        crate::mcp::limit_read(&mut extracted.value);
+        // Borrow the paid extraction and the controller's canonical record; do not clone either.
+        #[derive(Serialize)]
+        struct Preview<'a> {
+            path: &'a str,
+            text: &'a str,
+            status: &'a str,
+            warnings: &'a [String],
+            metadata: &'a wire::Source,
+        }
+        let delivered: Result<()> = (|| {
+            native.check().context("preview source after extraction")?;
+            let mut checked = Checked { output, controller };
+            checked.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":")?;
+            serde_json::to_writer(&mut checked, id)?;
+            checked.write_all(b",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")?;
+            serde_json::to_writer(
+                Escaped {
+                    output: &mut checked,
+                },
+                &Preview {
+                    path,
+                    text: &extracted.value.text,
+                    status: &extracted.value.status,
+                    warnings: &extracted.value.warnings,
+                    metadata: source.expect("source checked before extraction"),
+                },
+            )?;
+            checked.write_all(b"\"}],\"isError\":false}}")?;
+            checked.flush()?;
+            // LF commits this frame. Flush all source bytes first; after LF only public framing
+            // remains, so a client's next edit cannot retrospectively invalidate this response.
+            checked.write_all(b"\n")?;
+            checked.output.flush()?;
+            Ok(())
+        })();
+        drop(native);
+        drop(extracted.value);
+        let mut collected = Ok(());
+        for mut credit in extracted.retained {
+            if let Err(error) = credit.finish() {
+                collected = Err(error.into());
+            }
+        }
+        delivered.and(collected).context("preview delivery")
     }
     /// Write the canonical response, rechecking before each controlled chunk and final flush.
     pub fn write_wire(&mut self, output: &mut impl Write) -> Result<()> {

@@ -1151,6 +1151,7 @@ pub struct NativeMetadataRun {
     claim: Arc<Claim>,
     library: usize,
     method: Option<(wire::SearchMethod, usize)>,
+    path_filter: Option<wire::RelativePath>,
     data: Option<Box<MetadataData>>,
     // Rust drops fields in declaration order: paid result bytes die before this administrative loan.
     base: Option<Work>,
@@ -1209,6 +1210,7 @@ impl NativeTupleQuery {
             claim,
             library,
             method,
+            path_filter: None,
             data: Some(Box::new(MetadataData {
                 rows: BTreeMap::new(),
                 scopes: Vec::new(),
@@ -1390,6 +1392,7 @@ impl NativeMetadataRun {
     }
     /// Destroy annotations, then rejoin scopes, pages, and Work. A live scope returns this owner.
     pub fn finish(mut self) -> std::result::Result<(NativeTupleQuery, Arc<Claim>), Self> {
+        drop(self.path_filter.take());
         if let Some(data) = self.data.as_mut() {
             data.closing = true;
             let rows = std::mem::take(&mut data.rows);
@@ -1943,6 +1946,13 @@ impl NativeMetadataRun {
         })
     }
     fn metadata_matches(&self, annotations: &NativeQueryAnnotations) -> Result<bool> {
+        if self
+            .path_filter
+            .as_ref()
+            .is_some_and(|path| path != &annotations.path)
+        {
+            return Ok(false);
+        }
         let wire::Command::Query { query } = self.query.cause.libraries[self.library]
             .reader
             .permit
@@ -3040,6 +3050,7 @@ impl std::fmt::Display for FailedMethod {
 }
 impl std::error::Error for FailedMethod {}
 struct ControllerData {
+    metadata_path: Option<wire::RelativePath>,
     sources: Vec<NativeQuerySource>,
     permits: Vec<(usize, String, Permit)>,
     pages: Vec<NativeInventoryPage>,
@@ -3176,6 +3187,23 @@ impl NativeTupleQuery {
     }
     /// Run every requested method and fuse one labelled group per library.
     pub fn start_controller(&self, claim: Arc<Claim>) -> Result<NativeQueryController> {
+        self.start_controller_path(claim, None)
+    }
+    /// Restrict MCP preview metadata before top-K retention so unrelated matches cannot evict it.
+    /// This predicate only narrows admitted observations; it supplies no read authority or budget.
+    pub(crate) fn start_read_controller(
+        &self,
+        claim: Arc<Claim>,
+        path: &str,
+    ) -> Result<NativeQueryController> {
+        self.start_controller_path(claim, Some(wire::RelativePath::new(path)?))
+    }
+    /// Execute the same controller with an optional local metadata-result predicate.
+    fn start_controller_path(
+        &self,
+        claim: Arc<Claim>,
+        metadata_path: Option<wire::RelativePath>,
+    ) -> Result<NativeQueryController> {
         self.cause.check_claim(&claim)?;
         anyhow::ensure!(
             !self.cause.libraries.is_empty(),
@@ -3196,6 +3224,7 @@ impl NativeTupleQuery {
             claim,
             result: None,
             data: Some(Box::new(ControllerData {
+                metadata_path,
                 sources: Vec::new(),
                 permits: Vec::new(),
                 pages: Vec::new(),
@@ -3689,6 +3718,12 @@ impl NativeQueryController {
         let mut run = self
             .query
             .start_metadata_for(self.claim.clone(), library, method)?;
+        run.path_filter = self
+            .data
+            .as_ref()
+            .expect("actual owner")
+            .metadata_path
+            .clone();
         loop {
             let step = run.step_library(library_id);
             if step.is_failed() {

@@ -355,7 +355,7 @@ There is no general branch-management command or model-supplied author, root ove
 | `snapshot_plan`, `snapshot_create` | `package_plan`, `job` | Owner-only selection/destination approval; sensitive export and large copy require explicit effect selection. |
 | `package_inspect`, `open_frozen` | `package`, `library` | Owner-only explicit archive selection; no declared-root contact; frozen is read-only. |
 | `restore_plan`, `restore_apply` | `package_plan`, `job` | Owner-only; verify first, default new home, explicit mount remap, preserve conflicts. |
-| `migration_plan`, `migration_apply` | `migration_plan`, `job` | Owner-only preview and verified no-clobber migration; retain old authored data until verification. |
+| `migration_plan`, `migration_apply` | `migration_plan`, `job` | Reserved compatibility DTOs; pre-release version-1 migration is dropped by the 2026-11-09 engineer decision. No implementation is required; use new-library init and re-import. |
 | `v1_import_plan`, `v1_export_plan` | `package_plan`, `package_plan` or `package` | Owner/host adapter only; core mapping or explicit compatibility refusal, no fabricated scope/revision. |
 | `exposure_get`, `exposure_set` | `exposure`, `exposure` | Owner-only administration with expected revision; never in MCP catalog. |
 

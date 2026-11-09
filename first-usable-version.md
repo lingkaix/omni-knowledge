@@ -41,7 +41,8 @@ Original N02/N05 failing receipts remain preserved; the import-tag failure under
 
 ## Open Items
 
-- Libraries created before `5e65e3a` need the legacy migration, not yet shipped; version-1 inventory/preview reads remain available.
+- Libraries created before 7852835 are pre-release format: re-run init in a new empty library and re-import originals; version-1 inventory/preview reads remain available.
+Legacy migration has been dropped.
 - The retained metadata editor and generic source-details adapter are not ported to canonical version-2 annotations; visible source pointers own those annotations.
 - WeMM is optional/off by default, with no qualified real weights or native CLI enablement binding; N03 owns that selection and quality acceptance.
 Provider settings and weights stay outside the portable manifest.

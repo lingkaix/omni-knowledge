@@ -132,7 +132,7 @@ fn source(kb: &KnowledgeBase, path: &str) -> Result<NativeSource> {
 pub(crate) fn imported(kb: &KnowledgeBase, metadata: &AssetMetadata) -> Result<()> {
     anyhow::ensure!(
         kb.config.version == 2,
-        "legacy migration is not yet shipped; version-1 libraries support inventory and preview only"
+        "libraries created before 7852835 are pre-release format: re-run init and re-import; use a new empty library; inventory and preview remain available"
     );
     if metadata.tags.is_empty() && metadata.description.is_empty() {
         return Ok(());

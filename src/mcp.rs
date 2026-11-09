@@ -36,6 +36,57 @@ pub fn serve(default_root: &Path) -> Result<()> {
         let Some(id) = request.get("id") else {
             continue;
         };
+        if request["method"] == "tools/call" && request["params"]["name"] == "read" {
+            let attempted: Result<Option<_>> = (|| {
+                let arguments = &request["params"]["arguments"];
+                validate_arguments(arguments)?;
+                let kb = KnowledgeBase::open(&selected_root(arguments, default_root)?)?;
+                if kb.config.version == 1 {
+                    return Ok(None);
+                }
+                let path =
+                    kb.resolve(arguments["path"].as_str().context("source path missing")?)?;
+                let relative = path
+                    .strip_prefix(&kb.root)?
+                    .to_str()
+                    .context("source path is not UTF-8")?
+                    .to_owned();
+                if native.is_none() {
+                    native = Some(NativeQueryHost::open(vec![kb.clone()], true)?);
+                }
+                let command = legacy_request(
+                    native.as_ref().expect("actual native query host"),
+                    &relative,
+                    "files",
+                    &[],
+                    30,
+                    true,
+                    false,
+                )?;
+                Ok(Some((relative, command)))
+            })();
+            match attempted {
+                Ok(Some((path, command))) => {
+                    native
+                        .as_ref()
+                        .expect("actual native query host")
+                        .with_read_query(&command, &path, |reply| {
+                            reply.write_read_mcp(&mut output, id, &path)
+                        })?;
+                    continue;
+                }
+                Ok(None) => {} // Retain version-1 inventory/preview access without native startup.
+                Err(error) => {
+                    writeln!(
+                        output,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("{error:#}")}],"isError":true}})
+                    )?;
+                    output.flush()?;
+                    continue;
+                }
+            }
+        }
         if request["method"] == "tools/call" && request["params"]["name"] == "search" {
             let attempted: Result<omni_service::Request> = (|| {
                 let arguments = &request["params"]["arguments"];
@@ -207,7 +258,7 @@ fn call(name: &str, arguments: &Value, default_root: &Path) -> Result<Value> {
     let kb = KnowledgeBase::open(&root)?;
     anyhow::ensure!(
         kb.config.version == 2 || matches!(name, "list" | "read" | "status"),
-        "version-1 libraries require legacy migration (not yet shipped); only inventory and preview reads are supported"
+        "libraries created before 7852835 are pre-release format: re-run init and re-import; use a new empty library; inventory and preview remain available"
     );
     let tags: Vec<String> = arguments["tags"]
         .as_array()
@@ -240,21 +291,8 @@ fn call(name: &str, arguments: &Value, default_root: &Path) -> Result<Value> {
         "read" => {
             let path = arguments["path"].as_str().context("source path missing")?;
             let mut extracted = extract::extract(&kb.resolve(path)?, crate::MAX_TEXT_BYTES)?;
-            if extracted.text.len() > 128 * 1024 {
-                let mut end = 128 * 1024;
-                while !extracted.text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                extracted.text.truncate(end);
-                extracted.status = "partial".into();
-                extracted.warnings.push("Read output limited to 128 KiB; use the original file or CLI conversion for the rest".into());
-            }
-            // Version 2 has no retained metadata projection; preview must still return source text.
-            let metadata = if kb.config.version == 1 {
-                serde_json::to_value(kb.metadata(path)?)?
-            } else {
-                Value::Null
-            };
+            limit_read(&mut extracted);
+            let metadata = kb.metadata(path)?;
             Ok(
                 json!({"path":path,"text":extracted.text,"status":extracted.status,"warnings":extracted.warnings,"metadata":metadata}),
             )
@@ -279,6 +317,22 @@ fn call(name: &str, arguments: &Value, default_root: &Path) -> Result<Value> {
             json!({"path":kb.import(Path::new(arguments["source"].as_str().context("import source missing")?),&tags)?,"hint":"run index after imports to publish new search coverage"}),
         ),
         _ => bail!("unknown tool {name}"),
+    }
+}
+
+/// Keep both retained and native MCP previews within the same UTF-8 output bound.
+pub(crate) fn limit_read(extracted: &mut extract::Extraction) {
+    if extracted.text.len() > 128 * 1024 {
+        let mut end = 128 * 1024;
+        while !extracted.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        extracted.text.truncate(end);
+        extracted.status = "partial".into();
+        extracted.warnings.push(
+            "Read output limited to 128 KiB; use the original file or CLI conversion for the rest"
+                .into(),
+        );
     }
 }
 

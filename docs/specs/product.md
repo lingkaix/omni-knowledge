@@ -131,7 +131,8 @@ Do not execute scripts from imported content.
 ## Full-Version Owners And Compatibility
 
 The previous required version-1 marker, hidden annotation sidecars, in-home cache, manual-only change detection, and snapshot-only freshness claims are replaced explicitly.
-Legacy data must remain readable for a migration preview; migration must retain orphan annotations and reject collisions without destroying old authored files.
+Engineer decision, 2026-11-09: version 1 is a pre-release development format with no installed base, so legacy migration is dropped.
+Libraries created before `7852835` remain readable for inventory/preview; initialize a new empty library and re-import originals without changing the old library.
 Old clients must reject the incompatible new manifest version instead of interpreting it as version 1.
 These accepted requirements do not claim that the legacy implementation already supplies them.
 

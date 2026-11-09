@@ -125,18 +125,20 @@ Record it as unrun if not chosen; ordinary tests do not qualify real speech reco
 - Native foreground refresh is bounded to 1,000 sources and 64 MiB of original input per invocation, with a 512 MiB memory ceiling.
 Text extraction uses an independent 8 MiB input/decoded limit; inspect coverage for failed, unavailable, or metadata-only sources.
 - There is no persistent CLI watch daemon; the native FSEvents API still needs Mac acceptance.
-- Libraries created before `5e65e3a` need the legacy migration, not yet shipped.
-Version-1 libraries remain readable for inventory/preview; native Query and mutations refuse without changing their data.
+- libraries created before 7852835 are pre-release format: re-run init and re-import.
+Initialize a new empty library and re-import the originals; the old library remains untouched and readable for inventory/preview.
+Version-1 native Query and mutations refuse; no migration is planned.
 - New libraries use version 2 with `pages/` and canonical `sources/` pointers.
 The retained `metadata` editor and generic source-details adapter are not ported; edit visible pointer annotations directly.
-Legacy MCP `read` returns bounded text with `metadata: null` on version 2.
+Legacy MCP `read` returns bounded text and the same canonical source annotations as Query, including tags and the source-pointer path.
+Optional source facts remain null where Query has no admitted observation.
 - N03 remains the engineer's optional model selection/real-weight/quality item; N04 remains native Mac, client, and optional ASR acceptance.
 Neither blocks this qualified Linux first usable version.
 - GUI milestone M7, Linux ARM64, physical resource qualification, and complete implementation of every catalogued command are outside this qualification.
 - Dependency notice gaps remain recorded in the archive; public distribution, notarization, and compliance certification are not claimed.
 
 Back up originals, `omni-knowledge.json`, `pages/`, `sources/`, and other authored files, including the journal; generated indexes can be rebuilt.
-Read [storage and recovery](docs/specs/storage.md) before migration, [the desktop guide](docs/gui.md) for the retained GUI, and [the documentation map](docs/README.md) for contracts.
+Read [storage and recovery](docs/specs/storage.md) for the format, [the desktop guide](docs/gui.md) for the retained GUI, and [the documentation map](docs/README.md) for contracts.
 Contributors start with [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 Original code uses [Apache-2.0](LICENSE); third-party components and [foundational source articles](assets/foundations/README.md) retain their licenses and provenance.
 See the [FFmpeg packaging boundary](docs/dependencies.md#ffmpeg-packaging-boundary) before distribution.

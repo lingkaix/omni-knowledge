@@ -275,7 +275,7 @@ fn run(arguments: &Arguments) -> Result<()> {
                     | Operation::Preview { .. }
                     | Operation::Search { .. }
             ),
-        "version-1 libraries require legacy migration (not yet shipped); use list for inventory or preview for inspection"
+        "libraries created before 7852835 are pre-release format: re-run init and re-import; use a new empty library; inventory and preview remain available"
     );
     match &arguments.command {
         Operation::Add { files, tags } => {

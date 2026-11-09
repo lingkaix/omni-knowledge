@@ -5,6 +5,11 @@ The library provides knowledge-base lifecycle and shared search for the CLI and 
 `storage.rs` owns buffered manifest loading, validated resident search snapshots, and per-query publication leases.
 `lib.rs::admitted` routes real lexical/grep publication and search through `knowledge-retrieval` and the one Core account. Bounded deterministic legacy-snapshot shards use file-deduplicated rank fusion, not raw cross-shard BM25 scores. The retained `search.rs` module supplies metadata/vector compatibility only; its lexical and trigram builders are no longer called.
 Extraction, EPUB packaging, embedding requests, and media segmentation each have a separate module.
+`mcp.rs` routes version-2 legacy MCP reads through `mcp_native.rs` and the same native Query annotation owner used by search.
+A private exact-path predicate selects preview metadata before top-K retention without adding a wire option or read authority.
+The preview borrows Query's typed Source and an admitted extraction from the confined native descriptor through checked output; unknown parser errors retain the exact input in the existing foreground collection owner.
+Version-1 reads remain inspection-only; new libraries use version 2 and old pre-release libraries require fresh init and re-import.
+
 `runtime.rs` owns tool discovery and allowlisted Homebrew installation; document preview cannot invoke these operations.
 `status.rs` owns nonmutating folder, freshness, and local-service checks.
 `file_actions.rs` owns contained desktop transfers, native file clipboard actions, Finder navigation, and recoverable Trash operations.

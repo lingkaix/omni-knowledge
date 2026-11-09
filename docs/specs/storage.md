@@ -58,7 +58,7 @@ Digest-required operations hash first or return missing coverage; neither size n
 Backend-qualified file ID evidence may be null and is never content version identity.
 Raw frontmatter and authored extension fields survive annotation updates; rewrite only the requested recognized fields.
 Preserve exact tag spelling; retrieval can compare whole tags case-insensitively without changing the authored values.
-Legacy frontmatter and sidecar tags preserve their effective union and all descriptions during migration.
+Pre-release hidden sidecars are not an annotation authority for version 2.
 Cheap discovery does not require a pointer file for every unannotated NAS object.
 Durable annotations create/update a pointer; journal/inventory mappings support unannotated discovery without a second authored annotation registry.
 Deleted/unavailable assets retain their pointers and annotations as tombstones, not garbage-collectable cache.
@@ -208,20 +208,13 @@ Confirmed macOS Trash is not permanent deletion.
 It rejects manifests, internal state, symlinks, and child-owned sources, preserves annotations, and reports pending reconciliation.
 Library detach removes only the declaration, never the attached originals.
 
-## Legacy Migration And Acceptance
+## Pre-release Format And Acceptance
 
-Version 1 remains readable for inventory/preview, not as a reason to dual-write hidden sidecars indefinitely.
-Inventory every `.omni/metadata/` record, including deleted/renamed-source annotations and malformed/conflicting records.
-Map asset metadata into visible pointers and page annotations; preserve orphan records as unavailable pointers.
-Map existing authored roots explicitly; new libraries use pages, but existing wiki need not be duplicated or silently renamed.
-Legacy root navigation/log and wiki reference concepts retain their content through a full user-visible destination map.
-Check every destination and parsed reference mapping before installation; collisions/ambiguous roots require choices.
-Rewrite only parsed link destinations and recognized reference fields; preserve prose, code, line endings, raw frontmatter, and original bytes.
-The GUI/CLI exposes migration preview, conflicts, progress, and recovery results.
-Install the incompatible version-2 manifest only after no-clobber validation; old clients must reject it.
-Keep old authored files/sidecars until verification succeeds; separate them from disposable `.omni/` indexes instead of deleting that directory wholesale.
-Move legacy provider/tool settings into explicit local settings without treating them as portable permission or losing user choices.
-Do not silently run imported hooks, activate mounts, or fetch remote/provider content during migration.
+Engineer decision, 2026-11-09: version 1 was a pre-release development format with no installed base; legacy migration is dropped.
+Libraries created before `7852835` require a new empty library initialized as version 2 and re-import of their originals.
+Keep the old library untouched; version-1 inventory/preview remains readable and native Query or mutation refuses with this re-import guidance.
+Do not silently rewrite its marker, move annotations, delete sidecars, or install a migration writer.
+New imports write canonical source pointers through the existing owner.
 
 Primary acceptance uses public operations with real disposable files and observable outcomes.
 Prove offline is not deletion, rename differs from duplicate content, placeholders remain unopened, and external writer races retain both versions.

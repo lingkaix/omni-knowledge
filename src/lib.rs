@@ -1233,6 +1233,25 @@ mod admitted {
             error
         }
     }
+    /// Preserve an exact descriptor used by an unsettled read-only parser until native collection.
+    pub(super) fn input_error(error: anyhow::Error, input: File) -> anyhow::Error {
+        if unsettled(&error) {
+            UnsettledProcessing {
+                pending: Box::new(PendingProcessing {
+                    cause: error,
+                    _stage: None,
+                    _scratch: None,
+                    _input: Some(input),
+                    _memory: allocation(),
+                    collected: false,
+                    retained: Vec::new(),
+                }),
+            }
+            .into()
+        } else {
+            error
+        }
+    }
     /// Admission and owned-worker failures stop publication; they are not extraction coverage gaps.
     pub(super) fn resource_failure(error: &anyhow::Error) -> bool {
         error.chain().any(|cause| {
@@ -2181,7 +2200,7 @@ impl KnowledgeBase {
     pub fn import(&self, source: &Path, tags: &[String]) -> Result<String> {
         anyhow::ensure!(
             self.config.version == 2,
-            "legacy migration is not yet shipped; use inventory or preview for version-1 libraries"
+            "libraries created before 7852835 are pre-release format: re-run init and re-import; use a new empty library; inventory and preview remain available"
         );
         if !source.is_file() {
             bail!("import source must be a regular file");
@@ -3730,7 +3749,7 @@ pub mod native_service {
                         result_extent: wire::ResultExtent::Enumeration,
                         stopped_reason: None,
                     };
-                    Ok(wire::Result::Status { status: Box::new(wire::Status { resource_budgets: Some(budgets.clone()), library: self.library(permit)?, coverage, jobs: vec![], generation_id, cache_path: String::new(), history_path: None, cache_used_bytes: wire::U64::new(cache_used), cache_budget_bytes: budgets.storage_budget_bytes, provider: if self.kb.config.embedding.is_some() { wire::ProviderState::Unavailable } else { wire::ProviderState::NotConfigured }, signer: wire::SignerState::Missing, recovery_operation_ids: vec![], warnings: vec!["retained library requires full-version migration; provider readiness is not established; owner domain adapters remain explicit".into()] }) })
+                    Ok(wire::Result::Status { status: Box::new(wire::Status { resource_budgets: Some(budgets.clone()), library: self.library(permit)?, coverage, jobs: vec![], generation_id, cache_path: String::new(), history_path: None, cache_used_bytes: wire::U64::new(cache_used), cache_budget_bytes: budgets.storage_budget_bytes, provider: if self.kb.config.embedding.is_some() { wire::ProviderState::Unavailable } else { wire::ProviderState::NotConfigured }, signer: wire::SignerState::Missing, recovery_operation_ids: vec![], warnings: vec!["retained version-2 library adapter is not ported; provider readiness is not established; owner domain adapters remain explicit".into()] }) })
                 }
                 Command::ExposureGet { library_id } => Ok(wire::Result::Exposure {
                     exposure: Box::new(permit.exposure(library_id)?),

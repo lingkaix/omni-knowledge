@@ -287,7 +287,13 @@ fn cli_v1_query_refuses_before_refresh_without_library_writes() {
         String::from_utf8_lossy(&output.stdout)
     );
     let diagnostic = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    for required in ["migration", "inventory", "preview"] {
+    for required in [
+        "pre-release",
+        "re-run init",
+        "re-import",
+        "inventory",
+        "preview",
+    ] {
         assert!(
             diagnostic.contains(required),
             "missing {required} guidance: {diagnostic}"
