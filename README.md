@@ -1,164 +1,140 @@
 # Omni Knowledge
 
-Omni Knowledge is a local folder knowledge library with an Apple silicon GPUI desktop and a headless Rust CLI.
-Original files stay in ordinary folders; generated search indexes can be rebuilt.
+Omni Knowledge keeps original files in ordinary folders and returns source-linked search results through a headless CLI and MCP.
+The first usable version is qualified on Linux x86_64 from code commit `dfa0902`.
+It covers lexical/BM25 search, Japanese BM25, DOCX extraction, and canonical and legacy MCP.
+See the [qualification summary](first-usable-version.md) for the exact artifact and evidence.
 
-## Full-Version Development
+## Start On Linux
 
-The accepted [product contract](docs/specs/product.md) defines one full delivery with shared portable crates, reference mounts, safe text history, searchable ZIP packages, and a common multi-library service.
-The [service wire contract](docs/specs/service.md) defines the public DTO boundary for GUI, CLI, and MCP.
-The [workspace transition](docs/changes/2026-11-04-workspace.md) records migration and preservation obligations.
-The [headless-first amendment](docs/changes/2026-11-04-headless-delivery.md) prioritizes the complete headless service, MCP, and CLI mechanisms for the current delivery.
-The engineer's 2026-11-04 correction gives GUI milestone M7 lower priority, not a stop; the existing GPUI application keeps building and adapts only where a service DTO change requires compatibility.
-No new GPUI investment happens beyond that duty until GUI technology is confirmed; a shared Web knowledge component is only a possible direction under discussion, not a selected dependency.
-These accepted contracts are not claims that every feature is already implemented or qualified.
-The compatibility commands and storage description below describe the retained first-version implementation while the migration is in progress.
-Linux headless builds and macOS GUI builds have separate gates; native platform effects require their actual platform observations.
-The current delivery gate is headless. GUI milestone M7 is deferred and does not block the headless Linux or macOS archive.
-[First usable version](first-usable-version.md) stays in progress until final Linux and macOS CI, milestone authority, durability, ZIP admission, and the actual entry points pass.
-Trunk `faab733` already contains the integrated core, cache, wire, local, jobs, public-test, B1/B2, and kernel self-VM work. That presence is not milestone acceptance.
-`python3 -B scripts/bundle-headless.py` stages `omni`, the project license, and the existing notice snapshot. It installs `parser-worker` only when Cargo metadata and the parent lookup both name that basename. It installs `omni-fsevents` beside `omni` only in an apple-darwin archive. It does not add any other worker Cargo did not select.
-
-## Try The Retained First Version
-
-Build and open the local application:
+Use `omni-knowledge-linux-x86_64-n02-dfa0902.tar.gz` supplied with this version.
+Its SHA-256 is `1e9c56156cc316ee35497f6c62369cf3c900ea195bdf8cef246abb1d462175f8`.
+Keep the complete extracted directory, including `parser-worker`, licenses, and notices.
 
 ```sh
-sh scripts/bundle-macos.sh
-open "dist/Omni Knowledge.app"
+set -e
+OMNI_ARCHIVE=/absolute/path/to/omni-knowledge-linux-x86_64-n02-dfa0902.tar.gz
+printf '%s  %s\n' '1e9c56156cc316ee35497f6c62369cf3c900ea195bdf8cef246abb1d462175f8' "$OMNI_ARCHIVE" | sha256sum --check
+mkdir -p "$HOME/.local/opt"
+OMNI_INSTALL="$HOME/.local/opt/omni-knowledge-dfa0902"
+mkdir "$OMNI_INSTALL"
+tar -xzf "$OMNI_ARCHIVE" -C "$OMNI_INSTALL" --strip-components=1
+OMNI_BIN="$OMNI_INSTALL/omni"
+"$OMNI_BIN" --help
 ```
 
-Open **Library**, then select **Choose** for an existing knowledge folder or enter a path and select **Initialize**.
-Use **Refresh index** after an agent edits files.
-Select a result to preview it; **Open original** opens the source in its installed application.
-See [the desktop guide](docs/gui.md) for controls and preview limits.
-The main workspace keeps one search row at the top, a collapsible directory tree for browsing, and ranked file results during search.
-Enable the compact search-method chips and enter comma-separated keywords in one field, including exact tags.
-Search ignores case by default, matches any keyword through any enabled method, and clears inside the search field.
-**File details** shows readable file properties, copyable paths, and labelled tags and notes saved with the library.
-The build script applies and verifies a local ad-hoc signature; it does not create a notarized distribution package.
-The app includes the core search and document parsers, but video processing, embeddings, and ASR still require external tools or models.
-Open **说明与环境** for the built-in usage guide, dependency checks, and Homebrew installation buttons.
-See [runtime portability](docs/dependencies.md#runtime-portability) before moving it to another Mac.
-
-The prepared test library is at `temp/demo-knowledge/` in this checkout.
-It includes Chinese Markdown, HTML, PDF, DOCX, EPUB, binary, image, video, and spoken-audio fixtures.
-The temporary demo is not a replacement for your own sources.
-
-## CLI
+The block stops on a checksum mismatch or an existing installation directory.
+Initialize a new library and add a small source:
 
 ```sh
-cargo build --release --bin omni
-./target/release/omni init /absolute/path/to/knowledge --name "Personal Knowledge"
-./target/release/omni --root /absolute/path/to/knowledge add /absolute/path/to/file.pdf --tag research
-./target/release/omni --root /absolute/path/to/knowledge search "knowledge retrieval"
-./target/release/omni --root /absolute/path/to/knowledge search "知识检索" --mode grep --json
-./target/release/omni --root /absolute/path/to/knowledge metadata raw/file.pdf --tag research --description "Experiment report"
-./target/release/omni --root /absolute/path/to/knowledge index
-./target/release/omni --root /absolute/path/to/knowledge export-epub /absolute/path/to/book.epub --include-media
+OMNI_LIBRARY=/absolute/path/to/new-library
+"$OMNI_BIN" init "$OMNI_LIBRARY" --name "My Knowledge"
+printf '%s\n' '---' 'tags: [research]' '---' '# Hello' 'Hello knowledge library.' > "$OMNI_LIBRARY/raw/hello.md"
+"$OMNI_BIN" --root "$OMNI_LIBRARY" search knowledge --mode bm25 --tag research --canonical --json
+"$OMNI_BIN" --root "$OMNI_LIBRARY" search Hello --mode literal --tag research --canonical --json
+"$OMNI_BIN" --root "$OMNI_LIBRARY" add /absolute/path/to/document.docx
+"$OMNI_BIN" --root "$OMNI_LIBRARY" search "document phrase" --mode literal --canonical --json
 ```
 
-Use `--json` for structured agent output; errors return a nonzero exit code.
-CLI tag filters match complete values without case sensitivity by default, and repeated filters require every tag.
-`search --mode files` includes unsupported binary formats through names and descriptions.
-`search --recursive` combines independently indexed nested libraries and returns their root identities.
-Run `omni --help` and a subcommand's `--help` for the complete interface.
+Foreground search refreshes the native corpus from current files.
+Canonical JSON includes library identity, coverage, and source evidence; omit `--canonical` for the retained result-array format.
+Repeated `--tag` filters require every complete tag, ignoring case unless `--case-sensitive` is set.
+The examples use Markdown front-matter tags; legacy import tags have the open bridge limitation listed below.
+Use `--mode regex` (or `grep`) for regular expressions and `--mode files` for metadata discovery.
+The installed parser succeeded on a small DEFLATE DOCX, refused a new source while its sibling was absent, and succeeded after restoration.
+Do not remove the parser for normal use.
 
-## Search And Formats
+## Connect An MCP Client
 
-| Capability | First-version behavior |
-| --- | --- |
-| Tags | Exact filters from YAML front matter and editable JSON metadata |
-| Grep | Parallel regex verification over extracted index snapshots; eligible literals use trigram candidates |
-| BM25 | Tantivy with English words and Chinese character/bigram tokens |
-| Multimodal | Local WeMM text/image queries, image vectors, and timed ffmpeg video clips |
-| Audio | Imported timed transcripts or configured local whisper.cpp speech recognition |
-| Markdown / HTML | Safe preview, front matter, offline Mermaid, and code highlighting |
-| PDF | Native text extraction, WebKit preview attempt, native application fallback |
-| Office | Native DOCX/PPTX/XLSX and ODF extraction; DOC/RTF through macOS textutil; native application fallback |
-| EPUB | Ordered chapter preview, Markdown/HTML EPUB3 export, optional contained media |
-| Other files | General filename, size, MIME type, SHA-256, tags, and description indexing |
-
-Text extraction is bounded to 8 MiB of input and derived text per source in this version.
-Larger or unsupported sources remain metadata searchable and retain the original file.
-OCR is deferred; image-only PDFs need a separate OCR pass before text search can find their content.
-Office preview shows extracted content rather than editable spreadsheet or presentation layouts.
-EPUB preview does not reproduce fixed-layout publisher styling or interactive content.
-Search uses the last successful snapshot; it does not automatically watch filesystem changes yet.
-The desktop periodically checks source metadata and prompts for index refresh; it does not rebuild automatically.
-All regular file types are admitted; source symlinks and `.git`/`.omni` internals are excluded.
-Non-UTF-8 file names produce an explicit indexing error in this first version.
-
-## Local Models
-
-Use **说明与环境** to install FFmpeg or whisper.cpp through Homebrew.
-The app checks standard Homebrew paths even when launched from Finder.
-Speech models and the WeMM provider remain separate setup steps; installation does not change a knowledge root's configuration.
-
-The default configuration targets the existing local WeMM provider on `http://127.0.0.1:18789`.
-The provider is a separate process and must be running for vector indexing or queries.
-Lexical search works while it is stopped.
+Launch the canonical stdio server:
 
 ```sh
-cd /absolute/path/to/embedding-wemm
-./scripts/serve.sh gpu
+"$OMNI_BIN" --root "$OMNI_LIBRARY" serve --stdio
 ```
 
-Then run from this repository:
+Give each client the absolute executable path and arguments `["--root", "/absolute/path/to/library", "serve", "--stdio"]`.
+This server uses MCP 2025-11-25 and defaults to read-only access.
+For existing integrations, `serve-mcp` retains the seven-tool MCP 2024-11-05 interface.
+See [agent operations](docs/agents.md) for that compatibility interface.
+MCP search returns evidence; it does not generate an answer or validate a source's claims.
+
+## Optional WeMM Setup
+
+Model processing is off by default.
+Normal native search does not load weights or contact an embedding provider, even if initialization saved a provider configuration.
+Real WeMM weights and quality are not qualified in this version.
+
+When the engineer supplies an approved package and provider:
+
+1. Verify the package and manifest against the approved identity, then start the provider with that package's launch instructions.
+2. Set `embedding` in the library's `omni-knowledge.json` to its exact `endpoint`, `model`, `dimension`, `package_fingerprint`, and `embedding_space`; set `timeout_seconds` from 1 to 600.
+Use only a loopback HTTP endpoint; do not copy identity values from a different package.
+3. Check the configured provider and explicitly build the compatibility vector index:
 
 ```sh
-./target/release/omni --root /absolute/path/to/knowledge doctor --embeddings
-./target/release/omni --root /absolute/path/to/knowledge index --embeddings
-./target/release/omni --root /absolute/path/to/knowledge search "a performance comparison table" --mode semantic
-./target/release/omni --root /absolute/path/to/knowledge search --mode semantic --image /absolute/path/to/query.jpg
+"$OMNI_BIN" --root "$OMNI_LIBRARY" doctor --embeddings --json
+"$OMNI_BIN" --root "$OMNI_LIBRARY" index --embeddings
 ```
 
-Read [the multimodal guide](docs/multimodal.md) for provider identity, ASR setup, and model limits.
-The first version accepts only loopback embedding endpoints and never uploads library content to a remote model.
+4. Complete engineer item N03 before expecting semantic queries through the native CLI/MCP.
+This artifact has no model-selection flag: those queries return `provider_unavailable`, including after the commands above.
+N03 must bind the approved package and manifest through `NativeLibraryService::select_embedding`, then check actual loaded weights and the approved quality cases.
+The [multimodal guide](docs/multimodal.md) describes provider identities, requests, and ASR; its historical package measurements do not qualify a new package.
 
-## Agent Interface
+## Build And Install On An Apple Silicon Mac
 
-Start the stdio MCP server with:
+These steps are for the engineer's acceptance; this version makes no Mac qualification claim.
+Use a clean checkout of this version on native `arm64` macOS.
+Install Apple command-line tools, Rust 1.99.0 with Cargo, Python 3.11 or newer, and system `ffmpeg`/`ffprobe`.
+Run from the repository root, using new stage and installation directories:
 
 ```sh
-./target/release/omni --root /absolute/path/to/knowledge serve-mcp
+set -e
+test "$(uname -s)" = Darwin
+test "$(uname -m)" = arm64
+export CARGO_TARGET_DIR="$PWD/temp/mac-target"
+export CARGO_BUILD_JOBS=2
+export LINDERA_BUILD_DICTIONARY_CACHE_DIR="$PWD/temp/mac-dictionary"
+python3 tools/kernel-probe/prepare-dictionary.py --cache "$LINDERA_BUILD_DICTIONARY_CACHE_DIR"
+cargo build --workspace --release --bins --no-default-features --locked
+python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage "$PWD/dist/macos-arm64"
+python3 -B scripts/bundle-headless.py --target aarch64-apple-darwin --stage "$PWD/dist/macos-arm64" --verify
+mkdir -p "$HOME/.local/opt"
+OMNI_MAC_INSTALL="$HOME/.local/opt/omni-knowledge-dfa0902"
+mkdir "$OMNI_MAC_INSTALL"
+cp -R "$PWD/dist/macos-arm64/." "$OMNI_MAC_INSTALL/"
+OMNI_BIN="$OMNI_MAC_INSTALL/omni"
+"$OMNI_BIN" --help
 ```
 
-It exposes `search`, `read`, `list`, `status`, `index`, `import`, and `metadata` tools.
-Use [the agent guide](docs/agents.md) for a client configuration and workflow.
-An external AI agent maintains synthesis; the software does not claim to autonomously reason about sources.
+The initial checks stop on another OS or an x86_64/Rosetta shell.
+The stage must contain distinct sibling executables `omni`, `parser-worker`, and `omni-fsevents`.
+Cargo can fetch locked registry dependencies; the verified dictionary cache is only a build prerequisite.
+See [toolchain setup](docs/toolchain.md) and [packaging](scripts/README.md#headless-product-archive) for details.
 
-## Library Structure
+Mac acceptance checklist:
 
-Initialization creates `omni-knowledge.json`, `raw/`, `wiki/`, navigation, history, and an agent guide.
-The two requested foundational articles are preserved as original offline text snapshots in `raw/` and linked from OKF reference concepts.
-[Template provenance](assets/foundations/README.md) records source URLs and hashes.
-Each root owns files until a child root begins; an import cannot write into a child-owned `raw/` folder.
-An asset named `omni-knowledge.json` is imported as `omni-knowledge.asset.json` to preserve root detection.
+- Repeat the new-library, BM25, literal, and DOCX checks above with the installed Mac executable.
+- Run `cargo test -p knowledge-local --test fsevents_native --no-default-features --locked -- --test-threads=1` for real FSEvents callbacks, root drift, deadlines, and helper collection.
+Require the actual native test to pass; a zero-test Linux run is not Mac evidence.
+- Connect both Claude and Codex clients to that installed executable with `serve --stdio`; check discovery, search evidence, errors, and the default read-only boundary.
+- If choosing automatic speech recognition (ASR), follow the [pinned setup and real-model opt-in](docs/multimodal.md#asr-setup-and-evidence), including `actual_local_asr_recognizes_known_speech`.
+Record it as unrun if not chosen; ordinary tests do not qualify real speech recognition.
 
-Editable metadata lives in `.omni/metadata/` and must be included in a backup alongside original files and the root configuration.
-Indexes live in `.omni/indexes/`; publication retains the current and previous completed generations.
-Unknown retained files in an old generation are preserved and reported instead of being deleted.
-See [the storage specification](docs/specs/storage.md) for ownership and recovery.
+## Known Limits And Open Items
 
-## Develop
+- Native foreground refresh is bounded to 1,000 sources and 64 MiB of original input per invocation, with a 512 MiB memory ceiling.
+Text extraction uses an independent 8 MiB input/decoded limit; inspect coverage for failed, unavailable, or metadata-only sources.
+- There is no persistent CLI watch daemon; the native FSEvents API still needs Mac acceptance.
+- Legacy `add --tag` metadata was not reflected in native Query filtering in the example probe.
+Use Markdown front-matter tags for the demonstrated filter workflow; the import-tag bridge remains open.
+- N03 remains the engineer's optional model selection/real-weight/quality item; N04 remains native Mac, client, and optional ASR acceptance.
+Neither blocks this qualified Linux first usable version.
+- GUI milestone M7, Linux ARM64, physical resource qualification, and complete implementation of every catalogued command are outside this qualification.
+- Dependency notice gaps remain recorded in the archive; public distribution, notarization, and compliance certification are not claimed.
 
-Read [AGENTS.md](AGENTS.md), [the documentation map](docs/README.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
-`mise.toml` selects Rust 1.99.0; an existing compatible Rust toolchain also works.
-GPUI uses runtime Metal shaders, so no separate Metal compiler download is required.
-
-```sh
-cargo test --features gui
-cargo clippy --all-targets --features gui -- -D warnings
-cargo fmt --all -- --check
-```
-
-The embedding tests create isolated loopback listeners and need local socket permission in restricted runners.
-ffmpeg, ffprobe, and macOS textutil are exercised by the relevant local format tests.
-[Dependency choices](docs/dependencies.md), [decisions](docs/decisions/README.md), and [the first-version record](docs/changes/2026-10-14-first-version.md) state evidence and remaining limits.
-
-## License
-
-Original project code uses the [Apache License 2.0](LICENSE), as selected by the engineer.
-Third-party components and the foundational source articles retain their original licenses and provenance.
-See [dependency licensing](docs/dependencies.md#ffmpeg-packaging-boundary) for the FFmpeg process boundary and future redistribution requirements.
+Back up originals, `omni-knowledge.json`, and `.omni/metadata/`; generated indexes can be rebuilt.
+Read [storage and recovery](docs/specs/storage.md) before migration, [the desktop guide](docs/gui.md) for the retained GUI, and [the documentation map](docs/README.md) for contracts.
+Contributors start with [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+Original code uses [Apache-2.0](LICENSE); third-party components and [foundational source articles](assets/foundations/README.md) retain their licenses and provenance.
+See the [FFmpeg packaging boundary](docs/dependencies.md#ffmpeg-packaging-boundary) before distribution.

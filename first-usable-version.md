@@ -1,39 +1,45 @@
 # First Usable Version
 
-Status: IN PROGRESS.
-This page is not READY and is not a compliance, notarization, or milestone-acceptance claim.
+Status: qualified Linux x86_64 headless first usable version, 2026-11-09.
+The engineer's 2026-11-04 sequencing, confirmed by the coordinator on 2026-11-09, puts Mac and real-model acceptance after this version.
+N03 and N04 remain engineer items and are not prerequisites for N05.
+This scoped result does not claim full product-contract completion or a public release.
 
-The headless Linux and macOS archives are the current delivery gate.
-GUI milestone M7 is deferred.
-A GPUI or NSH launch is not required for the headless gate and is not treated as a passed product qualification.
+## Qualified Artifact
 
-## Checklist
+- Code commit: `dfa0902f6e6de34a160da6a99454200ecf401fde`.
+- Archive: `omni-knowledge-linux-x86_64-n02-dfa0902.tar.gz`.
+- SHA-256: `1e9c56156cc316ee35497f6c62369cf3c900ea195bdf8cef246abb1d462175f8`.
+- Installed N02 acceptance: 8/8 checks passed, no failures or blocked checks.
+- Checks: archive hashes/notices, initialization, cold native lexical search, Japanese BM25, canonical MCP, legacy lexical MCP, native DEFLATE DOCX, and missing/restored parser controls.
+- Parser control: a new source was refused with the sibling absent; the same source succeeded after restoration.
+Actual installed parser PIDs were observed, and all 11 recorded process receipts were collected.
+- Related N02a proof: 227 affected runtime/documentation tests passed with zero ignored cases; strict checks and formatting passed.
+One regression proves benign DEFLATE expansion succeeds and expansion above the existing 8 MiB decoded limit is refused.
+Refresh ceilings and the N02 fixture/oracle stayed unchanged.
 
-| Item | State |
-| --- | --- |
-| Trunk contains integrated core, cache, wire, local, jobs, public tests, B1/B2, and the kernel self-VM diagnostic at `faab733` | Present in this branch base. Presence is not acceptance. |
-| Headless archive selects Cargo workspace product binaries and does not invent a worker | `omni` is installed. `parser-worker` is installed only when Cargo metadata and the parent lookup both name it; this trunk has neither, so no parser helper is invented. `omni-fsevents` is installed beside `omni` on apple-darwin only. `retrieval-kernel` stays out. A Linux binary is not FSEvents proof. Native macOS execution of that helper remains unobserved. |
-| Linux x86_64 headless archive, notices, and CLI smoke | Local observation is recorded in the M8 change record. Hosted CI is not run by this lane. |
-| macOS arm64 headless archive | Defined in the workflow. Not executed here. Native macOS remains pending. |
-| Seven kernel faces and the macOS RSS watchdog typed error | Remain in the headless test gate. This change does not ignore, exclude, or retune them. The AS ceiling is unchanged. |
-| Notice gaps adobe-cmap-parser, htmlescape, pdf-extract, and type1-encoding-parser | Explicit. Cached source or fallback evidence only. No invented license text. |
-| Unsigned macOS `.app`, Developer ID, notarization, and Gatekeeper | Deferred with M7. Local `scripts/bundle-macos.sh` remains. |
-| Final hosted Linux and macOS CI | Pending. This lane does not dispatch or push. |
-| Milestone authority, durability review, hostile ZIP admission, and actual service entry points | Pending. Not claimed by a successful archive script. |
-| Linux arm64 | Not configured. Unqualified. |
+Use the [README getting-started instructions](README.md) for Linux installation, optional provider setup, Mac source builds, and the Mac acceptance checklist.
+The documentation commit adds no executable changes to the qualified artifact.
 
-## Setup, Recovery, And Migration
+## Evidence
 
-Install Rust 1.99.0 from `mise.toml`, Python 3.11 or newer for the dictionary supplier, and system ffmpeg and ffprobe.
-Prepare the pinned dictionary cache before Cargo, as [the toolchain](docs/toolchain.md) describes.
-Build with `cargo build --workspace --release --no-default-features --locked --offline`.
-Stage an archive only after that build:
+The qualification copy accompanies the delivery evidence under `evidence/omni/first-usable-version.md`.
+Relative to that evidence directory, the exact receipts are:
 
-```sh
-python3 -B scripts/bundle-headless.py --target x86_64-unknown-linux-gnu --stage dist/linux-x86_64
-```
+- `lead-artifacts/m4-vectors/lead2-n02-completed-checkpoint.json`.
+- `lead-artifacts/m4-vectors/lead2-n02-committed-artifact.json`.
+- `lead-artifacts/m4-vectors/lead2-n02-committed-installed-evidence-1/result.json`.
+- Open import-tag gap: `lead-artifacts/m4-vectors/lead2-n05-doc-probe-1/results.json` records failure; `lead-artifacts/m4-vectors/lead2-n05-doc-probe-evidence-1/docx-tag-oracle.stdout.log` records the empty native result.
 
-The installed CLI does not need Python.
-Initialization, library migration, and recovery remain owned by [storage](docs/specs/storage.md) and the root guide.
-This packaging change does not install a daemon or edit host configuration.
-Do not point the CLI at a private library from CI.
+The unchanged acceptance driver is `tests/product_acceptance/linux_installed.py`, SHA-256 `b2d9962949d9eb752b29aa0419b47fa694dab99c4355e95e0f757348e593fddc`.
+It used the actual installed artifact, a fresh HOME/cache/cwd, and restricted PATH.
+Earlier failing receipts remain preserved.
+
+## Open Items
+
+- WeMM is optional and off by default; real weights and quality are unqualified.
+Provider configuration and compatibility vector indexing do not create the native model selection needed for semantic CLI/MCP queries; N03 owns that remaining binding.
+- Apple Silicon macOS, native FSEvents, Claude/Codex client acceptance, and the ASR opt-in remain unqualified on this code; N04 is the engineer's acceptance.
+- The getting-started probe found that legacy `add --tag` metadata did not reach native Query filters.
+The example uses qualified Markdown front-matter tags; the import-tag bridge remains open, with the failing receipt preserved.
+- GUI M7, Linux ARM64, physical resource guarantees, all-command implementation, notice-gap closure, notarization, and public-release approval are outside this result.
