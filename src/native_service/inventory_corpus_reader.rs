@@ -364,7 +364,7 @@ impl NativeTupleRead {
         )))
     }
     /// Read `count` source frames from one sources.rows open.
-    /// `admit` charges frame bytes. Opening a published shard does not charge an object per frame.
+    /// `admit` charges frame bytes. The caller admits one object per frame before this read.
     pub(super) fn read_parts(
         &self,
         offset: u64,

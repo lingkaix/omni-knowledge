@@ -683,6 +683,31 @@ impl NativeTupleQuery {
         budget: Budget,
         funding: Holding,
     ) -> Result<NativeInventoryPage> {
+        self.page_with(claim, library, offset, budget, funding, false)
+    }
+    /// Same page as [`Self::page`], except a replay clamped below the requested
+    /// file allowance is a budget refusal. BM25 binds winners from that page, and
+    /// a short page would hide a source that is present on the real page.
+    /// Metadata keeps the short page so the refused read is still counted.
+    pub(in crate::native_service) fn page_refusing_truncated(
+        &self,
+        claim: &Claim,
+        library: usize,
+        offset: u64,
+        budget: Budget,
+        funding: Holding,
+    ) -> Result<NativeInventoryPage> {
+        self.page_with(claim, library, offset, budget, funding, true)
+    }
+    fn page_with(
+        &self,
+        claim: &Claim,
+        library: usize,
+        offset: u64,
+        budget: Budget,
+        funding: Holding,
+        refuse_truncated: bool,
+    ) -> Result<NativeInventoryPage> {
         let mut funding = Some(funding);
         let mut retained: Option<NativeInventoryPage> = None;
         let result = (|| -> Result<NativeInventoryPage> {
@@ -722,6 +747,17 @@ impl NativeTupleQuery {
                     let page = retained.as_ref().expect("actual decoder page");
                     if page.issue() == Some(&knowledge_storage::Error::Budget)
                         || (!page.complete() && page.next_offset() == offset)
+                    {
+                        return Err(QueryBudgetExhausted.into());
+                    }
+                    // Corpus pages stop on the 2MiB replay bound. A smaller leftover
+                    // allowance stops earlier and hides rows that are on the real page.
+                    // BM25 treats that as a budget refusal. Metadata still reads the page.
+                    let allowed = budget.max_files.min(remaining.objects);
+                    if refuse_truncated
+                        && !page.complete()
+                        && allowed < budget.max_files
+                        && page.read_objects() >= allowed
                     {
                         return Err(QueryBudgetExhausted.into());
                     }

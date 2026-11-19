@@ -456,7 +456,7 @@ impl NativeBm25Run {
                 temporary_bytes: 0,
             },
         )?;
-        self.query.page(
+        self.query.page_refusing_truncated(
             &self.claim,
             self.library,
             offset,
@@ -649,6 +649,9 @@ impl NativeBm25Run {
         let mut fast_parts = None;
         if self.published_fast_path(&shard)? {
             let cursor = self.data.as_ref().expect("actual owner").source;
+            for _ in 0..shard.parts.len() {
+                self.query.cause.admit_object(&self.claim)?;
+            }
             let (parts, end_cursor) = {
                 let library = &self.query.cause.libraries[self.library];
                 library.reader.read_parts(cursor, shard.parts.len(), &|n| {

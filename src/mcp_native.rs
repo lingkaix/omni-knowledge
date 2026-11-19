@@ -44,12 +44,22 @@ use std::{
 };
 
 const MIB: u64 = 1024 * 1024;
-/// Foreground query and startup-refresh data ceilings.
-/// A query counts the bytes and objects it reads now. Historical journal observations
-/// are not charged, and a current published corpus is searched in place.
+/// Startup refresh keeps the pre-raise ceilings. A query counts the bytes and
+/// objects it reads now. Historical journal observations used only to find the
+/// checkpoint are not charged, and a current published corpus is searched in place.
 const LEGACY_MAX_FILES: u64 = 1_000;
 const LEGACY_MAX_BYTES: u64 = 64 * MIB;
-const LEGACY_QUERY_MAX_MILLIS: u64 = 60_000;
+/// Measured published-corpus walk: 941 members, 2 header objects, 18 inventory
+/// pages of 17 records, and 312 source frames (1561). One extra page keeps a
+/// full page from being clamped.
+const QUERY_MAX_FILES: u64 = 1_561 + 17;
+/// MiniZip on that corpus exhausted 64 MiB (67_108_788 bytes), 96 MiB
+/// (100_653_358 bytes), and 256 MiB (268_435_316 bytes, 1494 objects).
+/// 384 MiB finished the same walk.
+const QUERY_MAX_BYTES: u64 = 384 * MIB;
+/// A 60_000 ms query claim stopped inside the walk. The deadline matches the
+/// 90 s watch limit. MiniZip then finished in 68.6 s.
+const QUERY_MAX_MILLIS: u64 = 90_000;
 // One foreground product executor; this lock grants no source or queue authority.
 static FOREGROUND: Mutex<()> = Mutex::new(());
 
@@ -973,7 +983,7 @@ pub fn legacy_request(
     } else {
         vec![query]
     };
-    wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"foreground-query","command":{"op":"query","query":{"library_ids":host.library_ids(),"keywords":keywords,"methods":methods,"required_tags":tags,"case_sensitive":case_sensitive,"limit":limit,"image_query":null,"budget":{"max_files":LEGACY_MAX_FILES,"max_bytes":LEGACY_MAX_BYTES.to_string(),"max_millis":LEGACY_QUERY_MAX_MILLIS,"max_memory_bytes":"536870912"}}}}))?).map_err(Into::into)
+    wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"foreground-query","command":{"op":"query","query":{"library_ids":host.library_ids(),"keywords":keywords,"methods":methods,"required_tags":tags,"case_sensitive":case_sensitive,"limit":limit,"image_query":null,"budget":{"max_files":QUERY_MAX_FILES,"max_bytes":QUERY_MAX_BYTES.to_string(),"max_millis":QUERY_MAX_MILLIS,"max_memory_bytes":"536870912"}}}}))?).map_err(Into::into)
 }
 
 /// Fixed public error metadata; original owning failures remain with the synchronous reply.
