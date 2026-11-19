@@ -432,3 +432,221 @@ impl Selection {
             .pointer)
     }
 }
+
+/// The published native generation can be searched as-is.
+/// Any doubt, including a newer page or wiki mtime, returns false so startup rebuilds.
+impl NativeLibraryService {
+    pub fn published_corpus_current(&self, permit: &Permit) -> bool {
+        self.published_corpus_current_inner(permit).unwrap_or(false)
+    }
+    fn published_corpus_current_inner(&self, permit: &Permit) -> Result<bool> {
+        let root = permit
+            .with_selected_context(&self.library, |root, _, _| root.try_clone().map_err(refused))
+            .map_err(refused_error)?;
+        let root_meta = root.metadata()?;
+        let original_root = (root_meta.dev(), root_meta.ino());
+        let parent = Account::current()?.generated_directory()?;
+        let namespace_name = namespace_name(self.library.as_str(), original_root);
+        let namespace = match open_directory(&parent, &namespace_name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(pointer_file) = named(&namespace, "CURRENT")? else {
+            return Ok(false);
+        };
+        let pointer_bytes = read_capped(&pointer_file, 1024 * 1024)?;
+        let pointer: Pointer = serde_json::from_slice(&pointer_bytes)?;
+        if pointer.format != 1
+            || pointer.library != self.library.as_str()
+            || pointer.original_root != original_root
+            || !pointer.stage.starts_with("native-corpus-")
+            || pointer.stage.len() > 255
+            || pointer.stage.contains('/')
+            || pointer.stage.contains('\\')
+            || std::path::Path::new(&pointer.stage).components().count() != 1
+        {
+            return Ok(false);
+        }
+        let stage = match open_directory(&namespace, &pointer.stage) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let stage_meta = stage.metadata()?;
+        if (stage_meta.dev(), stage_meta.ino()) != pointer.stage_root {
+            return Ok(false);
+        }
+        let Some(header_file) = named(&stage, "tuple.json")? else {
+            return Ok(false);
+        };
+        let header_bytes = read_capped(&header_file, 1024 * 1024)?;
+        if hex::encode(Sha256::digest(&header_bytes)) != pointer.header_sha256 {
+            return Ok(false);
+        }
+        let header: tuple::Header = serde_json::from_slice(&header_bytes)?;
+        if header.format != 1
+            || header.library != self.library.as_str()
+            || header.original_root != original_root
+            || header.stage_root != pointer.stage_root
+            || header.machinery != crate::admitted::build_identity()
+        {
+            return Ok(false);
+        }
+        let journal = match open_directory(&root, "journal") {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let Some((scan, observed_at)) = latest_complete_checkpoint(&journal)? else {
+            return Ok(false);
+        };
+        if header.scan != scan {
+            return Ok(false);
+        }
+        let observed = time::OffsetDateTime::parse(
+            &observed_at,
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let observed = offset_to_system(observed)?;
+        let pages = directory_freshness(&root, "pages", observed)?;
+        let wiki = directory_freshness(&root, "wiki", observed)?;
+        Ok(match (pages, wiki) {
+            (Freshness::Missing, Freshness::Missing) => false,
+            (Freshness::Newer, _) | (_, Freshness::Newer) => false,
+            _ => true,
+        })
+    }
+}
+enum Freshness {
+    Missing,
+    Current,
+    Newer,
+}
+fn open_directory(parent: &File, name: &str) -> std::io::Result<File> {
+    rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(std::io::Error::from)
+}
+fn read_capped(file: &File, limit: u64) -> Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let len = file.metadata()?.len();
+    anyhow::ensure!(len <= limit, "published corpus metadata exceeds the cap");
+    let mut bytes = vec![0; usize::try_from(len)?];
+    file.read_exact_at(&mut bytes, 0)?;
+    Ok(bytes)
+}
+fn latest_complete_checkpoint(journal: &File) -> Result<Option<(String, String)>> {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::io::AsRawFd;
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", journal.as_raw_fd()))? {
+        let name = entry?.file_name();
+        let text = name.to_string_lossy();
+        if text.ends_with(".jsonl") && !text.contains('/') {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut found = None;
+    for name in names {
+        let file = match named(journal, &name.to_string_lossy())? {
+            Some(file) => file,
+            None => continue,
+        };
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&line)?;
+            let Some(checkpoint) = value.get("checkpoint") else {
+                continue;
+            };
+            if checkpoint.get("complete").and_then(|item| item.as_bool()) != Some(true) {
+                continue;
+            }
+            let Some(scan) = checkpoint.get("scan").and_then(|item| item.as_str()) else {
+                continue;
+            };
+            let Some(observed_at) = checkpoint
+                .get("observed_at")
+                .and_then(|item| item.as_str())
+            else {
+                continue;
+            };
+            if !scan.is_empty() && !observed_at.is_empty() {
+                found = Some((scan.to_owned(), observed_at.to_owned()));
+            }
+        }
+    }
+    Ok(found)
+}
+fn offset_to_system(observed: time::OffsetDateTime) -> Result<std::time::SystemTime> {
+    let unix = observed.unix_timestamp();
+    anyhow::ensure!(unix >= 0, "checkpoint time is not a unix timestamp");
+    Ok(std::time::UNIX_EPOCH + std::time::Duration::new(unix as u64, observed.nanosecond()))
+}
+fn directory_freshness(
+    root: &File,
+    name: &str,
+    observed: std::time::SystemTime,
+) -> Result<Freshness> {
+    use std::os::unix::io::AsRawFd;
+    // Stat the child itself. /proc/self/fd/<root> is only an intermediate link, so
+    // symlink_metadata does not follow `name` and does not stat the fd symlink.
+    let meta = match std::fs::symlink_metadata(format!(
+        "/proc/self/fd/{}/{}",
+        root.as_raw_fd(),
+        name
+    )) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Freshness::Missing),
+        Err(error) => return Err(error.into()),
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Ok(if meta.modified()? > observed {
+            Freshness::Newer
+        } else {
+            Freshness::Current
+        });
+    }
+    if meta.modified()? > observed {
+        return Ok(Freshness::Newer);
+    }
+    let dir = open_directory(root, name)?;
+    if tree_newer(&dir, observed)? {
+        Ok(Freshness::Newer)
+    } else {
+        Ok(Freshness::Current)
+    }
+}
+fn tree_newer(dir: &File, observed: std::time::SystemTime) -> Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let mut path = std::path::PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+        path.push(&name);
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.modified()? > observed {
+            return Ok(true);
+        }
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let child = open_directory(dir, &name.to_string_lossy())?;
+        if tree_newer(&child, observed)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

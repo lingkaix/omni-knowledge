@@ -462,14 +462,14 @@ impl NativeLibraryService {
             .checked_add(Duration::from_millis(requested.max_millis))
             .context("read inventory deadline")?;
         let mut offset = 0u64;
-        let mut bytes = 0u64;
-        let mut records = 0u64;
         let mut found = false;
         loop {
             permit.check().map_err(refused_error)?;
+            // Each page may use the full requested ceiling. Historical observations are how the
+            // checkpoint is found; they are not files this query reads, so they do not shrink it.
             let remaining = Budget {
-                max_files: requested.max_files.saturating_sub(records),
-                max_bytes: requested.max_bytes.saturating_sub(bytes),
+                max_files: requested.max_files,
+                max_bytes: requested.max_bytes,
                 max_millis: deadline
                     .saturating_duration_since(Instant::now())
                     .as_millis()
@@ -503,20 +503,6 @@ impl NativeLibraryService {
                 replay.issue.is_none(),
                 "query inventory evidence requires recovery"
             );
-            bytes = bytes
-                .checked_add(replay.read_bytes)
-                .context("query inventory bytes overflow")?;
-            records = records
-                .checked_add(
-                    (replay.observations.len()
-                        + replay.checkpoints.len()
-                        + replay.event_cursors.len()) as u64,
-                )
-                .context("query inventory records overflow")?;
-            anyhow::ensure!(
-                bytes <= requested.max_bytes && records <= requested.max_files,
-                knowledge_storage::Error::Budget
-            );
             for checkpoint in &replay.checkpoints {
                 if checkpoint.scan == scan {
                     anyhow::ensure!(
@@ -549,8 +535,8 @@ impl NativeLibraryService {
                 policy,
                 scan: scan.to_owned(),
                 root,
-                input_bytes: bytes,
-                input_objects: records,
+                input_bytes: 0,
+                input_objects: 0,
                 check_budget: Budget {
                     max_files: 1,
                     max_bytes: 128 * 1024,

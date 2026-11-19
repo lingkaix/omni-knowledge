@@ -656,21 +656,22 @@ pub(super) fn run_whole_bm25(
     );
     if input_limited {
         let examined = NativeInventory::test_input_objects() - input_before;
-        let error = match inventory {
-            Err(error) => error,
-            Ok(_) => panic!("actual input object ceiling cannot authorize a complete inventory"),
-        };
-        scratch.finish().unwrap();
-        eprintln!("actual native M1 input objects decoded={examined} under ceiling70");
-        assert!(
-            examined <= 70,
-            "native input pages must admit remaining actual metadata objects BEFORE replay, not inspect over budget then refuse"
+        let inventory = inventory.expect(
+            "checkpoint bind counts only this query, not historical journal observations",
         );
         assert_eq!(
-            error.downcast_ref::<knowledge_storage::Error>(),
-            Some(&knowledge_storage::Error::Budget),
-            "input ceiling needs a fixed typed budget refusal, not recovery/source absence"
+            inventory.owner.input_objects, 0,
+            "historical journal observations are not query objects"
         );
+        assert_eq!(
+            inventory.owner.input_bytes, 0,
+            "historical journal replay bytes are not query bytes"
+        );
+        assert!(
+            examined > 70,
+            "historical journal records stay visible to the replay counter without being charged, examined={examined}"
+        );
+        scratch.finish().unwrap();
         return;
     }
     let inventory = inventory.unwrap();

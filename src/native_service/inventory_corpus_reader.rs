@@ -363,6 +363,44 @@ impl NativeTupleRead {
             next,
         )))
     }
+    /// Read `count` source frames from one sources.rows open.
+    /// `admit` charges frame bytes. Opening a published shard does not charge an object per frame.
+    pub(super) fn read_parts(
+        &self,
+        offset: u64,
+        count: usize,
+        admit: &impl Fn(u64) -> Result<()>,
+    ) -> Result<(Vec<TuplePart>, u64)> {
+        self.check()?;
+        let file = Arc::new(self.physical.open_verified_admitted(
+            "sources.rows",
+            || self.check(),
+            admit,
+        )?);
+        let version = stamp(&file)?;
+        let mut at = offset;
+        let mut parts = Vec::with_capacity(count);
+        for _ in 0..count {
+            anyhow::ensure!(at < version[2], "source cursor is outside selected tuple");
+            let (data, next) = read_frame_admitted::<SourcePart>(&file, at, admit)?;
+            #[cfg(test)]
+            TEST_SOURCE_PART_READS.set(TEST_SOURCE_PART_READS.get() + 1);
+            parts.push(TuplePart {
+                data,
+                physical: self.physical.clone(),
+                source_rows: file.clone(),
+                rows_version: version,
+                framed_bytes: next - at,
+            });
+            at = next;
+        }
+        self.check()?;
+        anyhow::ensure!(
+            stamp(&file)? == version,
+            "source table changed while reading part"
+        );
+        Ok((parts, at))
+    }
     /// Complete bounded metadata/root/header/manifest/pin envelope, not kernel/vector query costs.
     pub fn requirement() -> Reservation {
         Reservation {

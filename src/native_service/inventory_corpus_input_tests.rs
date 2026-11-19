@@ -199,9 +199,14 @@ fn actual_two_library_inputs_share_prepaid_span_and_original_deadline() {
     let total = prepared.input_amount();
     let after = NativeTupleRead::test_input_probes();
     assert_eq!(after.0 - before.0, 2, "two actual namespace input FD opens");
+    let examined = NativeInventory::test_input_objects() - before_m1;
     assert_eq!(
-        total.1,
-        after.2 - before.2 + NativeInventory::test_input_objects() - before_m1
+        total.1, after.2 - before.2,
+        "historical journal observations are not query objects"
+    );
+    assert!(
+        examined > 0,
+        "historical journal records stay visible to the replay counter, examined={examined}"
     );
     assert_eq!(
         first.2, expected_deadline,

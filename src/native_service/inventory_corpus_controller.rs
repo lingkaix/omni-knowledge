@@ -102,7 +102,8 @@ impl NativeTupleQuery {
         let mut max_row = 0;
         while at < file.metadata()?.len() {
             lib.reader.check()?;
-            self.cause.admit_planning_object()?;
+            // Frame bytes are a real catalog read. One object per frame is not: the query
+            // searches the published shard and opens only the rank-window sources.
             let (part, next) =
                 read_frame_admitted::<SourcePart>(&file, at, &|n| self.cause.admit_planning(n))?;
             let path = part
@@ -499,6 +500,100 @@ impl NativeBm25Run {
             Err(wire::authority::ScopeRejoinError::Released(code)) => Err(refused_error(code)),
         }
     }
+    fn published_fast_path(&self, shard: &Shard) -> Result<bool> {
+        if shard.parts.is_empty() {
+            return Ok(false);
+        }
+        let library = &self.query.cause.libraries[self.library];
+        let wire::Command::Query { query } = library
+            .reader
+            .permit
+            .admitted_command()
+            .map_err(refused_error)?
+        else {
+            bail!("actual Query required");
+        };
+        if !query.required_tags.is_empty() {
+            return Ok(false);
+        }
+        for expected in &shard.parts {
+            let Some(locator) = expected.document.locator.as_deref() else {
+                return Ok(false);
+            };
+            if library.inventory.owner.path_excluded(locator) {
+                return Ok(false);
+            }
+            let Ok(relative) = wire::RelativePath::new(locator) else {
+                return Ok(false);
+            };
+            if library
+                .reader
+                .permit
+                .check_path(&library.reader.physical.library, &relative)
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    fn bind_published_winners(
+        &mut self,
+        library_id: &wire::Id,
+        mut parts: Vec<super::super::reader::TuplePart>,
+    ) -> Result<()> {
+        let wanted: Vec<String> = {
+            let data = self.data.as_ref().expect("actual owner");
+            data.rows
+                .keys()
+                .filter(|id| data.window.contains(id) && !data.sources.contains_key(*id))
+                .cloned()
+                .collect()
+        };
+        for id in wanted {
+            let Some(pos) = parts
+                .iter()
+                .position(|part| part.data.document.key.id == id)
+            else {
+                continue;
+            };
+            let part = parts.swap_remove(pos);
+            let locator = part
+                .data
+                .document
+                .locator
+                .clone()
+                .context("actual source logical path absent")?;
+            let next = part.framed_bytes().max(1);
+            let observed = self
+                .data
+                .as_ref()
+                .expect("actual owner")
+                .page
+                .as_ref()
+                .expect("actual page")
+                .1
+                .sources()
+                .find(|source| same_observed(source, &id, &locator));
+            let Some(observed) = observed else {
+                bail!("actual M1 page source absent");
+            };
+            let source = self.query.source_part(
+                library_id,
+                &self.claim,
+                self.library,
+                observed,
+                part,
+                next,
+            )?;
+            self.data
+                .as_mut()
+                .expect("actual owner")
+                .sources
+                .insert(id, source);
+        }
+        Ok(())
+    }
     fn advance(&mut self, library_id: &wire::Id) -> Result<bool> {
         self.check()?;
         let library = &self.query.cause.libraries[self.library];
@@ -551,135 +646,132 @@ impl NativeBm25Run {
             let page = self.read_inventory_page(shard.page_offset)?;
             self.data.as_mut().expect("actual owner").page = Some((shard.page_offset, page));
         }
-        for expected in &shard.parts {
+        let mut fast_parts = None;
+        if self.published_fast_path(&shard)? {
             let cursor = self.data.as_ref().expect("actual owner").source;
-            self.query.cause.admit_object(&self.claim)?;
-            let (part, after, locator, excluded, scan_drift) = {
+            let (parts, end_cursor) = {
                 let library = &self.query.cause.libraries[self.library];
-                let (part, after) = library
-                    .reader
-                    .part_admitted(cursor, &|n| self.query.cause.admit_io(&self.claim, n))?
-                    .context("selected source cursor absent")?;
+                library.reader.read_parts(cursor, shard.parts.len(), &|n| {
+                    self.query.cause.admit_io(&self.claim, n)
+                })?
+            };
+            anyhow::ensure!(
+                parts.len() == shard.parts.len(),
+                "published source frame count differs"
+            );
+            for (part, expected) in parts.iter().zip(&shard.parts) {
                 anyhow::ensure!(
                     part.data == *expected && expected.page_offset == shard.page_offset,
                     "source/catalog producer receipts differ"
                 );
-                let locator = expected
-                    .document
-                    .locator
-                    .as_deref()
-                    .context("actual source logical path absent")?
-                    .to_owned();
-                let excluded = library.inventory.owner.path_excluded(&locator)
-                    || matches!(
-                        library.reader.permit.check_path(
-                            &library.reader.physical.library,
-                            &wire::RelativePath::new(&locator)?,
-                        ),
-                        Err(wire::ErrorCode::NotExposed)
-                    );
-                let scan_drift = library.inventory.scan() != library.reader.physical.data.scan;
-                (part, after, locator, excluded, scan_drift)
-            };
-            if excluded {
-                self.data.as_mut().expect("actual owner").source = after;
-                continue;
-            }
-            let source_id = expected.document.key.id.as_str();
-            let first_source = self
-                .data
-                .as_mut()
-                .expect("actual owner")
-                .coverage
-                .begin(source_id, &expected.status);
-            let mut observed = self
-                .data
-                .as_ref()
-                .expect("actual owner")
-                .page
-                .as_ref()
-                .expect("actual page")
-                .1
-                .sources()
-                .find(|s| same_observed(s, source_id, &locator));
-            if observed.is_none() && scan_drift {
-                self.release_page()?;
-                let mut offset = 0u64;
-                loop {
-                    let page = self.read_inventory_page(offset)?;
-                    let found = page
-                        .sources()
-                        .find(|s| same_observed(s, source_id, &locator));
-                    let complete = page.complete();
-                    let next_offset = page.next_offset();
-                    self.data.as_mut().expect("actual owner").page = Some((offset, page));
-                    if found.is_some() {
-                        observed = found;
-                        break;
-                    }
-                    if complete {
-                        break;
-                    }
-                    anyhow::ensure!(next_offset > offset, "inventory replay made no progress");
-                    self.release_page()?;
-                    offset = next_offset;
+                let source_id = expected.document.key.id.clone();
+                let status = expected.status.clone();
+                let data = self.data.as_mut().expect("actual owner");
+                if data.coverage.begin(&source_id, &status) {
+                    data.coverage.verified += 1;
                 }
             }
-            let Some(observed) = observed else {
-                if scan_drift {
-                    if first_source {
-                        self.data
-                            .as_mut()
-                            .expect("actual owner")
-                            .coverage
-                            .unavailable += 1;
+            self.data.as_mut().expect("actual owner").source = end_cursor;
+            let catalog = shard.parts.clone();
+            let stage = match self.query.stage_with_catalog(
+                self.claim.clone(),
+                self.library,
+                Vec::new(),
+                catalog,
+                NativeQueryStageResources {
+                    window: 1024 * 1024,
+                },
+            ) {
+                Ok(stage) => stage,
+                Err(refused) => {
+                    let (cause, loans) = refused.into_parts();
+                    let data = self.data.as_mut().expect("actual owner");
+                    if let Some(work) = loans.work {
+                        data.extra.push(work);
                     }
-                    self.data.as_mut().expect("actual owner").unavailable_parts += 1;
+                    drop((loans.job, loans.claim, loans.sources));
+                    return Err(cause);
+                }
+            };
+            self.data.as_mut().expect("actual owner").stage = Some(stage);
+            fast_parts = Some(parts);
+        } else {
+            for expected in &shard.parts {
+                let cursor = self.data.as_ref().expect("actual owner").source;
+                self.query.cause.admit_object(&self.claim)?;
+                let (part, after, locator, excluded, scan_drift) = {
+                    let library = &self.query.cause.libraries[self.library];
+                    let (part, after) = library
+                        .reader
+                        .part_admitted(cursor, &|n| self.query.cause.admit_io(&self.claim, n))?
+                        .context("selected source cursor absent")?;
+                    anyhow::ensure!(
+                        part.data == *expected && expected.page_offset == shard.page_offset,
+                        "source/catalog producer receipts differ"
+                    );
+                    let locator = expected
+                        .document
+                        .locator
+                        .as_deref()
+                        .context("actual source logical path absent")?
+                        .to_owned();
+                    let excluded = library.inventory.owner.path_excluded(&locator)
+                        || matches!(
+                            library.reader.permit.check_path(
+                                &library.reader.physical.library,
+                                &wire::RelativePath::new(&locator)?,
+                            ),
+                            Err(wire::ErrorCode::NotExposed)
+                        );
+                    let scan_drift = library.inventory.scan() != library.reader.physical.data.scan;
+                    (part, after, locator, excluded, scan_drift)
+                };
+                if excluded {
                     self.data.as_mut().expect("actual owner").source = after;
                     continue;
                 }
-                bail!("actual M1 page source absent");
-            };
-            let result = self.query.source_part(
-                library_id,
-                &self.claim,
-                self.library,
-                observed,
-                part,
-                after,
-            );
-            match result {
-                Ok(source) => {
-                    if first_source {
-                        self.data.as_mut().expect("actual owner").coverage.verified += 1;
-                    }
-                    match source.matches_required_tags() {
-                        Ok(true) => self
-                            .data
-                            .as_mut()
-                            .expect("actual owner")
-                            .pending
-                            .push(source),
-                        Ok(false) => {
-                            self.close_source(source)?;
-                            self.data.as_mut().expect("actual owner").source = after;
-                            continue;
+                let source_id = expected.document.key.id.as_str();
+                let first_source = self
+                    .data
+                    .as_mut()
+                    .expect("actual owner")
+                    .coverage
+                    .begin(source_id, &expected.status);
+                let mut observed = self
+                    .data
+                    .as_ref()
+                    .expect("actual owner")
+                    .page
+                    .as_ref()
+                    .expect("actual page")
+                    .1
+                    .sources()
+                    .find(|s| same_observed(s, source_id, &locator));
+                if observed.is_none() && scan_drift {
+                    self.release_page()?;
+                    let mut offset = 0u64;
+                    loop {
+                        let page = self.read_inventory_page(offset)?;
+                        let found = page
+                            .sources()
+                            .find(|s| same_observed(s, source_id, &locator));
+                        let complete = page.complete();
+                        let next_offset = page.next_offset();
+                        self.data.as_mut().expect("actual owner").page = Some((offset, page));
+                        if found.is_some() {
+                            observed = found;
+                            break;
                         }
-                        Err(error) => {
-                            self.close_source(source)?;
-                            return Err(error);
+                        if complete {
+                            break;
                         }
+                        anyhow::ensure!(next_offset > offset, "inventory replay made no progress");
+                        self.release_page()?;
+                        offset = next_offset;
                     }
                 }
-                Err(error) => {
-                    // An actual owning scope refusal is NEVER downgraded to an omitted DTO row.
-                    if error
-                        .downcast_ref::<crate::native_service::NativeRefreshScopeError>()
-                        .is_none()
-                        && error.chain().any(|e| {
-                            e.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
-                        })
-                    {
+                let Some(observed) = observed else {
+                    if scan_drift {
                         if first_source {
                             self.data
                                 .as_mut()
@@ -688,41 +780,95 @@ impl NativeBm25Run {
                                 .unavailable += 1;
                         }
                         self.data.as_mut().expect("actual owner").unavailable_parts += 1;
-                    } else {
-                        return Err(error);
+                        self.data.as_mut().expect("actual owner").source = after;
+                        continue;
+                    }
+                    bail!("actual M1 page source absent");
+                };
+                let result = self.query.source_part(
+                    library_id,
+                    &self.claim,
+                    self.library,
+                    observed,
+                    part,
+                    after,
+                );
+                match result {
+                    Ok(source) => {
+                        if first_source {
+                            self.data.as_mut().expect("actual owner").coverage.verified += 1;
+                        }
+                        match source.matches_required_tags() {
+                            Ok(true) => self
+                                .data
+                                .as_mut()
+                                .expect("actual owner")
+                                .pending
+                                .push(source),
+                            Ok(false) => {
+                                self.close_source(source)?;
+                                self.data.as_mut().expect("actual owner").source = after;
+                                continue;
+                            }
+                            Err(error) => {
+                                self.close_source(source)?;
+                                return Err(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // An actual owning scope refusal is NEVER downgraded to an omitted DTO row.
+                        if error
+                            .downcast_ref::<crate::native_service::NativeRefreshScopeError>()
+                            .is_none()
+                            && error.chain().any(|e| {
+                                e.is::<crate::native_service::source::CachedQuerySourceUnavailable>()
+                            })
+                        {
+                            if first_source {
+                                self.data
+                                    .as_mut()
+                                    .expect("actual owner")
+                                    .coverage
+                                    .unavailable += 1;
+                            }
+                            self.data.as_mut().expect("actual owner").unavailable_parts += 1;
+                        } else {
+                            return Err(error);
+                        }
                     }
                 }
+                self.data.as_mut().expect("actual owner").source = after;
             }
-            self.data.as_mut().expect("actual owner").source = after;
-        }
-        if self.data.as_ref().expect("actual owner").pending.is_empty() {
-            let data = self.data.as_mut().expect("actual owner");
-            data.catalog = next;
-            data.partitions += 1;
-            return Ok(false);
-        }
-        let pending = std::mem::take(&mut self.data.as_mut().expect("actual owner").pending);
-        let stage = match self.query.stage(
-            self.claim.clone(),
-            self.library,
-            pending,
-            NativeQueryStageResources {
-                window: 1024 * 1024,
-            },
-        ) {
-            Ok(stage) => stage,
-            Err(refused) => {
-                let (cause, loans) = refused.into_parts();
+            if self.data.as_ref().expect("actual owner").pending.is_empty() {
                 let data = self.data.as_mut().expect("actual owner");
-                data.pending = loans.sources;
-                if let Some(work) = loans.work {
-                    data.extra.push(work)
-                };
-                drop((loans.job, loans.claim));
-                return Err(cause);
+                data.catalog = next;
+                data.partitions += 1;
+                return Ok(false);
             }
-        };
-        self.data.as_mut().expect("actual owner").stage = Some(stage);
+            let pending = std::mem::take(&mut self.data.as_mut().expect("actual owner").pending);
+            let stage = match self.query.stage(
+                self.claim.clone(),
+                self.library,
+                pending,
+                NativeQueryStageResources {
+                    window: 1024 * 1024,
+                },
+            ) {
+                Ok(stage) => stage,
+                Err(refused) => {
+                    let (cause, loans) = refused.into_parts();
+                    let data = self.data.as_mut().expect("actual owner");
+                    data.pending = loans.sources;
+                    if let Some(work) = loans.work {
+                        data.extra.push(work)
+                    };
+                    drop((loans.job, loans.claim));
+                    return Err(cause);
+                }
+            };
+            self.data.as_mut().expect("actual owner").stage = Some(stage);
+        }
         let selected = self
             .data
             .as_ref()
@@ -882,6 +1028,9 @@ impl NativeBm25Run {
             .extend(closing);
         while let Some(source) = self.data.as_mut().expect("actual owner").pending.pop() {
             self.close_source(source)?;
+        }
+        if let Some(parts) = fast_parts {
+            self.bind_published_winners(library_id, parts)?;
         }
         self.collect_pages()?;
         let data = self.data.as_mut().expect("actual owner");
@@ -3100,6 +3249,14 @@ impl NativeTupleQuery {
         if budget_context(error) {
             return wire::ErrorCode::BudgetExhausted;
         }
+        if error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<knowledge_storage::Error>(),
+                Some(knowledge_storage::Error::Budget)
+            )
+        }) {
+            return wire::ErrorCode::BudgetExhausted;
+        }
         if let Some(error) = error
             .chain()
             .find_map(|cause| cause.downcast_ref::<knowledge_retrieval::Error>())
@@ -4358,6 +4515,26 @@ mod failure_code_tests {
         let plain = anyhow::Error::msg("native corpus stopped");
         assert_eq!(
             NativeTupleQuery::failure_code(&plain),
+            wire::ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn storage_budget_maps_to_budget_wire_code() {
+        let direct = anyhow::Error::from(knowledge_storage::Error::Budget);
+        assert_eq!(
+            NativeTupleQuery::failure_code(&direct),
+            wire::ErrorCode::BudgetExhausted
+        );
+        let nested = anyhow::Error::from(knowledge_storage::Error::Budget)
+            .context("native query refused");
+        assert_eq!(
+            NativeTupleQuery::failure_code(&nested),
+            wire::ErrorCode::BudgetExhausted
+        );
+        let io = anyhow::Error::from(knowledge_storage::Error::Io);
+        assert_eq!(
+            NativeTupleQuery::failure_code(&io),
             wire::ErrorCode::Internal
         );
     }

@@ -152,7 +152,14 @@ impl QueryContext<'_> {
                         continue;
                     }
                 }
-                match self.verify(&pin, record, live[&record.document.key], budget) {
+                // Lexical identity is the published generation. Hashing every body here
+                // rereads the corpus; post-hit verify still checks the rows we return.
+                let verified = if query.mode == Mode::Lexical {
+                    Ok(())
+                } else {
+                    self.verify(&pin, record, live[&record.document.key], budget)
+                };
+                match verified {
                     Ok(()) => {
                         usable.insert(number);
                         result.coverage.searched_representations += 1;
@@ -758,6 +765,7 @@ fn lexical(
     if count == 0 {
         return Ok(());
     }
+    let limit = query.limit.min(count);
     let mut best: BTreeMap<usize, Hit> = BTreeMap::new();
     for (literal_term, search_query) in queries {
         budget.check()?;
@@ -774,13 +782,13 @@ fn lexical(
             ]);
             searcher.search_with_statistics_provider(
                 &admitted,
-                &TopDocs::with_limit(count).order_by_score(),
+                &TopDocs::with_limit(limit).order_by_score(),
                 statistics,
             )
         } else {
             searcher.search(
                 search_query.as_ref(),
-                &TopDocs::with_limit(count).order_by_score(),
+                &TopDocs::with_limit(limit).order_by_score(),
             )
         }
         .map_err(|e| budget.check().err().unwrap_or_else(|| io_error(e)))?;

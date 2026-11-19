@@ -45,13 +45,11 @@ use std::{
 
 const MIB: u64 = 1024 * 1024;
 /// Foreground query and startup-refresh data ceilings.
-/// A finished full-wiki BM25 search admitted 352_551_706 bytes and 3_097 objects.
-/// Object examinations pass 1_000 while bytes are still under 64 MiB, and the
-/// finished search also passes 64 MiB. Both ceilings are at least twice that peak.
-/// Query millis is 180s: the same search measured about 75s and the 60s deadline stops it.
-const LEGACY_MAX_FILES: u64 = 8_192;
-const LEGACY_MAX_BYTES: u64 = 1024 * MIB;
-const LEGACY_QUERY_MAX_MILLIS: u64 = 180_000;
+/// A query counts the bytes and objects it reads now. Historical journal observations
+/// are not charged, and a current published corpus is searched in place.
+const LEGACY_MAX_FILES: u64 = 1_000;
+const LEGACY_MAX_BYTES: u64 = 64 * MIB;
+const LEGACY_QUERY_MAX_MILLIS: u64 = 60_000;
 // One foreground product executor; this lock grants no source or queue authority.
 static FOREGROUND: Mutex<()> = Mutex::new(());
 
@@ -538,6 +536,9 @@ fn startup(service: &NativeLibraryService, owner: &Owner, session: &Session) -> 
     let permit = service
         .native_scope(session, &request.command, None)
         .map_err(refusal)?;
+    if service.published_corpus_current(&permit) {
+        return Ok(());
+    }
     let mut scratch = holding(reservation(4 * MIB, 16 * MIB))?;
     let context = match holding(reservation(2 * MIB, 0)) {
         Ok(value) => value,

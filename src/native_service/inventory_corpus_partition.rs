@@ -56,6 +56,8 @@ impl NativeQueryStageRefusal {
 }
 struct StageOwner {
     sources: Vec<NativeQuerySource>,
+    /// Published shard parts used when sources stay closed. Empty on the per-source path.
+    catalog: Vec<SourcePart>,
     readers: HeldRangeReaders,
     cause: Arc<QueryCause>,
     library: usize,
@@ -137,6 +139,17 @@ impl NativeTupleQuery {
         sources: Vec<NativeQuerySource>,
         resources: NativeQueryStageResources,
     ) -> std::result::Result<NativeQueryStage, NativeQueryStageRefusal> {
+        self.stage_with_catalog(claim, library, sources, Vec::new(), resources)
+    }
+    /// Same split as [`Self::stage`], with published shard parts standing in for closed sources.
+    pub(in super::super) fn stage_with_catalog(
+        &self,
+        claim: Arc<Claim>,
+        library: usize,
+        sources: Vec<NativeQuerySource>,
+        catalog: Vec<SourcePart>,
+        resources: NativeQueryStageResources,
+    ) -> std::result::Result<NativeQueryStage, NativeQueryStageRefusal> {
         let window = resources.window;
         let mut loans = NativeQueryLoans {
             job: NativeTupleQuery {
@@ -198,6 +211,7 @@ impl NativeTupleQuery {
         };
         Ok(NativeQueryStage(Arc::new(StageOwner {
             sources,
+            catalog,
             readers,
             cause: job.cause,
             library,
@@ -266,19 +280,29 @@ impl NativeQueryStage {
         let (shard, next) = read_frame_admitted::<Shard>(&catalog, offset, &|n| {
             self.0.cause.admit_io(&self.0.claim, n)
         })?;
-        if self.0.sources.is_empty() {
+        if self.0.sources.is_empty() && self.0.catalog.is_empty() {
             return Ok(Some(NativeQueryPartitionPage {
                 partition: None,
                 next,
             }));
         }
         let mut documents = Vec::new();
-        for source in &self.0.sources {
-            anyhow::ensure!(
-                shard.parts.iter().any(|part| part == &source.part),
-                "source receipt does not belong to selected partition"
-            );
-            documents.push(source.part.document.clone());
+        if self.0.sources.is_empty() {
+            for part in &self.0.catalog {
+                anyhow::ensure!(
+                    shard.parts.iter().any(|expected| expected == part),
+                    "published receipt does not belong to selected partition"
+                );
+                documents.push(part.document.clone());
+            }
+        } else {
+            for source in &self.0.sources {
+                anyhow::ensure!(
+                    shard.parts.iter().any(|part| part == &source.part),
+                    "source receipt does not belong to selected partition"
+                );
+                documents.push(source.part.document.clone());
+            }
         }
         let prefix = format!(
             "kernel/{}/{}/",
@@ -318,6 +342,7 @@ impl NativeQueryStage {
         let inner = Arc::try_unwrap(self.0).map_err(Self)?;
         let StageOwner {
             sources,
+            catalog,
             readers,
             cause,
             library,
@@ -332,6 +357,7 @@ impl NativeQueryStage {
             }),
             Err(readers) => Err(Self(Arc::new(StageOwner {
                 sources,
+                catalog,
                 readers,
                 cause,
                 library,
@@ -464,26 +490,40 @@ impl std::fmt::Debug for Originals {
         f.write_str("ActualTupleRepresentations")
     }
 }
+impl StageOwner {
+    fn representation(&self, name: &str) -> Option<(Option<usize>, &SourcePart)> {
+        if let Some(index) = self.sources.iter().position(|source| {
+            matches!(&source.part.document.content, Content::Representation { path, .. } if path == name)
+        }) {
+            return Some((Some(index), &self.sources[index].part));
+        }
+        self.catalog
+            .iter()
+            .find(|part| {
+                matches!(&part.document.content, Content::Representation { path, .. } if path == name)
+            })
+            .map(|part| (None, part))
+    }
+}
 impl ByteDirectory for Originals {
     fn check(&self) -> std::result::Result<(), KernelError> {
         self.0.check_io().map_err(|error| kernel_mapped(&error))
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
-        Ok(self.0.sources.iter().any(
-            |s| matches!(&s.part.document.content,Content::Representation{path,..}if path==name),
-        ))
+        Ok(self.0.representation(name).is_some())
     }
     fn open(&self, name: &str) -> std::result::Result<Arc<dyn ByteHandle>, KernelError> {
         self.check()?;
-        let index=self.0.sources.iter().position(|s|matches!(&s.part.document.content,Content::Representation{path,..}if path==name)).ok_or_else(kernel_error)?;
-        let part = &self.0.sources[index].part;
+        let (index, part) = self.0.representation(name).ok_or_else(kernel_error)?;
+        let tape_start = part.tape_start;
+        let tape_length = part.tape_length;
         range(
             &self.0,
             "representations.data",
-            part.tape_start,
-            Some(part.tape_length),
-            Some(index),
+            tape_start,
+            Some(tape_length),
+            index,
         )
         .map_err(|error| kernel_mapped(&error))
     }
@@ -511,9 +551,11 @@ impl NativeQueryPartition {
             "BM25 not requested by actual Query"
         );
         anyhow::ensure!(
-            self.owner.sources.iter().all(|s| s
-                .annotations()
-                .matches_required_tags(&query.required_tags, query.case_sensitive)),
+            query.required_tags.is_empty()
+                || (!self.owner.sources.is_empty()
+                    && self.owner.sources.iter().all(|s| s
+                        .annotations()
+                        .matches_required_tags(&query.required_tags, query.case_sensitive))),
             "actual current native tag dependency required"
         );
         let text = query
