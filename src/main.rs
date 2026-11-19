@@ -339,7 +339,9 @@ fn run(arguments: &Arguments) -> Result<()> {
                 }
                 output.write_all(b"\n")?;
                 output.flush()?;
-                anyhow::ensure!(!reply.is_error(), "native query refused");
+                if let Some(cause) = reply.error_cause() {
+                    bail!("native query refused: {cause:#}");
+                }
                 Ok(())
             })
         }

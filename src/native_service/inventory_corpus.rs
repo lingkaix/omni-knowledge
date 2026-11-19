@@ -1591,9 +1591,42 @@ fn kernel_error() -> KernelError {
         message: "actual native corpus owner changed".into(),
     }
 }
+fn kernel_budget() -> KernelError {
+    KernelError {
+        code: "resource-limited".into(),
+        message: "actual query read allowance exhausted".into(),
+    }
+}
+fn read_allowance_failure(error: &anyhow::Error) -> bool {
+    if error.is::<query::QueryBudgetExhausted>()
+        || error
+            .chain()
+            .any(|cause| cause.is::<query::QueryBudgetExhausted>())
+    {
+        return true;
+    }
+    error.chain().any(
+        |cause| match cause.downcast_ref::<knowledge_retrieval::Error>() {
+            Some(
+                knowledge_retrieval::Error::ReadBudget | knowledge_retrieval::Error::Reservation,
+            ) => true,
+            Some(knowledge_retrieval::Error::Kernel(kernel)) => kernel.code == "resource-limited",
+            _ => cause
+                .downcast_ref::<KernelError>()
+                .is_some_and(|kernel| kernel.code == "resource-limited"),
+        },
+    )
+}
+fn kernel_mapped(error: &anyhow::Error) -> KernelError {
+    if read_allowance_failure(error) {
+        kernel_budget()
+    } else {
+        kernel_error()
+    }
+}
 impl ByteDirectory for NativeInputs {
     fn check(&self) -> std::result::Result<(), KernelError> {
-        self.0.check().map_err(|_| kernel_error())
+        self.0.check().map_err(|error| kernel_mapped(&error))
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
@@ -1628,12 +1661,13 @@ impl ByteDirectory for NativeInputs {
         {
             Ok(processing) => processing,
             Err(cause) => {
+                let mapped = kernel_mapped(&cause);
                 self.0
                     .source_errors
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(cause);
-                return Err(kernel_error());
+                return Err(mapped);
             }
         };
         let facts = processing.source_facts();

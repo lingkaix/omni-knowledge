@@ -431,7 +431,7 @@ impl Components {
 }
 impl ByteDirectory for Components {
     fn check(&self) -> std::result::Result<(), KernelError> {
-        self.owner.check_io().map_err(|_| kernel_error())
+        self.owner.check_io().map_err(|error| kernel_mapped(&error))
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
@@ -440,7 +440,7 @@ impl ByteDirectory for Components {
             .member_exists_admitted(&self.name(name)?, || self.owner.check_io(), &|n| {
                 self.owner.cause.admit_io(&self.owner.claim, n)
             })
-            .map_err(|_| kernel_error())
+            .map_err(|error| kernel_mapped(&error))
     }
     fn open(&self, name: &str) -> std::result::Result<Arc<dyn ByteHandle>, KernelError> {
         self.check()?;
@@ -455,7 +455,7 @@ impl ByteDirectory for Components {
                 }
             });
         }
-        range(&self.owner, &self.name(name)?, 0, None, None).map_err(|_| kernel_error())
+        range(&self.owner, &self.name(name)?, 0, None, None).map_err(|error| kernel_mapped(&error))
     }
 }
 struct Originals(Arc<StageOwner>);
@@ -466,7 +466,7 @@ impl std::fmt::Debug for Originals {
 }
 impl ByteDirectory for Originals {
     fn check(&self) -> std::result::Result<(), KernelError> {
-        self.0.check_io().map_err(|_| kernel_error())
+        self.0.check_io().map_err(|error| kernel_mapped(&error))
     }
     fn exists(&self, name: &str) -> std::result::Result<bool, KernelError> {
         self.check()?;
@@ -485,7 +485,7 @@ impl ByteDirectory for Originals {
             Some(part.tape_length),
             Some(index),
         )
-        .map_err(|_| kernel_error())
+        .map_err(|error| kernel_mapped(&error))
     }
 }
 /// One exact held generation and its eligible view, not independent component CURRENT selection.

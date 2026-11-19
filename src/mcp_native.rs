@@ -44,6 +44,14 @@ use std::{
 };
 
 const MIB: u64 = 1024 * 1024;
+/// Foreground query and startup-refresh data ceilings.
+/// A finished full-wiki BM25 search admitted 352_551_706 bytes and 3_097 objects.
+/// Object examinations pass 1_000 while bytes are still under 64 MiB, and the
+/// finished search also passes 64 MiB. Both ceilings are at least twice that peak.
+/// Query millis is 180s: the same search measured about 75s and the 60s deadline stops it.
+const LEGACY_MAX_FILES: u64 = 8_192;
+const LEGACY_MAX_BYTES: u64 = 1024 * MIB;
+const LEGACY_QUERY_MAX_MILLIS: u64 = 180_000;
 // One foreground product executor; this lock grants no source or queue authority.
 static FOREGROUND: Mutex<()> = Mutex::new(());
 
@@ -525,7 +533,7 @@ impl Drop for OwnedClaim {
 
 fn startup(service: &NativeLibraryService, owner: &Owner, session: &Session) -> Result<()> {
     let request = wire::decode_request(&serde_json::to_vec(
-        &serde_json::json!({"wire_version":1,"request_id":"native-startup","command":{"op":"refresh","library_id":service.library_id(),"mount_ids":[],"verification":"full_hash","embeddings":false,"operation_id":"native-startup","budget":{"max_files":1000,"max_bytes":"67108864","max_millis":120000,"max_memory_bytes":"536870912"}}}),
+        &serde_json::json!({"wire_version":1,"request_id":"native-startup","command":{"op":"refresh","library_id":service.library_id(),"mount_ids":[],"verification":"full_hash","embeddings":false,"operation_id":"native-startup","budget":{"max_files":LEGACY_MAX_FILES,"max_bytes":LEGACY_MAX_BYTES.to_string(),"max_millis":120000,"max_memory_bytes":"536870912"}}}),
     )?)?;
     let permit = service
         .native_scope(session, &request.command, None)
@@ -546,8 +554,8 @@ fn startup(service: &NativeLibraryService, owner: &Owner, session: &Session) -> 
         &Preflight {
             holding: &scratch,
             budget: Budget {
-                max_files: 1000,
-                max_bytes: 64 * MIB,
+                max_files: LEGACY_MAX_FILES,
+                max_bytes: LEGACY_MAX_BYTES,
                 max_millis: 120000,
                 max_memory_bytes: 4 * MIB,
             },
@@ -573,8 +581,8 @@ fn startup(service: &NativeLibraryService, owner: &Owner, session: &Session) -> 
         operation_id: "native-startup",
         job_id: "native-startup",
         budget: Budget {
-            max_files: 1000,
-            max_bytes: 64 * MIB,
+            max_files: LEGACY_MAX_FILES,
+            max_bytes: LEGACY_MAX_BYTES,
             max_millis: 120000,
             max_memory_bytes: 512 * MIB,
         },
@@ -668,6 +676,13 @@ impl<'a> NativeQueryReply<'a> {
     /// Whether native execution refused, independent of JSON-RPC framing success.
     pub fn is_error(&self) -> bool {
         matches!(self.content, ReplyContent::Error { .. })
+    }
+    /// Owning refusal when this reply is an error. Search replies have none.
+    pub fn error_cause(&self) -> Option<&'a anyhow::Error> {
+        match &self.content {
+            ReplyContent::Error { cause, .. } => Some(*cause),
+            ReplyContent::Search { .. } => None,
+        }
     }
     /// Deliver a bounded preview and Query's canonical source record under the same live guards.
     pub fn write_read_mcp(
@@ -957,7 +972,7 @@ pub fn legacy_request(
     } else {
         vec![query]
     };
-    wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"foreground-query","command":{"op":"query","query":{"library_ids":host.library_ids(),"keywords":keywords,"methods":methods,"required_tags":tags,"case_sensitive":case_sensitive,"limit":limit,"image_query":null,"budget":{"max_files":1000,"max_bytes":"67108864","max_millis":60000,"max_memory_bytes":"536870912"}}}}))?).map_err(Into::into)
+    wire::decode_request(&serde_json::to_vec(&serde_json::json!({"wire_version":1,"request_id":"foreground-query","command":{"op":"query","query":{"library_ids":host.library_ids(),"keywords":keywords,"methods":methods,"required_tags":tags,"case_sensitive":case_sensitive,"limit":limit,"image_query":null,"budget":{"max_files":LEGACY_MAX_FILES,"max_bytes":LEGACY_MAX_BYTES.to_string(),"max_millis":LEGACY_QUERY_MAX_MILLIS,"max_memory_bytes":"536870912"}}}}))?).map_err(Into::into)
 }
 
 /// Fixed public error metadata; original owning failures remain with the synchronous reply.

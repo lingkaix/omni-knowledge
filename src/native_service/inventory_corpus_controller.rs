@@ -3097,10 +3097,7 @@ impl NativeTupleQuery {
         {
             return refusal.0;
         }
-        if error
-            .chain()
-            .any(|cause| cause.is::<QueryBudgetExhausted>())
-        {
+        if budget_context(error) {
             return wire::ErrorCode::BudgetExhausted;
         }
         if let Some(error) = error
@@ -3119,6 +3116,8 @@ impl NativeTupleQuery {
                         "resource-limited" => wire::ErrorCode::BudgetExhausted,
                         "cancelled" => wire::ErrorCode::Cancelled,
                         "changed" => wire::ErrorCode::Changed,
+                        // Competing-versions code. Here it only classifies the corpus-owner conflict.
+                        "conflict" => wire::ErrorCode::Conflict,
                         _ => wire::ErrorCode::Internal,
                     };
                 }
@@ -3134,6 +3133,8 @@ impl NativeTupleQuery {
                 "resource-limited" => wire::ErrorCode::BudgetExhausted,
                 "cancelled" => wire::ErrorCode::Cancelled,
                 "changed" => wire::ErrorCode::Changed,
+                // Competing-versions code. Here it only classifies the corpus-owner conflict.
+                "conflict" => wire::ErrorCode::Conflict,
                 _ => wire::ErrorCode::Internal,
             };
         }
@@ -3842,6 +3843,8 @@ enum MethodRun {
     Scan(Box<NativeScanRun>),
     Metadata(Box<NativeMetadataRun>),
     Semantic(Box<NativeWholeSemanticRun>),
+    #[cfg(test)]
+    Probe(anyhow::Error),
 }
 struct MethodRunFailure(Option<MethodRun>);
 impl std::fmt::Debug for MethodRunFailure {
@@ -3854,15 +3857,21 @@ impl std::fmt::Display for MethodRunFailure {
         f.write_str("native query method failed")
     }
 }
-impl std::error::Error for MethodRunFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl MethodRunFailure {
+    fn stored(&self) -> Option<&anyhow::Error> {
         match self.0.as_ref()? {
             MethodRun::Bm25(run) => run.failure(),
             MethodRun::Scan(run) => run.failure(),
             MethodRun::Metadata(run) => run.failure(),
             MethodRun::Semantic(run) => run.failure(),
+            #[cfg(test)]
+            MethodRun::Probe(error) => Some(error),
         }
-        .map(|error| error.as_ref())
+    }
+}
+impl std::error::Error for MethodRunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.stored().map(|error| error.as_ref())
     }
 }
 impl Drop for MethodRunFailure {
@@ -3881,9 +3890,32 @@ impl Drop for MethodRunFailure {
                 MethodRun::Semantic(run) => {
                     let _ = (*run).finish();
                 }
+                #[cfg(test)]
+                MethodRun::Probe(_) => {}
             }
         }
     }
+}
+/// A QueryBudgetExhausted anyhow context is not a std::error chain element.
+/// The production failure stores that context on the method run, under FailedMethod.
+fn budget_context(error: &anyhow::Error) -> bool {
+    if error.is::<QueryBudgetExhausted>() {
+        return true;
+    }
+    if error
+        .downcast_ref::<MethodRunFailure>()
+        .and_then(MethodRunFailure::stored)
+        .is_some_and(budget_context)
+    {
+        return true;
+    }
+    error.chain().any(|cause| {
+        cause.is::<QueryBudgetExhausted>()
+            || cause
+                .downcast_ref::<MethodRunFailure>()
+                .and_then(MethodRunFailure::stored)
+                .is_some_and(budget_context)
+    })
 }
 enum MethodJob {
     Browse,
@@ -4278,5 +4310,55 @@ fn dedup_evidence(items: &mut Vec<wire::Evidence>) {
         } else {
             at += 1;
         }
+    }
+}
+#[cfg(test)]
+mod failure_code_tests {
+    use super::*;
+
+    #[test]
+    fn budget_exhausted_context_returns_budget_wire_code() {
+        let direct = anyhow::Error::msg("reader stopped").context(QueryBudgetExhausted);
+        assert_eq!(
+            NativeTupleQuery::failure_code(&direct),
+            wire::ErrorCode::BudgetExhausted
+        );
+        let stored =
+            anyhow::Error::msg("actual native corpus owner changed").context(QueryBudgetExhausted);
+        let nested = anyhow::Error::from(MethodRunFailure(Some(MethodRun::Probe(stored))))
+            .context(FailedMethod(wire::SearchMethod::Bm25));
+        assert_eq!(
+            NativeTupleQuery::failure_code(&nested),
+            wire::ErrorCode::BudgetExhausted
+        );
+        assert_ne!(
+            NativeTupleQuery::failure_code(&nested),
+            wire::ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn kernel_conflict_maps_to_conflict_and_plain_errors_stay_internal() {
+        let conflict = anyhow::Error::new(knowledge_retrieval::KernelError {
+            code: "conflict".into(),
+            message: "actual native corpus owner changed".into(),
+        });
+        assert_eq!(
+            NativeTupleQuery::failure_code(&conflict),
+            wire::ErrorCode::Conflict
+        );
+        let limited = anyhow::Error::new(knowledge_retrieval::KernelError {
+            code: "resource-limited".into(),
+            message: "actual query read allowance exhausted".into(),
+        });
+        assert_eq!(
+            NativeTupleQuery::failure_code(&limited),
+            wire::ErrorCode::BudgetExhausted
+        );
+        let plain = anyhow::Error::msg("native corpus stopped");
+        assert_eq!(
+            NativeTupleQuery::failure_code(&plain),
+            wire::ErrorCode::Internal
+        );
     }
 }
