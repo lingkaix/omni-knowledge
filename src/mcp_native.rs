@@ -49,10 +49,8 @@ const MIB: u64 = 1024 * 1024;
 /// checkpoint are not charged, and a current published corpus is searched in place.
 const LEGACY_MAX_FILES: u64 = 1_000;
 const LEGACY_MAX_BYTES: u64 = 64 * MIB;
-/// Measured published-corpus walk: 941 members, 2 header objects, 18 inventory
-/// pages of 17 records, and 312 source frames (1561). One extra page keeps a
-/// full page from being clamped.
-const QUERY_MAX_FILES: u64 = 1_561 + 17;
+/// The byte cap and the query clock are the binding guards.
+const QUERY_MAX_FILES: u64 = 4_096;
 /// MiniZip on that corpus exhausted 64 MiB (67_108_788 bytes), 96 MiB
 /// (100_653_358 bytes), and 256 MiB (268_435_316 bytes, 1494 objects).
 /// 384 MiB finished the same walk.
